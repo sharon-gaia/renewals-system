@@ -36,6 +36,9 @@ EMAIL_CONFIG = {
 
 app = Flask(__name__)
 app.secret_key = os.environ['FLASK_SECRET_KEY']
+
+from health_check import health_bp
+app.register_blueprint(health_bp)
 CORS(app, resources={r"/api/*": {"origins": [
     "https://www.winner-ins.co.il",
     "https://winner-ins.co.il",
