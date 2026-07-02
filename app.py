@@ -46,6 +46,7 @@ CORS(app, resources={r"/api/*": {"origins": [
     "https://gaia-ins.co.il"
 ]}})
 DB_PATH = os.environ.get('DB_PATH', os.path.join(os.path.dirname(__file__), 'renewals.db'))
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)  # ודא שהתיקייה קיימת
 
 @app.template_filter('fdate')
 def format_date(value):
