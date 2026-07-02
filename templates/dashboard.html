@@ -1,0 +1,189 @@
+{% extends 'base.html' %}
+{% block title %} — דשבורד{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">
+    <i class="bi bi-bar-chart-fill text-primary me-2"></i>
+    {% if month %}{{ month['name'] }}{% else %}אין חודש פעיל{% endif %}
+  </h4>
+  <div class="d-flex flex-wrap gap-2">
+    <a href="/queue" class="btn btn-info btn-sm text-white position-relative">
+      <i class="bi bi-clipboard2-check-fill me-1"></i>תור עבודה
+      {% if stats.forms %}
+      <span class="position-absolute top-0 start-0 translate-middle badge rounded-pill bg-danger">{{ stats.forms }}</span>
+      {% endif %}
+    </a>
+    {% if session.role == 'admin' %}
+    <a href="/admin-queue" class="btn btn-warning btn-sm position-relative">
+      <i class="bi bi-exclamation-triangle-fill me-1"></i>תור אדמין
+      {% if stats.unmatched %}
+      <span class="position-absolute top-0 start-0 translate-middle badge rounded-pill bg-danger">{{ stats.unmatched }}</span>
+      {% endif %}
+    </a>
+    <a href="/admin" class="btn btn-outline-primary btn-sm"><i class="bi bi-upload me-1"></i>טעינת חודש חדש</a>
+    <div class="dropdown">
+      <button class="btn btn-success btn-sm dropdown-toggle" data-bs-toggle="dropdown">
+        <i class="bi bi-whatsapp me-1"></i>ייצוא לWASender
+      </button>
+      <ul class="dropdown-menu">
+        <li><h6 class="dropdown-header">📤 שליחה ראשונה (כולם)</h6></li>
+        <li><a class="dropdown-item" href="/export/wasender?mode=first&mark_sent=1">כל המותגים — ייצוא + סימון נשלח</a></li>
+        <li><a class="dropdown-item" href="/export/wasender?mode=first&brand=גאיה&mark_sent=1">גאיה בלבד + סימון</a></li>
+        <li><a class="dropdown-item" href="/export/wasender?mode=first&brand=ווינר&mark_sent=1">ווינר/אופיר בלבד + סימון</a></li>
+        <li><hr class="dropdown-divider"></li>
+        <li><h6 class="dropdown-header">🔁 תזכורת (מי שלא חידש)</h6></li>
+        <li><a class="dropdown-item" href="/export/wasender?mode=reminder&mark_sent=0">כל המותגים — ייצוא בלבד</a></li>
+        <li><a class="dropdown-item" href="/export/wasender?mode=reminder&brand=גאיה&mark_sent=0">גאיה בלבד</a></li>
+        <li><a class="dropdown-item" href="/export/wasender?mode=reminder&brand=ווינר&mark_sent=0">ווינר/אופיר בלבד</a></li>
+      </ul>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{% if not month %}
+<div class="alert alert-warning">
+  <i class="bi bi-exclamation-triangle me-2"></i>
+  אין נתונים. {% if session.role == 'admin' %}עבור ל<a href="/admin">ניהול</a> וטען קובץ Excel.{% else %}פנה למנהל לטעינת נתוני החודש.{% endif %}
+</div>
+{% else %}
+
+<!-- סיכום ראשי -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card text-center border-0 shadow-sm">
+      <div class="card-body">
+        <div class="stat-number text-primary">{{ stats.total }}</div>
+        <div class="stat-label">סה"כ לטיפול</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center border-0 shadow-sm">
+      <div class="card-body">
+        <div class="stat-number text-success">{{ stats.renewed }}</div>
+        <div class="stat-label">חידשו ✓</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="card text-center border-0 shadow-sm">
+      <div class="card-body">
+        <div class="stat-number text-warning">{{ stats.seen }}</div>
+        <div class="stat-label">ראו / תגובה</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <a href="/customers?status=טופס+התקבל" class="text-decoration-none">
+    <div class="card text-center border-0 shadow-sm {% if stats.forms %}border-info{% endif %}">
+      <div class="card-body">
+        <div class="stat-number text-info">{{ stats.forms }}</div>
+        <div class="stat-label">📋 טפסים התקבלו</div>
+      </div>
+    </div>
+    </a>
+  </div>
+</div>
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-6">
+    <div class="card text-center border-0 shadow-sm">
+      <div class="card-body">
+        <div class="stat-number text-danger">{{ stats.no_renew }}</div>
+        <div class="stat-label">לא רוצים לחדש</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-6">
+    <div class="card text-center border-0 shadow-sm">
+      <div class="card-body">
+        <div class="stat-number text-secondary">{{ stats.pending }}</div>
+        <div class="stat-label">ממתינים לטיפול</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- אחוז חידוש -->
+<div class="card border-0 shadow-sm mb-4">
+  <div class="card-body">
+    <div class="d-flex justify-content-between mb-1">
+      <span class="fw-bold">אחוז חידוש</span>
+      <span class="fw-bold text-primary">{{ stats.pct }}%</span>
+    </div>
+    <div class="progress" style="height:20px">
+      <div class="progress-bar bg-success" style="width:{{ stats.pct }}%">{{ stats.pct }}%</div>
+    </div>
+  </div>
+</div>
+
+<!-- גאיה / ווינר -->
+<div class="row g-3 mb-4">
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-info text-white fw-bold">גאיה</div>
+      <div class="card-body d-flex justify-content-around text-center">
+        <div>
+          <div class="fs-4 fw-bold">{{ stats.gaia }}</div>
+          <small class="text-muted">סה"כ</small>
+        </div>
+        <div>
+          <div class="fs-4 fw-bold text-success">{{ stats.gaia_renewed }}</div>
+          <small class="text-muted">חידשו</small>
+        </div>
+        <div>
+          <div class="fs-4 fw-bold text-danger">{{ stats.gaia - stats.gaia_renewed }}</div>
+          <small class="text-muted">ממתינים</small>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-purple text-white fw-bold">ווינר / אופיר</div>
+      <div class="card-body d-flex justify-content-around text-center">
+        <div>
+          <div class="fs-4 fw-bold">{{ stats.winner }}</div>
+          <small class="text-muted">סה"כ</small>
+        </div>
+        <div>
+          <div class="fs-4 fw-bold text-success">{{ stats.winner_renewed }}</div>
+          <small class="text-muted">חידשו</small>
+        </div>
+        <div>
+          <div class="fs-4 fw-bold text-danger">{{ stats.winner - stats.winner_renewed }}</div>
+          <small class="text-muted">ממתינים</small>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- קיצורי דרך -->
+<div class="row g-2">
+  <div class="col-6 col-md-3">
+    <a href="/customers?status=__empty__" class="btn btn-outline-secondary w-100">
+      <i class="bi bi-clock me-1"></i>ממתינים לטיפול
+      <span class="badge bg-secondary ms-1">{{ stats.pending }}</span>
+    </a>
+  </div>
+  <div class="col-6 col-md-3">
+    <a href="/customers?status=לקוח+ענה%2F+V+כחול" class="btn btn-outline-warning w-100">
+      <i class="bi bi-eye me-1"></i>ראו הודעה
+      <span class="badge bg-warning text-dark ms-1">{{ stats.seen }}</span>
+    </a>
+  </div>
+  <div class="col-6 col-md-3">
+    <a href="/customers?brand=גאיה" class="btn btn-outline-info w-100">
+      <i class="bi bi-filter me-1"></i>גאיה בלבד
+    </a>
+  </div>
+  <div class="col-6 col-md-3">
+    <a href="/customers?brand=ווינר" class="btn btn-outline-primary w-100">
+      <i class="bi bi-filter me-1"></i>ווינר בלבד
+    </a>
+  </div>
+</div>
+
+{% endif %}
+{% endblock %}

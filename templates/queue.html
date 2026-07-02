@@ -1,0 +1,183 @@
+{% extends 'base.html' %}
+{% block title %} — תור עבודה{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">
+    <i class="bi bi-clipboard2-check-fill text-info me-2"></i>
+    תור עבודה — טפסי חידוש שהתקבלו
+    <span class="badge bg-info ms-2">{{ customers|length }}</span>
+  </h4>
+  <a href="/" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-house me-1"></i>דשבורד
+  </a>
+</div>
+
+{% if not customers %}
+<div class="alert alert-success text-center py-5">
+  <i class="bi bi-check-circle-fill fs-1 text-success d-block mb-2"></i>
+  <strong>אין טפסים ממתינים לטיפול</strong><br>
+  <small class="text-muted">כל הטפסים שהתקבלו טופלו</small>
+</div>
+{% else %}
+
+<div class="row g-3">
+{% for c in customers %}
+<div class="col-12">
+  <div class="card border-0 shadow-sm border-start border-info border-4">
+    <div class="card-body">
+      <div class="row align-items-start g-3">
+
+        <!-- פרטי לקוח -->
+        <div class="col-md-3">
+          <div class="fw-bold fs-6">{{ c.name }}</div>
+          <div class="text-muted small mb-1">
+            <span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand }}</span>
+          </div>
+          <div class="small">
+            <i class="bi bi-whatsapp text-success me-1"></i>
+            <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank">
+              {{ c.phone }}
+            </a>
+          </div>
+          {% if c.id_number %}
+          <div class="small text-muted">ת.ז: {{ c.id_number }}</div>
+          {% endif %}
+          {% if c.policy_number %}
+          <div class="small text-muted">פוליסה: {{ c.policy_number }}</div>
+          {% endif %}
+        </div>
+
+        <!-- פרטי טופס -->
+        <div class="col-md-6">
+          <div class="row g-2">
+            {% if c.form_received_at %}
+            <div class="col-12">
+              <span class="badge bg-secondary">התקבל: {{ c.form_received_at }}</span>
+            </div>
+            {% endif %}
+            {% if c.form_email %}
+            <div class="col-md-6">
+              <div class="text-muted" style="font-size:0.75rem;">מייל</div>
+              <div class="small">{{ c.form_email }}</div>
+            </div>
+            {% endif %}
+            {% if c.form_installments %}
+            <div class="col-md-3">
+              <div class="text-muted" style="font-size:0.75rem;">תשלומים</div>
+              <div class="fw-bold">{{ c.form_installments }}</div>
+            </div>
+            {% endif %}
+            {% if c.form_payment_method %}
+            <div class="col-md-3">
+              <div class="text-muted" style="font-size:0.75rem;">גבייה</div>
+              <div class="small">{{ c.form_payment_method }}</div>
+            </div>
+            {% endif %}
+            {% if c.form_coverage %}
+            <div class="col-md-6">
+              <div class="text-muted" style="font-size:0.75rem;">כיסוי מבוקש</div>
+              <div class="small">{{ c.form_coverage }}</div>
+            </div>
+            {% endif %}
+            {% if c.form_comments %}
+            <div class="col-12">
+              <div class="text-muted" style="font-size:0.75rem;">הערות לקוח</div>
+              <div class="alert alert-warning py-1 px-2 mb-0 small">{{ c.form_comments }}</div>
+            </div>
+            {% endif %}
+            {% if c.form_card_number %}
+            <div class="col-12">
+              <div class="text-muted" style="font-size:0.75rem;">כרטיס אשראי</div>
+              <div class="small fw-bold">
+                <i class="bi bi-credit-card me-1"></i>
+                {{ c.form_card_number }} | תוקף: {{ c.form_card_expiry }}
+                {% if c.form_id_card_holder %} | ת.ז בעל הכרטיס: {{ c.form_id_card_holder }}{% endif %}
+              </div>
+            </div>
+            {% endif %}
+            {% if attachments.get(c.id) %}
+            <div class="col-12">
+              <div class="text-muted" style="font-size:0.75rem;">קבצים מצורפים</div>
+              <div class="d-flex flex-wrap gap-1">
+              {% for att in attachments[c.id] %}
+                <a href="/attachment/{{ att.id }}" class="btn btn-outline-secondary btn-sm" target="_blank">
+                  <i class="bi bi-file-earmark-pdf text-danger me-1"></i>{{ att.filename }}
+                </a>
+              {% endfor %}
+              </div>
+            </div>
+            {% endif %}
+          </div>
+        </div>
+
+        <!-- פעולות -->
+        <div class="col-md-3 d-flex flex-column gap-2 align-items-start">
+          <button class="btn btn-success btn-sm w-100"
+                  onclick="markRenewed({{ c.id }}, this)">
+            <i class="bi bi-check-circle-fill me-1"></i>בוצע חידוש → "חודש"
+          </button>
+          <a href="/customer/{{ c.id }}" class="btn btn-outline-primary btn-sm w-100">
+            <i class="bi bi-pencil me-1"></i>פתח כרטיס לקוח
+          </a>
+          <button class="btn btn-outline-warning btn-sm w-100"
+                  onclick="sendToClarify({{ c.id }}, this)">
+            <i class="bi bi-exclamation-triangle me-1"></i>דורש בירור → אדמין
+          </button>
+          {% if c.handled_by %}
+          <div class="text-muted small text-center mt-1">
+            <i class="bi bi-person-fill me-1"></i>{{ c.handled_by }}
+          </div>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+{% endfor %}
+</div>
+
+{% endif %}
+{% endblock %}
+{% block scripts %}
+<script>
+function markRenewed(id, btn) {
+  if (!confirm('לסמן כ"חודש"?')) return;
+  btn.disabled = true;
+  fetch(`/customer/${id}/update`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status: 'חודש'})
+  }).then(() => {
+    btn.closest('.col-12').style.opacity = '0.4';
+    setTimeout(() => btn.closest('.col-12').remove(), 600);
+  });
+}
+
+function markStatus(id, status, btn) {
+  btn.disabled = true;
+  fetch(`/customer/${id}/update`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status: status})
+  }).then(() => {
+    btn.closest('.col-12').style.opacity = '0.4';
+    setTimeout(() => btn.closest('.col-12').remove(), 600);
+  });
+}
+
+function sendToClarify(id, btn) {
+  const note = prompt('הערה לאדמין (אופציונלי):') ?? '';
+  btn.disabled = true;
+  fetch(`/customer/${id}/clarify`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({note: note})
+  }).then(() => {
+    btn.closest('.col-12').style.opacity = '0.4';
+    setTimeout(() => btn.closest('.col-12').remove(), 600);
+  });
+}
+</script>
+{% endblock %}

@@ -1,0 +1,168 @@
+{% extends 'base.html' %}
+{% block title %} — לקוחות{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h5 class="mb-0"><i class="bi bi-people-fill text-primary me-2"></i>לקוחות — {{ month['name'] }}</h5>
+  <div class="d-flex align-items-center gap-2">
+    {% if brand_filter or status_filter or search %}
+    <span class="text-muted small">מסונן</span>
+    {% endif %}
+    <span class="badge bg-secondary fs-6">{{ customers|length }} רשומות</span>
+    {% if session.role == 'admin' %}
+    <a href="/export/customers-excel" class="btn btn-success btn-sm">
+      <i class="bi bi-file-earmark-excel me-1"></i>ייצוא Excel
+    </a>
+    {% endif %}
+  </div>
+</div>
+
+<!-- פילטרים -->
+<form method="GET" class="row g-2 mb-3">
+  <div class="col-6 col-md-3">
+    <input type="text" name="q" class="form-control" placeholder="חיפוש שם / טלפון / פוליסה" value="{{ search }}">
+  </div>
+  <div class="col-6 col-md-2">
+    <select name="brand" class="form-select">
+      <option value="">כל המותגים</option>
+      <option value="גאיה" {% if brand_filter=='גאיה' %}selected{% endif %}>גאיה</option>
+      <option value="ווינר" {% if brand_filter=='ווינר' %}selected{% endif %}>ווינר / אופיר</option>
+    </select>
+  </div>
+  <div class="col-6 col-md-3">
+    <select name="status" class="form-select">
+      <option value="">כל הסטטוסים</option>
+      <option value="__empty__" {% if status_filter=='__empty__' %}selected{% endif %}>ממתין לטיפול</option>
+      <option value="טופס התקבל" {% if status_filter=='טופס התקבל' %}selected{% endif %}>📋 טופס התקבל</option>
+      <option value="חודש" {% if status_filter=='חודש' %}selected{% endif %}>חודש ✓</option>
+      <option value="לקוח ענה/ V כחול" {% if status_filter=='לקוח ענה/ V כחול' %}selected{% endif %}>תגובה / וי כחול</option>
+      <option value="לא רוצים לחדש" {% if status_filter=='לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
+    </select>
+  </div>
+  <div class="col-6 col-md-2">
+    <button type="submit" class="btn btn-primary w-100"><i class="bi bi-search me-1"></i>סנן</button>
+  </div>
+  <div class="col-6 col-md-2">
+    <a href="/customers" class="btn btn-outline-secondary w-100">נקה</a>
+  </div>
+</form>
+
+<!-- טבלה -->
+<div style="overflow-x:auto; margin-top:8px;">
+<table class="table table-hover table-sm align-middle mb-0" style="border-collapse:separate; border-spacing:0;">
+  <thead>
+    <tr style="background:#1a1a2e; color:#fff;">
+      <th class="px-3 py-2">שם</th>
+      <th class="px-3 py-2 d-none d-sm-table-cell">טלפון</th>
+      <th class="px-3 py-2 d-none d-md-table-cell">מותג</th>
+      <th class="px-3 py-2" style="min-width:150px">סטטוס</th>
+      <th class="px-3 py-2 d-none d-lg-table-cell">וואטסאפ נשלח</th>
+      <th class="px-3 py-2 d-none d-lg-table-cell" style="min-width:180px">הערות נציג</th>
+      <th class="px-3 py-2 d-none d-xl-table-cell">תאריך התקשרות</th>
+      {% if session.role == 'admin' %}<th class="px-3 py-2 d-none d-xl-table-cell" style="min-width:180px">הערות שרון</th>{% endif %}
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in customers %}
+  <tr class="customer-row {% if c.status == 'חודש' %}table-success{% elif c.status == 'לא רוצים לחדש' %}table-danger{% elif c.status == 'לקוח ענה/ V כחול' %}table-warning{% elif c.status == 'טופס התקבל' %}table-info{% endif %}"
+      data-id="{{ c.id }}">
+    <td class="px-3 py-2" style="min-width:130px">
+      <a href="/customer/{{ c.id }}" class="text-decoration-none text-dark d-flex align-items-center gap-2">
+        {% if c.is_vip %}<i class="bi bi-star-fill text-warning" style="font-size:0.9rem; flex-shrink:0"></i>{% endif %}
+        <div>
+          <div class="fw-semibold">{{ c.name }}</div>
+          <small class="text-muted">{{ c.policy_number }}</small>
+        </div>
+        <i class="bi bi-pencil-square text-secondary" style="font-size:0.85rem; flex-shrink:0"></i>
+      </a>
+    </td>
+    <td class="px-3 d-none d-sm-table-cell">
+      <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank" class="text-decoration-none">
+        <i class="bi bi-whatsapp text-success me-1"></i>{{ c.phone }}
+      </a>
+    </td>
+    <td class="px-3 d-none d-md-table-cell">
+      <span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand }}</span>
+    </td>
+    <td class="px-3">
+      <select class="form-select form-select-sm status-select" data-id="{{ c.id }}">
+        <option value="" {% if not c.status %}selected{% endif %}>ממתין</option>
+        <option value="טופס התקבל" {% if c.status == 'טופס התקבל' %}selected{% endif %}>📋 טופס התקבל</option>
+        <option value="חודש" {% if c.status == 'חודש' %}selected{% endif %}>חודש ✓</option>
+        <option value="לקוח ענה/ V כחול" {% if c.status == 'לקוח ענה/ V כחול' %}selected{% endif %}>תגובה / וי כחול</option>
+        <option value="לא רוצים לחדש" {% if c.status == 'לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
+      </select>
+      {% if c.status == 'טופס התקבל' and (c.form_email or c.form_installments or c.form_payment_method) %}
+      <div class="mt-1 p-1 rounded small" style="background:#cff4fc; font-size:0.78rem; line-height:1.5;">
+        {% if c.form_received_at %}<div><strong>התקבל:</strong> {{ c.form_received_at }}</div>{% endif %}
+        {% if c.form_email %}<div><strong>מייל:</strong> {{ c.form_email }}</div>{% endif %}
+        {% if c.form_installments %}<div><strong>תשלומים:</strong> {{ c.form_installments }}</div>{% endif %}
+        {% if c.form_payment_method %}<div><strong>גבייה:</strong> {{ c.form_payment_method }}</div>{% endif %}
+        {% if c.form_coverage %}<div><strong>כיסוי:</strong> {{ c.form_coverage }}</div>{% endif %}
+        {% if c.form_comments %}<div><strong>הערות:</strong> {{ c.form_comments }}</div>{% endif %}
+      </div>
+      {% endif %}
+    </td>
+    <td class="px-3 d-none d-lg-table-cell">
+      <small>{{ c.whatsapp_sent_date | fdate }}</small>
+    </td>
+    <td class="px-3 d-none d-lg-table-cell">
+      <input type="text" class="form-control form-control-sm notes-input"
+             data-id="{{ c.id }}" data-field="agent_notes"
+             value="{{ c.agent_notes or '' }}" placeholder="הוסף הערה...">
+    </td>
+    <td class="px-3 d-none d-xl-table-cell">
+      <input type="date" class="form-control form-control-sm notes-input"
+             data-id="{{ c.id }}" data-field="contact_date"
+             value="{{ c.contact_date or '' }}">
+    </td>
+    {% if session.role == 'admin' %}
+    <td class="px-3 d-none d-xl-table-cell">
+      <input type="text" class="form-control form-control-sm notes-input"
+             data-id="{{ c.id }}" data-field="sharon_notes"
+             value="{{ c.sharon_notes or '' }}" placeholder="הערות שרון...">
+    </td>
+    {% endif %}
+  </tr>
+  {% else %}
+  <tr><td colspan="9" class="text-center text-muted py-4">אין תוצאות</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+// Status change → save immediately
+document.querySelectorAll('.status-select').forEach(sel => {
+  sel.addEventListener('change', () => {
+    saveField(sel.dataset.id, 'status', sel.value);
+    const row = sel.closest('tr');
+    row.className = 'customer-row ' + statusClass(sel.value);
+  });
+});
+
+function statusClass(s) {
+  if (s === 'חודש') return 'table-success';
+  if (s === 'לא רוצים לחדש') return 'table-danger';
+  if (s === 'לקוח ענה/ V כחול') return 'table-warning';
+  if (s === 'טופס התקבל') return 'table-info';
+  return '';
+}
+
+// Notes → save on blur
+document.querySelectorAll('.notes-input').forEach(inp => {
+  inp.addEventListener('blur', () => saveField(inp.dataset.id, inp.dataset.field, inp.value));
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); });
+});
+
+function saveField(id, field, value) {
+  fetch(`/customer/${id}/update`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({[field]: value})
+  });
+}
+</script>
+{% endblock %}

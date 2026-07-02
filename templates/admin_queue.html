@@ -1,0 +1,122 @@
+{% extends 'base.html' %}
+{% block title %} — תור אדמין{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">
+    <i class="bi bi-exclamation-triangle-fill text-warning me-2"></i>
+    תור אדמין — טפסים שדורשים בירור
+    <span class="badge bg-warning text-dark ms-2">{{ items|length }}</span>
+  </h4>
+  <div class="d-flex gap-2">
+    <a href="/queue" class="btn btn-outline-info btn-sm">תור עבודה</a>
+    <a href="/" class="btn btn-outline-secondary btn-sm">דשבורד</a>
+  </div>
+</div>
+
+{% if not items %}
+<div class="alert alert-success text-center py-5">
+  <i class="bi bi-check-circle-fill fs-1 text-success d-block mb-2"></i>
+  <strong>אין פריטים ממתינים לבירור</strong>
+</div>
+{% else %}
+<div class="row g-3">
+{% for item in items %}
+<div class="col-12" id="item-{{ item.id }}">
+  <div class="card border-0 shadow-sm border-start border-warning border-4">
+    <div class="card-body">
+      <div class="row g-3">
+
+        <!-- פרטי הטופס -->
+        <div class="col-md-5">
+          <div class="d-flex align-items-center gap-2 mb-2">
+            <span class="badge bg-secondary small">{{ item.received_at }}</span>
+            <span class="small text-muted">{{ item.subject }}</span>
+            {% if item.handled_by %}
+            <span class="badge bg-info text-dark small">
+              <i class="bi bi-person-fill me-1"></i>{{ item.handled_by }}
+            </span>
+            {% endif %}
+          </div>
+          <div class="fw-bold fs-6">{{ item.name or '(ללא שם)' }}</div>
+          {% if item.id_number %}<div class="small text-muted">ת.ז: {{ item.id_number }}</div>{% endif %}
+          {% if item.phone %}<div class="small"><i class="bi bi-telephone me-1"></i>{{ item.phone }}</div>{% endif %}
+          {% if item.email %}<div class="small"><i class="bi bi-envelope me-1"></i>{{ item.email }}</div>{% endif %}
+          {% if item.brand %}
+          <span class="badge {{ 'bg-info' if item.brand == 'גאיה' else 'bg-purple' }} mt-1">{{ item.brand }}</span>
+          {% endif %}
+          {% if item.installments or item.payment_method %}
+          <div class="small mt-1">תשלומים: {{ item.installments }} | גבייה: {{ item.payment_method }}</div>
+          {% endif %}
+          {% if item.card_number %}
+          <div class="small fw-bold mt-1"><i class="bi bi-credit-card me-1"></i>{{ item.card_number }} | {{ item.card_expiry }}</div>
+          {% endif %}
+          {% if item.comments %}
+          <div class="alert alert-warning py-1 px-2 mt-2 small">{{ item.comments }}</div>
+          {% endif %}
+        </div>
+
+        <!-- פעולות -->
+        <div class="col-md-7">
+
+          {% if item.message_id and item.message_id.startswith('queue-cid-') %}
+          {# פריט שהגיע מ"דורש בירור" — יש לקוח מקושר #}
+          <div class="fw-semibold small mb-2 text-warning">
+            <i class="bi bi-person-exclamation me-1"></i>לקוח קיים — עדכן סטטוס סופי:
+          </div>
+          <form method="POST" action="/admin-queue/{{ item.id }}/action" class="mb-2">
+            <input type="hidden" name="action" value="resolve">
+            <div class="row g-2 align-items-end">
+              <div class="col-md-5">
+                <select name="new_status" class="form-select form-select-sm">
+                  <option value="">בחר סטטוס...</option>
+                  <option value="חודש">✓ חודש</option>
+                  <option value="לא רוצים לחדש">✗ לא רוצים לחדש</option>
+                  <option value="לקוח ענה/ V כחול">לקוח ענה / V כחול</option>
+                </select>
+              </div>
+              <div class="col-md-4">
+                <input type="text" name="admin_note" class="form-control form-control-sm"
+                       placeholder="הערה (אופציונלי)">
+              </div>
+              <div class="col-md-3">
+                <button type="submit" class="btn btn-success btn-sm w-100">
+                  <i class="bi bi-check-lg me-1"></i>עדכן וסגור
+                </button>
+              </div>
+            </div>
+          </form>
+          {% else %}
+          {# פריט לא מזוהה — שיוך ידני #}
+          <div class="fw-semibold small mb-2">שיוך ללקוח קיים</div>
+          <form method="POST" action="/admin-queue/{{ item.id }}/action" class="mb-2">
+            <input type="hidden" name="action" value="link">
+            <div class="input-group input-group-sm">
+              <input type="text" name="customer_id" class="form-control"
+                     placeholder="ID לקוח (מספר פנימי)">
+              <button type="submit" class="btn btn-primary btn-sm">שייך</button>
+            </div>
+          </form>
+          {% endif %}
+
+          <form method="POST" action="/admin-queue/{{ item.id }}/action">
+            <input type="hidden" name="action" value="dismiss">
+            <div class="d-flex gap-2">
+              <input type="text" name="admin_note" class="form-control form-control-sm"
+                     placeholder="הערה לסגירה (אופציונלי)">
+              <button type="submit" class="btn btn-outline-secondary btn-sm text-nowrap"
+                      onclick="return confirm('לסגור פריט זה?')">
+                <i class="bi bi-x-circle me-1"></i>סגור
+              </button>
+            </div>
+          </form>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+{% endfor %}
+</div>
+{% endif %}
+{% endblock %}

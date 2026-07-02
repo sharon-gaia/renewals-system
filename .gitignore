@@ -1,0 +1,8 @@
+.env
+renewals.db
+attachments/
+__pycache__/
+*.pyc
+cloudflared.exe
+current_tunnel.txt
+.claude/

@@ -1,0 +1,53 @@
+body {
+  background-color: #f4f6f9;
+  font-family: 'Segoe UI', Arial, sans-serif;
+}
+
+.stat-number {
+  font-size: 2.2rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.stat-label {
+  font-size: 0.85rem;
+  color: #6c757d;
+  margin-top: 2px;
+}
+
+.bg-purple {
+  background-color: #6f42c1 !important;
+}
+
+.card {
+  border-radius: 10px;
+}
+
+.navbar-brand {
+  font-size: 1.1rem;
+}
+
+.table th {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.sticky-top {
+  top: 58px;
+  z-index: 100;
+}
+
+.notes-input {
+  border: 1px solid transparent;
+  background: transparent;
+  transition: border 0.15s;
+}
+.notes-input:hover, .notes-input:focus {
+  border-color: #dee2e6;
+  background: #fff;
+}
+
+@media (max-width: 768px) {
+  .stat-number { font-size: 1.6rem; }
+  .table { font-size: 0.85rem; }
+}

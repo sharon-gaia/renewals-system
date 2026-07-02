@@ -1,0 +1,214 @@
+{% extends 'base.html' %}
+{% block title %} — {{ c.name }}{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h5 class="mb-0"><i class="bi bi-person-fill text-primary me-2"></i>{{ c.name }}</h5>
+  <div class="d-flex gap-2 align-items-center">
+    <button id="vip-btn" onclick="toggleVip()"
+            class="btn btn-sm {% if c.is_vip %}btn-warning{% else %}btn-outline-secondary{% endif %}"
+            title="{% if c.is_vip %}לקוח VIP — לחץ להסרה{% else %}סמן כ-VIP{% endif %}">
+      <i class="bi bi-star{% if c.is_vip %}-fill{% endif %}"></i>
+      {% if c.is_vip %} VIP{% endif %}
+    </button>
+    <a href="/customers" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-right me-1"></i>חזרה לרשימה</a>
+    {% if session.role == 'admin' %}
+    <form method="POST" action="/customer/{{ c.id }}/delete"
+          onsubmit="return confirm('למחוק את {{ c.name }} לצמיתות?')">
+      <button type="submit" class="btn btn-outline-danger btn-sm">
+        <i class="bi bi-trash me-1"></i>מחק לקוח
+      </button>
+    </form>
+    {% endif %}
+  </div>
+</div>
+
+<div class="row g-3">
+  <!-- פרטי לקוח -->
+  <div class="col-md-4">
+    <div class="card border-0 shadow-sm h-100">
+      <div class="card-header bg-light fw-bold">פרטים</div>
+      <div class="card-body">
+        <table class="table table-sm table-borderless mb-0">
+          <tr><th>פוליסה</th><td>{{ c.policy_number or '—' }}</td></tr>
+          <tr><th>ת.ז</th><td>{{ c.id_number or '—' }}</td></tr>
+          <tr><th>טלפון</th>
+            <td>
+              <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank">
+                <i class="bi bi-whatsapp text-success me-1"></i>{{ c.phone or '—' }}
+              </a>
+            </td>
+          </tr>
+          <tr><th>מותג</th>
+            <td><span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand or '—' }}</span></td>
+          </tr>
+          <tr><th>פרמיה שנה שעברה</th><td>{{ c.premium_last_year or '—' }}</td></tr>
+          <tr><th>מתעניין במוצרים נוספים</th><td>{{ c.interested_in_products or '—' }}</td></tr>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  {% if c.status == 'טופס התקבל' %}
+  <!-- פרטי טופס שהתקבל -->
+  <div class="col-12">
+    <div class="card border-0 shadow-sm border-start border-info border-4">
+      <div class="card-header fw-bold" style="background:#cff4fc;">
+        <i class="bi bi-envelope-check-fill text-info me-2"></i>
+        טופס חידוש התקבל — {{ c.form_received_at or '' }}
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          {% if c.form_email %}
+          <div class="col-md-4">
+            <div class="fw-semibold text-muted small mb-1">מייל לקוח</div>
+            <div>{{ c.form_email }}</div>
+          </div>
+          {% endif %}
+          {% if c.form_installments %}
+          <div class="col-md-2">
+            <div class="fw-semibold text-muted small mb-1">מספר תשלומים</div>
+            <div class="fs-5 fw-bold">{{ c.form_installments }}</div>
+          </div>
+          {% endif %}
+          {% if c.form_payment_method %}
+          <div class="col-md-3">
+            <div class="fw-semibold text-muted small mb-1">אמצעי גבייה</div>
+            <div>{{ c.form_payment_method }}</div>
+          </div>
+          {% endif %}
+          {% if c.form_coverage %}
+          <div class="col-md-3">
+            <div class="fw-semibold text-muted small mb-1">כיסוי מבוקש</div>
+            <div>{{ c.form_coverage }}</div>
+          </div>
+          {% endif %}
+          {% if c.form_comments %}
+          <div class="col-12">
+            <div class="fw-semibold text-muted small mb-1">הערות לקוח</div>
+            <div class="alert alert-info mb-0 py-2">{{ c.form_comments }}</div>
+          </div>
+          {% endif %}
+        </div>
+        <div class="mt-3">
+          <button onclick="markRenewed()" class="btn btn-success">
+            <i class="bi bi-check-circle-fill me-1"></i>בוצע חידוש — העבר לסטטוס "חודש"
+          </button>
+          <a href="/queue" class="btn btn-outline-secondary me-2">
+            <i class="bi bi-arrow-right me-1"></i>חזרה לתור עבודה
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- עדכון סטטוס -->
+  <div class="col-md-8">
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-light fw-bold">סטטוס וטיפול</div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-6">
+            <label class="form-label fw-semibold">סטטוס</label>
+            <select id="det-status" class="form-select">
+              <option value="" {% if not c.status %}selected{% endif %}>ממתין לטיפול</option>
+              <option value="טופס התקבל" {% if c.status == 'טופס התקבל' %}selected{% endif %}>📋 טופס התקבל</option>
+              <option value="חודש" {% if c.status == 'חודש' %}selected{% endif %}>חודש ✓</option>
+              <option value="לקוח ענה/ V כחול" {% if c.status == 'לקוח ענה/ V כחול' %}selected{% endif %}>תגובה / וי כחול</option>
+              <option value="לא רוצים לחדש" {% if c.status == 'לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-semibold">תאריך התקשרות</label>
+            <input type="date" id="det-contact" class="form-control" value="{{ c.contact_date or '' }}">
+          </div>
+          <div class="col-md-6">
+            <label class="form-label fw-semibold">וואטסאפ נשלח בתאריך</label>
+            <input type="date" id="det-wa" class="form-control" value="{{ c.whatsapp_sent_date or '' }}"
+                   {% if session.role != 'admin' %}readonly{% endif %}>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- הערות נציג -->
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-light fw-bold">הערות נציג</div>
+      <div class="card-body">
+        <textarea id="det-agent-notes" class="form-control" rows="3" placeholder="הוסף הערה...">{{ c.agent_notes or '' }}</textarea>
+      </div>
+    </div>
+
+    {% if session.role == 'admin' %}
+    <!-- הערות שרון -->
+    <div class="card border-0 shadow-sm mb-3 border-warning">
+      <div class="card-header bg-warning fw-bold">הערות שרון (מנהל בלבד)</div>
+      <div class="card-body">
+        <textarea id="det-sharon-notes" class="form-control mb-2" rows="2" placeholder="הערות שרון...">{{ c.sharon_notes or '' }}</textarea>
+        <label class="form-label fw-semibold">בקשות משרון</label>
+        <input type="text" id="det-requests" class="form-control" value="{{ c.requests_to_sharon or '' }}" placeholder="בקשות...">
+      </div>
+    </div>
+    {% else %}
+    <!-- נציג רואה בקשות משרון בקריאה בלבד -->
+    {% if c.requests_to_sharon %}
+    <div class="alert alert-warning">
+      <strong><i class="bi bi-bell-fill me-1"></i>בקשה משרון:</strong> {{ c.requests_to_sharon }}
+    </div>
+    {% endif %}
+    {% endif %}
+
+    <button id="save-btn" class="btn btn-primary px-4">
+      <i class="bi bi-check-circle me-1"></i>שמור שינויים
+    </button>
+    <span id="save-msg" class="text-success ms-2 d-none">נשמר ✓</span>
+  </div>
+</div>
+
+{% endblock %}
+{% block scripts %}
+<script>
+document.getElementById('save-btn').addEventListener('click', () => {
+  const data = {
+    status: document.getElementById('det-status').value,
+    contact_date: document.getElementById('det-contact').value,
+    whatsapp_sent_date: document.getElementById('det-wa').value,
+    agent_notes: document.getElementById('det-agent-notes').value,
+  };
+  {% if session.role == 'admin' %}
+  data.sharon_notes = document.getElementById('det-sharon-notes').value;
+  data.requests_to_sharon = document.getElementById('det-requests').value;
+  {% endif %}
+
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  }).then(() => {
+    const msg = document.getElementById('save-msg');
+    msg.classList.remove('d-none');
+    setTimeout(() => msg.classList.add('d-none'), 2000);
+  });
+});
+
+function toggleVip() {
+  const btn = document.getElementById('vip-btn');
+  const isVip = btn.classList.contains('btn-warning') ? 0 : 1;
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({is_vip: isVip})
+  }).then(() => window.location.reload());
+}
+
+function markRenewed() {
+  if (!confirm('לסמן כ"חודש"?')) return;
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({status: 'חודש'})
+  }).then(() => window.location.href = '/queue');
+}
+</script>
+{% endblock %}

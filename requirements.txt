@@ -1,0 +1,6 @@
+flask
+flask-cors
+werkzeug
+openpyxl
+python-dotenv
+gunicorn
