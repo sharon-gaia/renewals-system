@@ -949,7 +949,8 @@ def process_renewal_data(data, message_id='', subject='', received_at=''):
         print(f'[email-sync] לא זוהה: {name} → תור אדמין')
         return None
 
-ATTACHMENTS_DIR = os.path.join(os.path.dirname(__file__), 'attachments')
+ATTACHMENTS_DIR = os.environ.get('ATTACHMENTS_DIR', os.path.join(os.path.dirname(__file__), 'attachments')).strip()
+os.makedirs(ATTACHMENTS_DIR, exist_ok=True)
 
 def _save_attachments(msg, customer_id):
     """Extract and save email attachments, record in DB."""
