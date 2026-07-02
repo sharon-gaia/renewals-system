@@ -1125,12 +1125,14 @@ def form_submit():
     return jsonify({'ok': True})
 
 
+# הפעל סריקת מיילים גם תחת gunicorn (לא רק python app.py)
+init_db()
+if EMAIL_CONFIG['enabled']:
+    _t = threading.Thread(target=email_poll_thread, daemon=True)
+    _t.start()
+    print('[email-sync] Thread פעיל — יבדוק כל 5 דקות')
+
 if __name__ == '__main__':
-    init_db()
-    if EMAIL_CONFIG['enabled']:
-        t = threading.Thread(target=email_poll_thread, daemon=True)
-        t.start()
-        print('[email-sync] Thread פעיל — יבדוק כל 5 דקות')
     print("=" * 50)
     print("מערכת חידושים פועלת!")
     print("כתובת גישה: http://localhost:5000")
