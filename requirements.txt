@@ -4,3 +4,4 @@ werkzeug
 openpyxl
 python-dotenv
 gunicorn
+requests

@@ -45,7 +45,7 @@ CORS(app, resources={r"/api/*": {"origins": [
     "https://www.gaia-ins.co.il",
     "https://gaia-ins.co.il"
 ]}})
-DB_PATH = os.path.join(os.path.dirname(__file__), 'renewals.db')
+DB_PATH = os.environ.get('DB_PATH', os.path.join(os.path.dirname(__file__), 'renewals.db'))
 
 @app.template_filter('fdate')
 def format_date(value):
