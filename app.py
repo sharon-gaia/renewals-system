@@ -1,7 +1,10 @@
 import sys
 import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
-sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+try:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
+except Exception:
+    pass
 
 from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, send_file
 from flask_cors import CORS
@@ -45,8 +48,11 @@ CORS(app, resources={r"/api/*": {"origins": [
     "https://www.gaia-ins.co.il",
     "https://gaia-ins.co.il"
 ]}})
-DB_PATH = os.environ.get('DB_PATH', os.path.join(os.path.dirname(__file__), 'renewals.db'))
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)  # ודא שהתיקייה קיימת
+DB_PATH = os.environ.get('DB_PATH', os.path.join(os.path.dirname(__file__), 'renewals.db')).strip()
+_db_dir = os.path.dirname(DB_PATH)
+if _db_dir:
+    os.makedirs(_db_dir, exist_ok=True)
+print(f'[startup] DB_PATH={DB_PATH}')
 
 @app.template_filter('fdate')
 def format_date(value):
@@ -1126,12 +1132,40 @@ def form_submit():
     return jsonify({'ok': True})
 
 
-# הפעל סריקת מיילים גם תחת gunicorn (לא רק python app.py)
-init_db()
+@app.route('/db-status')
+def db_status():
+    """Diagnostic endpoint — shows DB health"""
+    try:
+        conn = get_db()
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        user_count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] if 'users' in tables else 'N/A'
+        conn.close()
+        return jsonify({
+            'db_path': DB_PATH,
+            'db_exists': os.path.exists(DB_PATH),
+            'tables': tables,
+            'user_count': user_count,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'db_path': DB_PATH}), 500
+
+
+# הפעל DB ו-email thread גם תחת gunicorn
+try:
+    print(f'[startup] calling init_db() on {DB_PATH}')
+    init_db()
+    print(f'[startup] init_db() done — db file exists: {os.path.exists(DB_PATH)}')
+except Exception as _e:
+    print(f'[startup] ERROR in init_db(): {_e}')
+    import traceback; traceback.print_exc()
+
 if EMAIL_CONFIG['enabled']:
-    _t = threading.Thread(target=email_poll_thread, daemon=True)
-    _t.start()
-    print('[email-sync] Thread פעיל — יבדוק כל 5 דקות')
+    try:
+        _t = threading.Thread(target=email_poll_thread, daemon=True)
+        _t.start()
+        print('[email-sync] Thread פעיל — יבדוק כל 5 דקות')
+    except Exception as _e:
+        print(f'[email-sync] ERROR starting thread: {_e}')
 
 if __name__ == '__main__':
     print("=" * 50)
