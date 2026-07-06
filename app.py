@@ -346,11 +346,15 @@ def update_customer(cid):
     data = request.json or {}
     allowed = ['status', 'agent_notes', 'contact_date', 'interested_in_products',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
-                'whatsapp_source']
-    # Agents cannot update sharon fields
+                'whatsapp_source', 'brand']
+    # Agents cannot update sharon fields or brand (admin-only)
     if session.get('role') != 'admin':
-        for f in ['sharon_notes', 'requests_to_sharon']:
+        for f in ['sharon_notes', 'requests_to_sharon', 'brand']:
             data.pop(f, None)
+
+    # Ofir customers are contacted from Winner's WhatsApp number
+    if data.get('brand') == 'אופיר' and 'whatsapp_source' not in data:
+        data['whatsapp_source'] = 'ווינר'
 
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]

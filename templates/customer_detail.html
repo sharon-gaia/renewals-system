@@ -11,6 +11,13 @@
       <i class="bi bi-star{% if c.is_vip %}-fill{% endif %}"></i>
       {% if c.is_vip %} VIP{% endif %}
     </button>
+    {% if session.role == 'admin' %}
+    <select id="brand-select" onchange="setBrand(this.value)" class="form-select form-select-sm" style="width:auto;" title="שינוי מותג (מנהל בלבד)">
+      {% for b in ['גאיה', 'ווינר', 'אופיר'] %}
+      <option value="{{ b }}" {% if c.brand == b %}selected{% endif %}>{{ b }}</option>
+      {% endfor %}
+    </select>
+    {% endif %}
     {% if c.brand in ('ווינר', 'אופיר') %}
     <div class="btn-group btn-group-sm" role="group" title="איזה וואטסאפ הלקוח רגיל לקבל ממנו הודעות">
       <button type="button" onclick="setWhatsappSource('ווינר')"
@@ -219,6 +226,15 @@ function setWhatsappSource(source) {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({whatsapp_source: source})
+  }).then(() => window.location.reload());
+}
+
+function setBrand(brand) {
+  if (!confirm('לשנות את מותג הלקוח ל-' + brand + '?')) { window.location.reload(); return; }
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({brand: brand})
   }).then(() => window.location.reload());
 }
 
