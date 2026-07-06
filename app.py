@@ -542,7 +542,8 @@ def download_attachment(att_id):
     conn.close()
     if not att:
         return 'לא נמצא', 404
-    return send_file(att['filepath'], as_attachment=True, download_name=att['filename'])
+    safe_name = re.sub(r'[\r\n]+', ' ', att['filename']).strip()
+    return send_file(att['filepath'], as_attachment=True, download_name=safe_name)
 
 
 @app.route('/queue')
@@ -850,7 +851,8 @@ def decode_str(s):
             result += b.decode(enc or 'utf-8', errors='replace')
         else:
             result += b
-    return result
+    # MIME header folding can leave embedded \r\n — breaks HTTP headers (Content-Disposition) if left in
+    return re.sub(r'[\r\n]+', ' ', result).strip()
 
 def parse_renewal_email(msg_text, subject=''):
     """
