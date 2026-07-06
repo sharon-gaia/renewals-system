@@ -29,6 +29,7 @@
   <table class="table table-sm table-hover align-middle bg-white shadow-sm">
     <thead class="table-light">
       <tr>
+        <th></th>
         <th>תאריך</th>
         <th>מקור</th>
         <th>קטגוריה</th>
@@ -39,13 +40,41 @@
     </thead>
     <tbody>
       {% for item in items %}
-      <tr>
+      <tr class="other-forms-row" data-bs-toggle="collapse" data-bs-target="#detail-{{ loop.index }}" style="cursor:pointer;">
+        <td class="text-muted"><i class="bi bi-chevron-down"></i></td>
         <td class="small text-muted text-nowrap">{{ item.received_at }}</td>
         <td><span class="badge bg-light text-dark border">{{ item.source }}</span></td>
         <td><span class="badge bg-info-subtle text-info-emphasis">{{ item.category }}</span></td>
         <td class="small">{{ item.subject }}</td>
         <td class="small fw-semibold">{{ item.title }}</td>
         <td class="small">{{ item.detail }}</td>
+      </tr>
+      <tr class="collapse" id="detail-{{ loop.index }}">
+        <td colspan="7" class="bg-light">
+          <div class="p-3">
+            {% if item.kind == 'policy' %}
+              <div class="mb-2"><strong>מספר פוליסה:</strong> {{ item.full.policy_number }}</div>
+              <div class="mb-2"><strong>שם קובץ:</strong> {{ item.full.filename }}</div>
+              <a href="{{ item.link }}" class="btn btn-sm btn-primary">
+                <i class="bi bi-file-earmark-pdf me-1"></i>הורד PDF
+              </a>
+            {% else %}
+              <div class="row g-2 small">
+                <div class="col-md-3"><strong>שם:</strong> {{ item.full.name or '—' }}</div>
+                <div class="col-md-3"><strong>ת.ז:</strong> {{ item.full.id_number or '—' }}</div>
+                <div class="col-md-3"><strong>טלפון:</strong> {{ item.full.phone or '—' }}</div>
+                <div class="col-md-3"><strong>אימייל:</strong> {{ item.full.email or '—' }}</div>
+                <div class="col-md-3"><strong>מותג:</strong> {{ item.full.brand or '—' }}</div>
+                <div class="col-md-3"><strong>תשלומים:</strong> {{ item.full.installments or '—' }}</div>
+                <div class="col-md-3"><strong>אמצעי גבייה:</strong> {{ item.full.payment_method or '—' }}</div>
+                <div class="col-md-3"><strong>כרטיס:</strong> {{ item.full.card_number or '—' }} {{ item.full.card_expiry or '' }}</div>
+              </div>
+              {% if item.full.comments %}
+              <div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">{{ item.full.comments }}</div>
+              {% endif %}
+            {% endif %}
+          </div>
+        </td>
       </tr>
       {% endfor %}
     </tbody>

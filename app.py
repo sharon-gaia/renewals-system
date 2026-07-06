@@ -438,10 +438,10 @@ def other_forms():
     ).fetchall():
         d = dict(r)
         rows.append({
-            'received_at': d['received_at'], 'subject': d['subject'],
+            'id': d['id'], 'received_at': d['received_at'], 'subject': d['subject'],
             'title': d['name'] or '(ללא שם)', 'detail': d['id_number'] or d['phone'] or '',
             'source': 'טופס', 'category': guess_category(d['subject'], 'form'),
-            'link': None,
+            'link': None, 'kind': 'form', 'full': d,
         })
 
     for r in conn.execute(
@@ -449,10 +449,10 @@ def other_forms():
     ).fetchall():
         d = dict(r)
         rows.append({
-            'received_at': d['received_at'], 'subject': f"פוליסה {d['policy_number']}",
+            'id': d['id'], 'received_at': d['received_at'], 'subject': f"פוליסה {d['policy_number']}",
             'title': d['filename'], 'detail': d['policy_number'] or '',
             'source': 'פוליסה (הראל)', 'category': guess_category('', 'policy'),
-            'link': None,
+            'link': url_for('download_policy_document', doc_id=d['id']), 'kind': 'policy', 'full': d,
         })
 
     rows.sort(key=lambda x: x['received_at'] or '', reverse=True)
@@ -544,6 +544,17 @@ def download_attachment(att_id):
         return 'לא נמצא', 404
     safe_name = re.sub(r'[\r\n]+', ' ', att['filename']).strip()
     return send_file(att['filepath'], as_attachment=True, download_name=safe_name)
+
+@app.route('/policy-document/<int:doc_id>')
+@login_required
+def download_policy_document(doc_id):
+    conn = get_db()
+    doc = conn.execute('SELECT * FROM policy_documents WHERE id=?', (doc_id,)).fetchone()
+    conn.close()
+    if not doc:
+        return 'לא נמצא', 404
+    safe_name = re.sub(r'[\r\n]+', ' ', doc['filename']).strip()
+    return send_file(doc['filepath'], as_attachment=True, download_name=safe_name)
 
 
 @app.route('/queue')
