@@ -138,6 +138,17 @@ def init_db():
             uploaded_at TEXT NOT NULL,
             FOREIGN KEY (customer_id) REFERENCES customers(id)
         );
+        CREATE TABLE IF NOT EXISTS policy_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER,
+            policy_number TEXT,
+            filename TEXT NOT NULL,
+            filepath TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            message_id TEXT UNIQUE,
+            whatsapp_sent_at TEXT,
+            FOREIGN KEY (customer_id) REFERENCES customers(id)
+        );
         CREATE TABLE IF NOT EXISTS unmatched_submissions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             received_at TEXT,
@@ -401,6 +412,52 @@ def admin_queue():
     ).fetchall()
     conn.close()
     return render_template('admin_queue.html', items=items)
+
+def guess_category(subject, source):
+    """Rough auto-tag for the 'other forms' catch-all — a hint, not a strict classifier."""
+    text = subject or ''
+    if any(k in text for k in ['כרטיס אשראי', 'אשראי', 'עדכון פרטי תשלום', 'שינוי אמצעי']):
+        return 'עדכון אמצעי תשלום'
+    if source == 'policy':
+        return 'פוליסה לא משויכת (עסקה חדשה?)'
+    if 'חדש' in text:
+        return 'הצעה חדשה'
+    return 'אחר'
+
+@app.route('/admin/other-forms')
+@login_required
+@admin_required
+def other_forms():
+    """Catch-all view: every incoming email that didn't become a matched renewal —
+    backup net + light organization, regardless of source table."""
+    conn = get_db()
+    rows = []
+
+    for r in conn.execute(
+        "SELECT * FROM unmatched_submissions WHERE status='pending' ORDER BY received_at DESC"
+    ).fetchall():
+        d = dict(r)
+        rows.append({
+            'received_at': d['received_at'], 'subject': d['subject'],
+            'title': d['name'] or '(ללא שם)', 'detail': d['id_number'] or d['phone'] or '',
+            'source': 'טופס', 'category': guess_category(d['subject'], 'form'),
+            'link': None,
+        })
+
+    for r in conn.execute(
+        "SELECT * FROM policy_documents WHERE customer_id IS NULL ORDER BY received_at DESC"
+    ).fetchall():
+        d = dict(r)
+        rows.append({
+            'received_at': d['received_at'], 'subject': f"פוליסה {d['policy_number']}",
+            'title': d['filename'], 'detail': d['policy_number'] or '',
+            'source': 'פוליסה (הראל)', 'category': guess_category('', 'policy'),
+            'link': None,
+        })
+
+    rows.sort(key=lambda x: x['received_at'] or '', reverse=True)
+    conn.close()
+    return render_template('other_forms.html', items=rows)
 
 @app.route('/customer/<int:cid>/clarify', methods=['POST'])
 @login_required
@@ -1075,6 +1132,105 @@ def _check_email_inbox_impl():
 
     return processed
 
+POLICY_DOCS_DIR = os.path.join(ATTACHMENTS_DIR, 'policies')
+
+_policy_check_lock = threading.Lock()
+
+def check_policy_documents():
+    """Connect to IMAP, look for confirmed-policy emails (e.g. from Harel ComposeDoc),
+    match by policy number to a customer, and save the PDF locally."""
+    if not _policy_check_lock.acquire(blocking=False):
+        print('[policy-docs] בדיקה כבר רצה — דילוג')
+        return 0
+    try:
+        return _check_policy_documents_impl()
+    finally:
+        _policy_check_lock.release()
+
+def _check_policy_documents_impl():
+    cfg = EMAIL_CONFIG
+    if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
+        return 0
+
+    processed = 0
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+
+        since_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'FROM "ComposeDoc@harel-ins.co.il" SINCE {since_date}')
+        if status != 'OK':
+            mail.logout()
+            return 0
+
+        conn = get_db()
+        for mid in data[0].split():
+            _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hdr_data[0][1])
+            message_id = hdr.get('Message-ID', '').strip()
+            subject = decode_str(hdr.get('Subject', ''))
+
+            if message_id and conn.execute(
+                'SELECT 1 FROM policy_documents WHERE message_id=?', (message_id,)
+            ).fetchone():
+                continue
+
+            m = re.search(r'(\d{6,})\s*$', subject.strip())
+            policy_number = m.group(1) if m else None
+            if not policy_number:
+                continue
+
+            customer = conn.execute(
+                "SELECT id FROM customers WHERE ltrim(policy_number,'0')=?",
+                (policy_number.lstrip('0'),)
+            ).fetchone()
+            customer_id = customer['id'] if customer else None
+
+            _, full_data = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(full_data[0][1])
+
+            saved_any = False
+            for part in msg.walk():
+                cd = str(part.get('Content-Disposition', ''))
+                if 'attachment' not in cd and part.get_content_type() != 'application/octet-stream':
+                    continue
+                raw_fn = part.get_filename()
+                if not raw_fn:
+                    continue
+                filename = decode_str(raw_fn)
+                data_bytes = part.get_payload(decode=True)
+                if not data_bytes:
+                    continue
+                folder_key = str(customer_id) if customer_id else f'unmatched_{policy_number}'
+                doc_dir = os.path.join(POLICY_DOCS_DIR, folder_key)
+                os.makedirs(doc_dir, exist_ok=True)
+                safe_fn = re.sub(r'[\\/*?:"<>|]', '_', filename)
+                filepath = os.path.join(doc_dir, safe_fn)
+                with open(filepath, 'wb') as f:
+                    f.write(data_bytes)
+                conn.execute(
+                    '''INSERT OR IGNORE INTO policy_documents
+                       (customer_id, policy_number, filename, filepath, received_at, message_id)
+                       VALUES (?,?,?,?,?,?)''',
+                    (customer_id, policy_number, filename, filepath,
+                     datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), message_id)
+                )
+                conn.commit()
+                saved_any = True
+                status_label = f'ללקוח {customer_id}' if customer_id else 'לא זוהה לקוח'
+                print(f'[policy-docs] נשמר: {filename} ({policy_number}) {status_label}')
+
+            if saved_any:
+                processed += 1
+
+        conn.close()
+        mail.logout()
+    except Exception as e:
+        print(f'[policy-docs] שגיאה: {e}')
+
+    return processed
+
 def email_poll_thread():
     """Background thread: check inbox every N seconds."""
     while True:
@@ -1085,6 +1241,12 @@ def email_poll_thread():
                 print(f'[email-sync] עובדו {n} מיילים חדשים')
         except Exception as e:
             print(f'[email-sync] שגיאת thread: {e}')
+        try:
+            n2 = check_policy_documents()
+            if n2:
+                print(f'[policy-docs] עובדו {n2} פוליסות חדשות')
+        except Exception as e:
+            print(f'[policy-docs] שגיאת thread: {e}')
 
 # ── Admin email trigger ──────────────────────────────────────
 

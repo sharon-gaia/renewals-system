@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+{% block title %} — טפסים שאינם חידושים{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">
+    <i class="bi bi-inbox-fill text-secondary me-2"></i>
+    טפסים שאינם חידושים
+    <span class="badge bg-secondary ms-2">{{ items|length }}</span>
+  </h4>
+  <div class="d-flex gap-2">
+    <a href="/admin-queue" class="btn btn-outline-warning btn-sm">תור אדמין</a>
+    <a href="/" class="btn btn-outline-secondary btn-sm">דשבורד</a>
+  </div>
+</div>
+
+<p class="text-muted small mb-3">
+  גיבוי מרכזי — כל מייל שהגיע ולא הפך לחידוש משויך, מכל המקורות (טפסי אתר, פוליסות מהראל וכו').
+  הקטגוריה היא ניחוש גס לפי מילות מפתח, לא סיווג מדויק.
+</p>
+
+{% if not items %}
+<div class="alert alert-success text-center py-5">
+  <i class="bi bi-check-circle-fill fs-1 text-success d-block mb-2"></i>
+  <strong>אין פריטים כרגע</strong>
+</div>
+{% else %}
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle bg-white shadow-sm">
+    <thead class="table-light">
+      <tr>
+        <th>תאריך</th>
+        <th>מקור</th>
+        <th>קטגוריה</th>
+        <th>נושא</th>
+        <th>שם / קובץ</th>
+        <th>ת.ז / טלפון / פוליסה</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td class="small text-muted text-nowrap">{{ item.received_at }}</td>
+        <td><span class="badge bg-light text-dark border">{{ item.source }}</span></td>
+        <td><span class="badge bg-info-subtle text-info-emphasis">{{ item.category }}</span></td>
+        <td class="small">{{ item.subject }}</td>
+        <td class="small fw-semibold">{{ item.title }}</td>
+        <td class="small">{{ item.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
