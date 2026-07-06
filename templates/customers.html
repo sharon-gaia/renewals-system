@@ -78,7 +78,7 @@
     </td>
     <td class="px-3 d-none d-sm-table-cell">
       <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank" class="text-decoration-none">
-        <i class="bi bi-whatsapp text-success me-1"></i>{{ c.phone }}
+        <i class="bi bi-whatsapp {{ 'text-warning' if c.whatsapp_source == 'ווינר' else 'text-success' }} me-1"></i>{{ c.phone }}
       </a>
     </td>
     <td class="px-3 d-none d-md-table-cell">

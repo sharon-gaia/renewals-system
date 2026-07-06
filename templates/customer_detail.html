@@ -11,6 +11,18 @@
       <i class="bi bi-star{% if c.is_vip %}-fill{% endif %}"></i>
       {% if c.is_vip %} VIP{% endif %}
     </button>
+    {% if c.brand in ('ווינר', 'אופיר') %}
+    <div class="btn-group btn-group-sm" role="group" title="איזה וואטסאפ הלקוח רגיל לקבל ממנו הודעות">
+      <button type="button" onclick="setWhatsappSource('ווינר')"
+              class="btn {% if c.whatsapp_source == 'ווינר' %}btn-warning{% else %}btn-outline-secondary{% endif %}">
+        <i class="bi bi-whatsapp me-1"></i>ווינר
+      </button>
+      <button type="button" onclick="setWhatsappSource('גאיה')"
+              class="btn {% if c.whatsapp_source != 'ווינר' %}btn-success{% else %}btn-outline-secondary{% endif %}">
+        <i class="bi bi-whatsapp me-1"></i>גאיה
+      </button>
+    </div>
+    {% endif %}
     <a href="/customers" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-right me-1"></i>חזרה לרשימה</a>
     {% if session.role == 'admin' %}
     <form method="POST" action="/customer/{{ c.id }}/delete"
@@ -35,7 +47,7 @@
           <tr><th>טלפון</th>
             <td>
               <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank">
-                <i class="bi bi-whatsapp text-success me-1"></i>{{ c.phone or '—' }}
+                <i class="bi bi-whatsapp {{ 'text-warning' if c.whatsapp_source == 'ווינר' else 'text-success' }} me-1"></i>{{ c.phone or '—' }}
               </a>
             </td>
           </tr>
@@ -199,6 +211,14 @@ function toggleVip() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({is_vip: isVip})
+  }).then(() => window.location.reload());
+}
+
+function setWhatsappSource(source) {
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({whatsapp_source: source})
   }).then(() => window.location.reload());
 }
 

@@ -122,7 +122,7 @@ def init_db():
     for col, typ in [('form_email','TEXT'), ('form_installments','TEXT'),
                      ('form_payment_method','TEXT'), ('form_received_at','TEXT'),
                      ('form_coverage','TEXT'), ('form_comments','TEXT'),
-                     ('is_vip','INTEGER DEFAULT 0')]:
+                     ('is_vip','INTEGER DEFAULT 0'), ('whatsapp_source','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
 
@@ -345,7 +345,8 @@ def customer_detail(cid):
 def update_customer(cid):
     data = request.json or {}
     allowed = ['status', 'agent_notes', 'contact_date', 'interested_in_products',
-                'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip']
+                'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
+                'whatsapp_source']
     # Agents cannot update sharon fields
     if session.get('role') != 'admin':
         for f in ['sharon_notes', 'requests_to_sharon']:

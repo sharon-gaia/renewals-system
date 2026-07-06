@@ -35,7 +35,7 @@
             <span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand }}</span>
           </div>
           <div class="small">
-            <i class="bi bi-whatsapp text-success me-1"></i>
+            <i class="bi bi-whatsapp {{ 'text-warning' if c.whatsapp_source == 'ווינר' else 'text-success' }} me-1"></i>
             <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank">
               {{ c.phone }}
             </a>
