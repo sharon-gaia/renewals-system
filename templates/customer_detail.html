@@ -11,19 +11,18 @@
       <i class="bi bi-star{% if c.is_vip %}-fill{% endif %}"></i>
       {% if c.is_vip %} VIP{% endif %}
     </button>
-    {% if session.role == 'admin' %}
-    <select id="brand-select" onchange="setBrand(this.value)" class="form-select form-select-sm" style="width:auto;" title="שינוי מותג (מנהל בלבד)">
-      {% for b in ['גאיה', 'ווינר', 'אופיר'] %}
-      <option value="{{ b }}" {% if c.brand == b %}selected{% endif %}>{{ b }}</option>
-      {% endfor %}
-    </select>
-    {% endif %}
     {% if c.brand in ('ווינר', 'אופיר') %}
     <div class="btn-group btn-group-sm" role="group" title="איזה וואטסאפ הלקוח רגיל לקבל ממנו הודעות">
       <button type="button" onclick="setWhatsappSource('ווינר')"
               class="btn {% if c.whatsapp_source == 'ווינר' %}btn-warning{% else %}btn-outline-secondary{% endif %}">
         <i class="bi bi-whatsapp me-1"></i>ווינר
       </button>
+      {% if session.role == 'admin' %}
+      <button type="button" onclick="setOfirBrand()" title="מסמן את הלקוח כמותג אופיר (מנהל בלבד)"
+              class="btn {% if c.brand == 'אופיר' %}btn-warning{% else %}btn-outline-secondary{% endif %}">
+        <i class="bi bi-whatsapp me-1"></i>אופיר
+      </button>
+      {% endif %}
       <button type="button" onclick="setWhatsappSource('גאיה')"
               class="btn {% if c.whatsapp_source != 'ווינר' %}btn-success{% else %}btn-outline-secondary{% endif %}">
         <i class="bi bi-whatsapp me-1"></i>גאיה
@@ -229,12 +228,12 @@ function setWhatsappSource(source) {
   }).then(() => window.location.reload());
 }
 
-function setBrand(brand) {
-  if (!confirm('לשנות את מותג הלקוח ל-' + brand + '?')) { window.location.reload(); return; }
+function setOfirBrand() {
+  if (!confirm('לסמן את הלקוח כמותג אופיר?')) return;
   fetch('/customer/{{ c.id }}/update', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({brand: brand})
+    body: JSON.stringify({brand: 'אופיר'})
   }).then(() => window.location.reload());
 }
 
