@@ -25,10 +25,19 @@
   <strong>אין פריטים כרגע</strong>
 </div>
 {% else %}
+<form method="POST" action="/admin/other-forms/delete" id="other-forms-form">
+<div class="d-flex align-items-center gap-2 mb-2">
+  <button type="submit" class="btn btn-outline-danger btn-sm"
+          onclick="return confirm('למחוק את הפריטים המסומנים?')">
+    <i class="bi bi-trash me-1"></i>מחק מסומנים
+  </button>
+  <span class="small text-muted" id="selected-count"></span>
+</div>
 <div class="table-responsive">
   <table class="table table-sm table-hover align-middle bg-white shadow-sm">
     <thead class="table-light">
       <tr>
+        <th><input type="checkbox" id="select-all"></th>
         <th></th>
         <th>תאריך</th>
         <th>מקור</th>
@@ -41,6 +50,9 @@
     <tbody>
       {% for item in items %}
       <tr class="other-forms-row" data-bs-toggle="collapse" data-bs-target="#detail-{{ loop.index }}" style="cursor:pointer;">
+        <td onclick="event.stopPropagation();">
+          <input type="checkbox" class="row-check" name="selected" value="{{ item.kind }}:{{ item.id }}">
+        </td>
         <td class="text-muted"><i class="bi bi-chevron-down"></i></td>
         <td class="small text-muted text-nowrap">{{ item.received_at }}</td>
         <td><span class="badge bg-light text-dark border">{{ item.source }}</span></td>
@@ -50,7 +62,7 @@
         <td class="small">{{ item.detail }}</td>
       </tr>
       <tr class="collapse" id="detail-{{ loop.index }}">
-        <td colspan="7" class="bg-light">
+        <td colspan="8" class="bg-light">
           <div class="p-3">
             {% if item.kind == 'policy' %}
               <div class="mb-2"><strong>מספר פוליסה:</strong> {{ item.full.policy_number }}</div>
@@ -80,5 +92,11 @@
     </tbody>
   </table>
 </div>
+</form>
+<script>
+  document.getElementById('select-all').addEventListener('change', function () {
+    document.querySelectorAll('.row-check').forEach(cb => cb.checked = this.checked);
+  });
+</script>
 {% endif %}
 {% endblock %}

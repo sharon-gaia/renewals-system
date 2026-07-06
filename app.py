@@ -459,6 +459,27 @@ def other_forms():
     conn.close()
     return render_template('other_forms.html', items=rows)
 
+@app.route('/admin/other-forms/delete', methods=['POST'])
+@login_required
+@admin_required
+def other_forms_delete():
+    """Bulk-delete selected rows from the other-forms catch-all (form or policy items)."""
+    selected = request.form.getlist('selected')
+    form_ids = [s.split(':', 1)[1] for s in selected if s.startswith('form:')]
+    policy_ids = [s.split(':', 1)[1] for s in selected if s.startswith('policy:')]
+
+    conn = get_db()
+    if form_ids:
+        placeholders = ','.join('?' * len(form_ids))
+        conn.execute(f"DELETE FROM unmatched_submissions WHERE id IN ({placeholders})", form_ids)
+    if policy_ids:
+        placeholders = ','.join('?' * len(policy_ids))
+        conn.execute(f"DELETE FROM policy_documents WHERE id IN ({placeholders})", policy_ids)
+    conn.commit()
+    conn.close()
+    flash(f'{len(form_ids) + len(policy_ids)} פריטים נמחקו', 'success')
+    return redirect(url_for('other_forms'))
+
 @app.route('/customer/<int:cid>/clarify', methods=['POST'])
 @login_required
 def mark_clarify(cid):
