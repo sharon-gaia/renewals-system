@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% block title %} — כל הלקוחות (פוליסות){% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-4">
+  <h4 class="mb-0">
+    <i class="bi bi-people-fill text-primary me-2"></i>
+    כל הלקוחות — מתוך פוליסות הראל
+    <span class="badge bg-secondary ms-2">{{ items|length }}</span>
+  </h4>
+  <div class="d-flex gap-2">
+    <a href="/admin/other-forms" class="btn btn-outline-secondary btn-sm">טפסים שאינם חידושים</a>
+    <a href="/" class="btn btn-outline-secondary btn-sm">דשבורד</a>
+  </div>
+</div>
+
+<p class="text-muted small mb-3">
+  מידע שחולץ אוטומטית מקבצי ה-PDF שמגיעים מהראל (ComposeDoc) — לא רק חידושים, כל פוליסה שהופקה.
+  חילוץ במיטב המאמץ — לעיתים שדה (בעיקר שם) עשוי לדרוש תיקון ידני.
+</p>
+
+<form method="GET" class="mb-3">
+  <div class="input-group" style="max-width: 400px;">
+    <input type="text" name="q" class="form-control" value="{{ q }}" placeholder="חיפוש: שם, ת.ז, טלפון, אימייל, מספר פוליסה">
+    <button type="submit" class="btn btn-outline-primary"><i class="bi bi-search"></i></button>
+  </div>
+</form>
+
+{% if not items %}
+<div class="alert alert-secondary text-center py-5">
+  <i class="bi bi-inbox fs-1 d-block mb-2"></i>
+  <strong>אין עדיין נתונים{{ ' התואמים לחיפוש' if q else '' }}</strong>
+</div>
+{% else %}
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle bg-white shadow-sm">
+    <thead class="table-light">
+      <tr>
+        <th>סוג</th>
+        <th>שם מבוטח</th>
+        <th>ת.ז</th>
+        <th>טלפון</th>
+        <th>אימייל</th>
+        <th>כתובת</th>
+        <th>פוליסה</th>
+        <th>סוכן</th>
+        <th>תקופה</th>
+        <th>תשלום</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      <tr>
+        <td><span class="badge bg-info-subtle text-info-emphasis">{{ item.doc_type_label or '—' }}</span></td>
+        <td class="small fw-semibold">{{ item.insured_name or '—' }}</td>
+        <td class="small">{{ item.insured_id or '—' }}</td>
+        <td class="small">{{ item.phone_mobile or item.phone_home or '—' }}</td>
+        <td class="small">{{ item.email or '—' }}</td>
+        <td class="small">{{ item.address or '—' }}</td>
+        <td class="small">{{ item.policy_number or '—' }}</td>
+        <td class="small">{{ item.agent_name or '—' }}</td>
+        <td class="small text-nowrap">{{ item.period_start or '—' }} – {{ item.period_end or '—' }}</td>
+        <td class="small">{{ item.total_payment or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

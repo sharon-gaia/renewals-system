@@ -21,6 +21,8 @@ from email.header import decode_header
 import threading
 import time
 import re
+import pdfplumber
+from bidi.algorithm import get_display
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -147,6 +149,31 @@ def init_db():
             received_at TEXT NOT NULL,
             message_id TEXT UNIQUE,
             whatsapp_sent_at TEXT,
+            FOREIGN KEY (customer_id) REFERENCES customers(id)
+        );
+        CREATE TABLE IF NOT EXISTS policy_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            policy_document_id INTEGER,
+            customer_id INTEGER,
+            policy_number TEXT,
+            doc_type_label TEXT,
+            doc_type_code TEXT,
+            branch TEXT,
+            agent_name TEXT,
+            agent_number TEXT,
+            insured_name TEXT,
+            insured_id TEXT,
+            spouse_id TEXT,
+            address TEXT,
+            phone_mobile TEXT,
+            phone_home TEXT,
+            email TEXT,
+            period_start TEXT,
+            period_end TEXT,
+            premium TEXT,
+            total_payment TEXT,
+            extracted_at TEXT NOT NULL,
+            FOREIGN KEY (policy_document_id) REFERENCES policy_documents(id),
             FOREIGN KEY (customer_id) REFERENCES customers(id)
         );
         CREATE TABLE IF NOT EXISTS unmatched_submissions (
@@ -479,6 +506,28 @@ def other_forms_delete():
     conn.close()
     flash(f'{len(form_ids) + len(policy_ids)} פריטים נמחקו', 'success')
     return redirect(url_for('other_forms'))
+
+@app.route('/admin/policy-records')
+@login_required
+@admin_required
+def policy_records():
+    """All customer/policy data extracted from Harel policy PDFs — beyond just this
+    month's renewal batch. Best-effort extraction — some fields may need correction."""
+    q = request.args.get('q', '').strip()
+    conn = get_db()
+    if q:
+        like = f'%{q}%'
+        rows = conn.execute(
+            '''SELECT * FROM policy_records
+               WHERE insured_name LIKE ? OR insured_id LIKE ? OR policy_number LIKE ?
+                  OR phone_mobile LIKE ? OR email LIKE ?
+               ORDER BY extracted_at DESC''',
+            (like, like, like, like, like)
+        ).fetchall()
+    else:
+        rows = conn.execute('SELECT * FROM policy_records ORDER BY extracted_at DESC LIMIT 300').fetchall()
+    conn.close()
+    return render_template('policy_records.html', items=rows, q=q)
 
 @app.route('/customer/<int:cid>/clarify', methods=['POST'])
 @login_required
@@ -1168,6 +1217,87 @@ def _check_email_inbox_impl():
 
 POLICY_DOCS_DIR = os.path.join(ATTACHMENTS_DIR, 'policies')
 
+def parse_harel_policy_pdf(filepath):
+    """Best-effort field extraction from a Harel policy-schedule ('דף הרשימה') PDF page.
+    Layout is consistent across doc types (new/renewal/cancellation/change) — same
+    template, different coverage sections. Some fields (agent name, rare names with
+    unusual glyph sequences) may occasionally need manual correction."""
+    try:
+        with pdfplumber.open(filepath) as pdf:
+            text = None
+            for page in pdf.pages:
+                t = page.extract_text() or ''
+                if any('רשימה' in h for h in t.split('\n')[:2]):
+                    text = t
+                    break
+        if not text:
+            return {}
+    except Exception as e:
+        print(f'[policy-parse] שגיאת קריאת PDF: {e}')
+        return {}
+
+    lines = [get_display(l) for l in text.split('\n')]
+    result = {}
+
+    for i, l in enumerate(lines):
+        m = re.search(r'\(([^0-9()]+)\s*(\d+)\)', l)
+        if m and ('פוליסה' in l or 'תוספת' in l):
+            result['doc_type_label'] = m.group(1).strip()
+            result['doc_type_code'] = m.group(2)
+
+        if i + 1 < len(lines) and ("מס' הפוליסה" in l or "מספר הפוליסה" in l):
+            data_line = lines[i + 1]
+            nums = re.findall(r'\d+', data_line.replace('/', ''))
+            if nums:
+                result['branch'] = nums[0]
+            if len(nums) >= 3:
+                result['agent_number'] = nums[2]
+            agent_name = re.sub(r'[\d/\-]+', '', data_line).strip(' -()"\'')
+            agent_name = re.sub(r'^[א-ת]\s+', '', agent_name)
+            result['agent_name'] = agent_name.strip()
+
+        if i + 1 < len(lines) and 'שם המבוטח' in l:
+            result['insured_name'] = l.split('שם המבוטח וכתובתו')[-1].strip()
+            addr_lines = []
+            j = i + 1
+            while j < len(lines) and 'תקופת' not in lines[j] and 'תאריך תחילת' not in lines[j]:
+                addr_lines.append(lines[j].strip())
+                j += 1
+            result['address'] = ' '.join(addr_lines)
+
+        if i + 1 < len(lines) and 'תקופת הביטוח' in l:
+            m5 = re.findall(r'\d{2}/\d{2}/\d{4}', lines[i + 1])
+            if len(m5) >= 2:
+                result['period_start'] = m5[0]
+                result['period_end'] = m5[1]
+
+        if i + 1 < len(lines) and 'e-mail' in l:
+            data_line = lines[i + 1]
+            m6 = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', data_line)
+            result['email'] = m6.group(0) if m6 else ''
+            rest = data_line.replace(result['email'], '') if m6 else data_line
+            phones = [p.replace(' ', '') for p in re.findall(r'0\d{1,2}-?\s?\d{6,7}', rest)]
+            if phones:
+                result['phone_mobile'] = phones[0]
+            if len(phones) > 1:
+                result['phone_home'] = phones[1]
+
+        if i + 1 < len(lines) and 'ת.ז. מבוטח' in l:
+            ids = re.findall(r'\d{7,9}', lines[i + 1])
+            if ids:
+                result['insured_id'] = ids[0]
+            if len(ids) > 1:
+                result['spouse_id'] = ids[1]
+
+        if i + 1 < len(lines) and 'דמי ביטוח' in l and 'אשראי' in l:
+            nums = re.findall(r'-?\d+\.\d{2}', lines[i + 1])
+            if nums:
+                result['premium'] = nums[0]
+            if len(nums) > 1:
+                result['total_payment'] = nums[-1]
+
+    return result
+
 _policy_check_lock = threading.Lock()
 
 def check_policy_documents():
@@ -1243,7 +1373,7 @@ def _check_policy_documents_impl():
                 filepath = os.path.join(doc_dir, safe_fn)
                 with open(filepath, 'wb') as f:
                     f.write(data_bytes)
-                conn.execute(
+                cur = conn.execute(
                     '''INSERT OR IGNORE INTO policy_documents
                        (customer_id, policy_number, filename, filepath, received_at, message_id)
                        VALUES (?,?,?,?,?,?)''',
@@ -1254,6 +1384,27 @@ def _check_policy_documents_impl():
                 saved_any = True
                 status_label = f'ללקוח {customer_id}' if customer_id else 'לא זוהה לקוח'
                 print(f'[policy-docs] נשמר: {filename} ({policy_number}) {status_label}')
+
+                if cur.lastrowid:
+                    fields = parse_harel_policy_pdf(filepath)
+                    if fields:
+                        conn.execute(
+                            '''INSERT INTO policy_records
+                               (policy_document_id, customer_id, policy_number, doc_type_label,
+                                doc_type_code, branch, agent_name, agent_number, insured_name,
+                                insured_id, spouse_id, address, phone_mobile, phone_home, email,
+                                period_start, period_end, premium, total_payment, extracted_at)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                            (cur.lastrowid, customer_id, policy_number,
+                             fields.get('doc_type_label'), fields.get('doc_type_code'),
+                             fields.get('branch'), fields.get('agent_name'), fields.get('agent_number'),
+                             fields.get('insured_name'), fields.get('insured_id'), fields.get('spouse_id'),
+                             fields.get('address'), fields.get('phone_mobile'), fields.get('phone_home'),
+                             fields.get('email'), fields.get('period_start'), fields.get('period_end'),
+                             fields.get('premium'), fields.get('total_payment'),
+                             datetime.datetime.now().isoformat())
+                        )
+                        conn.commit()
 
             if saved_any:
                 processed += 1

@@ -5,3 +5,5 @@ openpyxl
 python-dotenv
 gunicorn
 requests
+pdfplumber
+python-bidi
