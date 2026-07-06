@@ -727,18 +727,20 @@ def import_excel():
             }
             mapped_status = status_map.get(raw_status, '')
 
+            row_brand = col('מותג', row)
             conn.execute("""
                 INSERT INTO customers
                 (month_id, policy_number, name, id_number, phone, brand, status,
                  premium_last_year, whatsapp_sent_date, sharon_notes, requests_to_sharon,
-                 contact_date, agent_notes, interested_in_products)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 contact_date, agent_notes, interested_in_products, whatsapp_source)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 month_id, policy, name,
-                col('ת.ז', row), col('טלפון', row), col('מותג', row), mapped_status,
+                col('ת.ז', row), col('טלפון', row), row_brand, mapped_status,
                 col('פרמיה', row), col('וואטסאפ', row), col('הערות שרון', row),
                 col('בקשות משרון', row), col('תאריך התקשרות', row),
-                col('הערות חידושים', row), col('מתעניין', row)
+                col('הערות חידושים', row), col('מתעניין', row),
+                'ווינר' if row_brand == 'אופיר' else None
             ))
             count += 1
 
@@ -913,10 +915,12 @@ def api_renewal():
     else:
         conn.execute("""INSERT INTO customers
             (month_id, name, id_number, phone, brand, status,
-             form_email, form_installments, form_payment_method, form_received_at, form_comments)
-            VALUES (?,?,?,?,?,'טופס התקבל',?,?,?,?,?)""",
+             form_email, form_installments, form_payment_method, form_received_at, form_comments,
+             whatsapp_source)
+            VALUES (?,?,?,?,?,'טופס התקבל',?,?,?,?,?,?)""",
             (month['id'], name, id_number, phone, brand,
-             email, installments, payment_method, now, comments))
+             email, installments, payment_method, now, comments,
+             'ווינר' if brand == 'אופיר' else None))
         conn.commit()
         conn.close()
         return jsonify({'ok': True, 'matched': False, 'note': 'added as new'})
