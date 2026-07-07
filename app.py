@@ -270,12 +270,13 @@ def index():
     stats = {}
     if month:
         conn = get_db()
-        rows = conn.execute("SELECT status, brand FROM customers WHERE month_id=?", (month['id'],)).fetchall()
+        rows = conn.execute("SELECT status, brand, form_received_at FROM customers WHERE month_id=?", (month['id'],)).fetchall()
         total = len(rows)
         renewed = sum(1 for r in rows if r['status'] == 'חודש')
         no_renew = sum(1 for r in rows if r['status'] == 'לא רוצים לחדש')
         seen = sum(1 for r in rows if r['status'] == 'לקוח ענה/ V כחול')
         forms = sum(1 for r in rows if r['status'] == 'טופס התקבל')
+        renewed_from_forms = sum(1 for r in rows if r['status'] == 'חודש' and r['form_received_at'])
         pending = total - renewed - no_renew - seen - forms
         gaia = sum(1 for r in rows if r['brand'] == 'גאיה')
         winner = sum(1 for r in rows if r['brand'] in ('ווינר', 'אופיר'))
@@ -284,6 +285,7 @@ def index():
         unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='pending'").fetchone()[0]
         conn.close()
         stats = dict(total=total, renewed=renewed, no_renew=no_renew, seen=seen, forms=forms, pending=pending,
+                     renewed_from_forms=renewed_from_forms,
                      gaia=gaia, winner=winner, gaia_renewed=gaia_renewed, winner_renewed=winner_renewed,
                      pct=round(renewed / total * 100, 1) if total else 0, unmatched=unmatched)
     return render_template('dashboard.html', month=month, stats=stats)
