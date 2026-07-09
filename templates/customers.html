@@ -112,9 +112,19 @@
              value="{{ c.agent_notes or '' }}" placeholder="הוסף הערה...">
     </td>
     <td class="px-3 d-none d-xl-table-cell">
-      <input type="date" class="form-control form-control-sm notes-input"
-             data-id="{{ c.id }}" data-field="contact_date"
-             value="{{ c.contact_date or '' }}">
+      {% set _cd = [c.call_date_1, c.call_date_2, c.call_date_3]|select|list %}
+      {% set last_call = (_cd|max) if _cd else '' %}
+      <div class="dropdown">
+        <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button"
+                data-bs-toggle="dropdown" id="call-btn-{{ c.id }}">
+          {{ last_call|fdate if last_call else 'התקשרות' }}
+        </button>
+        <ul class="dropdown-menu">
+          {% for n in [1, 2, 3] %}
+          <li><a class="dropdown-item" href="#" onclick="logCall(event, {{ c.id }}, {{ n }})">אין מענה {{ n }}</a></li>
+          {% endfor %}
+        </ul>
+      </div>
     </td>
     {% if session.role == 'admin' %}
     <td class="px-3 d-none d-xl-table-cell">
@@ -162,6 +172,26 @@ function saveField(id, field, value) {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({[field]: value})
+  });
+}
+
+// Quick-log a "no answer" call attempt from the list — stamps today's date
+function logCall(ev, id, n) {
+  ev.preventDefault();
+  const d = new Date();
+  const p2 = x => String(x).padStart(2, '0');
+  const iso = d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+  const disp = p2(d.getDate()) + '/' + p2(d.getMonth() + 1) + '/' + d.getFullYear();
+  const payload = {};
+  payload['call_date_' + n] = iso;
+  payload['call_status_' + n] = 'אין מענה ' + n;
+  fetch(`/customer/${id}/update`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  }).then(() => {
+    const btn = document.getElementById('call-btn-' + id);
+    if (btn) btn.textContent = disp;
   });
 }
 </script>

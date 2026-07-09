@@ -138,14 +138,30 @@
             </select>
           </div>
           <div class="col-md-6">
-            <label class="form-label fw-semibold">תאריך התקשרות</label>
-            <input type="date" id="det-contact" class="form-control" value="{{ c.contact_date or '' }}">
-          </div>
-          <div class="col-md-6">
             <label class="form-label fw-semibold">וואטסאפ נשלח בתאריך</label>
             <input type="date" id="det-wa" class="form-control" value="{{ c.whatsapp_sent_date or '' }}"
                    {% if session.role != 'admin' %}readonly{% endif %}>
           </div>
+        </div>
+
+        <hr class="my-3">
+        <label class="form-label fw-semibold mb-2">ניסיונות התקשרות</label>
+        <div class="row g-3">
+          {% for i in [1, 2, 3] %}
+          <div class="col-md-4">
+            <input type="date" id="det-call-date-{{ i }}" class="form-control mb-2"
+                   value="{{ c['call_date_' ~ i] or '' }}">
+            <select id="det-call-status-{{ i }}" class="form-select">
+              <option value="">— סטטוס —</option>
+              {% for opt in ['אין מענה 1', 'אין מענה 2', 'אין מענה 3'] %}
+              <option value="{{ opt }}" {% if c['call_status_' ~ i] == opt %}selected{% endif %}>{{ opt }}</option>
+              {% endfor %}
+            </select>
+            <div class="small text-muted mt-1 text-center">
+              {% if c['call_by_' ~ i] %}<i class="bi bi-person me-1"></i>{{ c['call_by_' ~ i] }}{% else %}&nbsp;{% endif %}
+            </div>
+          </div>
+          {% endfor %}
         </div>
       </div>
     </div>
@@ -190,9 +206,14 @@
 document.getElementById('save-btn').addEventListener('click', () => {
   const data = {
     status: document.getElementById('det-status').value,
-    contact_date: document.getElementById('det-contact').value,
     whatsapp_sent_date: document.getElementById('det-wa').value,
     agent_notes: document.getElementById('det-agent-notes').value,
+    call_date_1: document.getElementById('det-call-date-1').value,
+    call_status_1: document.getElementById('det-call-status-1').value,
+    call_date_2: document.getElementById('det-call-date-2').value,
+    call_status_2: document.getElementById('det-call-status-2').value,
+    call_date_3: document.getElementById('det-call-date-3').value,
+    call_status_3: document.getElementById('det-call-status-3').value,
   };
   {% if session.role == 'admin' %}
   data.sharon_notes = document.getElementById('det-sharon-notes').value;

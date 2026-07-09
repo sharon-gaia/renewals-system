@@ -122,9 +122,16 @@ def init_db():
     for col, typ in [('form_email','TEXT'), ('form_installments','TEXT'),
                      ('form_payment_method','TEXT'), ('form_received_at','TEXT'),
                      ('form_coverage','TEXT'), ('form_comments','TEXT'),
-                     ('is_vip','INTEGER DEFAULT 0'), ('whatsapp_source','TEXT')]:
+                     ('is_vip','INTEGER DEFAULT 0'), ('whatsapp_source','TEXT'),
+                     ('call_date_1','TEXT'), ('call_status_1','TEXT'), ('call_by_1','TEXT'),
+                     ('call_date_2','TEXT'), ('call_status_2','TEXT'), ('call_by_2','TEXT'),
+                     ('call_date_3','TEXT'), ('call_status_3','TEXT'), ('call_by_3','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
+    # One-time backfill: move any legacy single contact_date into call slot 1
+    if 'call_date_1' not in existing:
+        conn.execute("""UPDATE customers SET call_date_1=contact_date
+                        WHERE contact_date IS NOT NULL AND contact_date != ''""")
 
     # Table to track processed emails by Message-ID
     conn.executescript('''
@@ -348,7 +355,10 @@ def update_customer(cid):
     data = request.json or {}
     allowed = ['status', 'agent_notes', 'contact_date', 'interested_in_products',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
-                'whatsapp_source', 'brand']
+                'whatsapp_source', 'brand',
+                'call_date_1', 'call_status_1', 'call_by_1',
+                'call_date_2', 'call_status_2', 'call_by_2',
+                'call_date_3', 'call_status_3', 'call_by_3']
     # Agents cannot update sharon fields or brand (admin-only)
     if session.get('role') != 'admin':
         for f in ['sharon_notes', 'requests_to_sharon', 'brand']:
@@ -358,17 +368,30 @@ def update_customer(cid):
     if data.get('brand') == 'אופיר' and 'whatsapp_source' not in data:
         data['whatsapp_source'] = 'ווינר'
 
+    agent = session.get('display_name') or session.get('username', '')
+    conn = get_db()
+
+    # Auto-capture the rep who logged a call attempt (like the date) — only when
+    # that attempt's date is newly set or changed, so it isn't reassigned on every save.
+    if agent and any(f'call_date_{n}' in data for n in (1, 2, 3)):
+        prev = conn.execute(
+            "SELECT call_date_1, call_date_2, call_date_3 FROM customers WHERE id=?", (cid,)
+        ).fetchone()
+        for n in (1, 2, 3):
+            key = f'call_date_{n}'
+            if key in data and data[key] and (not prev or data[key] != prev[f'call_date_{n}']):
+                data[f'call_by_{n}'] = agent
+
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
     if not sets:
+        conn.close()
         return jsonify({'ok': False})
     # Track who changed the status
-    agent = session.get('display_name') or session.get('username', '')
     if 'status' in data and agent:
         sets += ', handled_by=?'
         vals.append(agent)
     vals.append(cid)
-    conn = get_db()
     conn.execute(f"UPDATE customers SET {sets} WHERE id=?", vals)
     conn.commit()
     conn.close()
