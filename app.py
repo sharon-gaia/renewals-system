@@ -1482,6 +1482,31 @@ def admin_check_email():
     return redirect(url_for('admin'))
 
 
+@app.route('/refresh', methods=['POST'])
+@login_required
+def refresh_data():
+    """Manual 'refresh' — pull emails + policy PDFs on demand, for when the
+    background poll isn't running. Runs synchronously so data is fresh on reload."""
+    if not EMAIL_CONFIG['enabled']:
+        flash('סנכרון מייל לא מוגדר עדיין', 'warning')
+        return redirect(url_for('index'))
+    try:
+        n_forms = check_email_inbox()
+        n_policies = check_policy_documents()
+        parts = []
+        if n_forms:
+            parts.append(f'{n_forms} טפסים')
+        if n_policies:
+            parts.append(f'{n_policies} פוליסות')
+        if parts:
+            flash('רוענן: ' + ' + '.join(parts) + ' חדשים', 'success')
+        else:
+            flash('רוענן — אין נתונים חדשים', 'info')
+    except Exception as e:
+        flash(f'שגיאה ברענון: {e}', 'danger')
+    return redirect(url_for('index'))
+
+
 @app.route('/submit', methods=['POST'])
 def form_submit():
     """Direct POST from website forms (gaia-website / winner-website)."""

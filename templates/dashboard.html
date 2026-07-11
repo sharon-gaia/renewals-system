@@ -7,6 +7,12 @@
     {% if month %}{{ month['name'] }}{% else %}אין חודש פעיל{% endif %}
   </h4>
   <div class="d-flex flex-wrap gap-2">
+    <form method="POST" action="/refresh" class="d-inline"
+          onsubmit="this.querySelector('i').classList.add('spin'); this.querySelector('button').disabled=true;">
+      <button type="submit" class="btn btn-outline-success btn-sm">
+        <i class="bi bi-arrow-clockwise me-1"></i>רענן נתונים
+      </button>
+    </form>
     <a href="/queue" class="btn btn-info btn-sm text-white position-relative">
       <i class="bi bi-clipboard2-check-fill me-1"></i>תור עבודה
       {% if stats.forms %}
