@@ -347,7 +347,25 @@ def customer_detail(cid):
     if not customer:
         flash('לקוח לא נמצא', 'danger')
         return redirect(url_for('customers'))
-    return render_template('customer_detail.html', c=customer, month=month, statuses=STATUSES)
+    wa_link = build_followup_wa_link(customer)
+    return render_template('customer_detail.html', c=customer, month=month,
+                           statuses=STATUSES, wa_link=wa_link)
+
+
+def build_followup_wa_link(customer):
+    """Pre-filled WhatsApp reminder link for a customer who didn't answer calls."""
+    from urllib.parse import quote
+    phone = re.sub(r'\D', '', str(customer['phone'] or ''))
+    if not phone:
+        return None
+    if phone.startswith('0'):
+        phone = phone[1:]
+    phone = '972' + phone
+    site = 'https://www.winner-ins.co.il/renew' if customer['brand'] in ('ווינר', 'אופיר') \
+        else 'https://www.gaia-ins.co.il/renew'
+    msg = ('היי, \nניסינו להשיג אותך לחידוש הפוליסה. נשמח אם תוכל ליצור איתנו קשר '
+           'לטובת החידוש, או לחדש את הפוליסה אונליין באתר ' + site)
+    return f'https://wa.me/{phone}?text={quote(msg)}'
 
 @app.route('/customer/<int:cid>/update', methods=['POST'])
 @login_required
