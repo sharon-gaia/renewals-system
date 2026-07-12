@@ -92,7 +92,7 @@
   </div>
 </div>
 <div class="row g-3 mb-4">
-  <div class="col-4">
+  <div class="col-6 col-md-3">
     <div class="card text-center border-0 shadow-sm">
       <div class="card-body">
         <div class="stat-number text-danger">{{ stats.no_renew }}</div>
@@ -100,7 +100,15 @@
       </div>
     </div>
   </div>
-  <div class="col-4">
+  <div class="col-6 col-md-3">
+    <div class="card text-center border-0 shadow-sm">
+      <div class="card-body">
+        <div class="stat-number text-dark">{{ stats.no_contact }}</div>
+        <div class="stat-label">לא נוצר קשר</div>
+      </div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
     <div class="card text-center border-0 shadow-sm">
       <div class="card-body">
         <div class="stat-number text-warning">{{ stats.seen }}</div>
@@ -108,7 +116,7 @@
       </div>
     </div>
   </div>
-  <div class="col-4">
+  <div class="col-6 col-md-3">
     <div class="card text-center border-0 shadow-sm">
       <div class="card-body">
         <div class="stat-number text-secondary">{{ stats.pending }}</div>

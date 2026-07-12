@@ -277,7 +277,9 @@ def index():
     stats = {}
     if month:
         conn = get_db()
-        rows = conn.execute("SELECT status, brand, form_received_at FROM customers WHERE month_id=?", (month['id'],)).fetchall()
+        rows = conn.execute("""SELECT status, brand, form_received_at,
+                               call_status_1, call_status_2, call_status_3
+                               FROM customers WHERE month_id=?""", (month['id'],)).fetchall()
         total = len(rows)
         renewed = sum(1 for r in rows if r['status'] == 'חודש')
         no_renew = sum(1 for r in rows if r['status'] == 'לא רוצים לחדש')
@@ -285,6 +287,11 @@ def index():
         forms = sum(1 for r in rows if r['status'] == 'טופס התקבל')
         renewed_from_forms = sum(1 for r in rows if r['status'] == 'חודש' and r['form_received_at'])
         pending = total - renewed - no_renew - seen - forms
+        # "No contact made" — still pending (blank status) AND no call attempt logged.
+        # A customer with any אין מענה 1/2/3 counts once as contacted and drops out.
+        def _contacted(r):
+            return bool(r['call_status_1'] or r['call_status_2'] or r['call_status_3'])
+        no_contact = sum(1 for r in rows if not r['status'] and not _contacted(r))
         gaia = sum(1 for r in rows if r['brand'] == 'גאיה')
         winner = sum(1 for r in rows if r['brand'] in ('ווינר', 'אופיר'))
         gaia_renewed = sum(1 for r in rows if r['brand'] == 'גאיה' and r['status'] == 'חודש')
@@ -292,7 +299,7 @@ def index():
         unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='pending'").fetchone()[0]
         conn.close()
         stats = dict(total=total, renewed=renewed, no_renew=no_renew, seen=seen, forms=forms, pending=pending,
-                     renewed_from_forms=renewed_from_forms,
+                     renewed_from_forms=renewed_from_forms, no_contact=no_contact,
                      gaia=gaia, winner=winner, gaia_renewed=gaia_renewed, winner_renewed=winner_renewed,
                      pct=round(renewed / total * 100, 1) if total else 0, unmatched=unmatched)
     return render_template('dashboard.html', month=month, stats=stats)
