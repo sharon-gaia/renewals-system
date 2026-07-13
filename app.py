@@ -75,6 +75,14 @@ def format_date(value):
 STATUSES = ['', 'טופס התקבל', 'חודש', 'לא רוצים לחדש', 'לקוח ענה/ V כחול']
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
 
+def normalize_id_number(s):
+    """Israeli ID numbers are 9 digits — left-pad short numeric IDs with zeros
+    (e.g. 33775065 → 033775065). Leaves non-numeric or 9+ digit values untouched."""
+    s = str(s or '').strip()
+    if s.isdigit() and len(s) < 9:
+        return s.zfill(9)
+    return s
+
 # ── DB helpers ──────────────────────────────────────────────
 
 def get_db():
@@ -209,6 +217,18 @@ def init_db():
     if 'handled_by' not in existing_us:
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_by TEXT")
     conn.commit()
+
+    # Zero-pad short numeric ID numbers to 9 digits (idempotent — once padded,
+    # length is 9 so the row is no longer selected).
+    short_ids = conn.execute(
+        "SELECT id, id_number FROM customers "
+        "WHERE id_number GLOB '[0-9]*' AND id_number NOT GLOB '*[^0-9]*' AND length(id_number) < 9"
+    ).fetchall()
+    for row in short_ids:
+        conn.execute("UPDATE customers SET id_number=? WHERE id=?",
+                     (row[1].zfill(9), row[0]))
+    if short_ids:
+        conn.commit()
 
     # Default admin
     if not conn.execute("SELECT id FROM users WHERE username='sharon'").fetchone():
@@ -792,7 +812,7 @@ def import_excel():
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 month_id, policy, name,
-                col('ת.ז', row), col('טלפון', row), row_brand, mapped_status,
+                normalize_id_number(col('ת.ז', row)), col('טלפון', row), row_brand, mapped_status,
                 col('פרמיה', row), col('וואטסאפ', row), col('הערות שרון', row),
                 col('בקשות משרון', row), col('תאריך התקשרות', row),
                 col('הערות חידושים', row), col('מתעניין', row),
@@ -926,7 +946,7 @@ def api_renewal():
     """Receives form submissions from winner-ins.co.il/renew and gaia-ins.co.il/renew"""
     data = request.json or request.form.to_dict()
 
-    id_number = str(data.get('id_number') or data.get('id') or '').strip()
+    id_number = normalize_id_number(data.get('id_number') or data.get('id'))
     phone = str(data.get('phone') or data.get('telephone') or '').strip()
     name = str(data.get('name') or data.get('full_name') or '').strip()
     email = str(data.get('email') or '').strip()
@@ -1075,7 +1095,7 @@ def process_renewal_data(data, message_id='', subject='', received_at=''):
     - Matched → update customer, status='טופס התקבל', return customer_id
     - Not matched → save to unmatched_submissions for admin review, return None
     """
-    id_number      = str(data.get('id_number') or '').strip()
+    id_number      = normalize_id_number(data.get('id_number'))
     phone          = str(data.get('phone') or '').strip()
     name           = str(data.get('name') or '').strip()
     email_val      = str(data.get('email') or '').strip()
@@ -1541,7 +1561,7 @@ def form_submit():
 
     fields = {
         'name':           str(data.get('name') or '').strip(),
-        'id_number':      str(data.get('id_number') or '').strip(),
+        'id_number':      normalize_id_number(data.get('id_number')),
         'phone':          str(data.get('phone') or '').strip(),
         'email':          str(data.get('email') or '').strip(),
         'installments':   str(data.get('installments') or '').strip(),
