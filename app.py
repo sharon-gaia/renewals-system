@@ -1513,24 +1513,22 @@ def admin_check_email():
 @login_required
 def refresh_data():
     """Manual 'refresh' — pull emails + policy PDFs on demand, for when the
-    background poll isn't running. Runs synchronously so data is fresh on reload."""
+    background poll isn't running. Runs in a background thread so the request
+    returns immediately (a synchronous IMAP scan exceeds gunicorn's worker
+    timeout and gets the worker killed → 500)."""
     if not EMAIL_CONFIG['enabled']:
         flash('סנכרון מייל לא מוגדר עדיין', 'warning')
         return redirect(url_for('index'))
-    try:
-        n_forms = check_email_inbox()
-        n_policies = check_policy_documents()
-        parts = []
-        if n_forms:
-            parts.append(f'{n_forms} טפסים')
-        if n_policies:
-            parts.append(f'{n_policies} פוליסות')
-        if parts:
-            flash('רוענן: ' + ' + '.join(parts) + ' חדשים', 'success')
-        else:
-            flash('רוענן — אין נתונים חדשים', 'info')
-    except Exception as e:
-        flash(f'שגיאה ברענון: {e}', 'danger')
+
+    def _run():
+        try:
+            check_email_inbox()
+            check_policy_documents()
+        except Exception as e:
+            print(f'[refresh] שגיאה: {e}')
+
+    threading.Thread(target=_run, daemon=True).start()
+    flash('רענון הופעל — הנתונים יתעדכנו תוך מספר שניות. רענן את הדף.', 'info')
     return redirect(url_for('index'))
 
 
