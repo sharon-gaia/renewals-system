@@ -61,7 +61,6 @@
             <td><span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand or '—' }}</span></td>
           </tr>
           <tr><th>פרמיה שנה שעברה</th><td>{{ c.premium_last_year or '—' }}</td></tr>
-          <tr><th>מתעניין במוצרים נוספים</th><td>{{ c.interested_in_products or '—' }}</td></tr>
         </table>
       </div>
     </div>
@@ -180,6 +179,15 @@
       <div class="card-header bg-light fw-bold">הערות נציג</div>
       <div class="card-body">
         <textarea id="det-agent-notes" class="form-control" rows="3" placeholder="הוסף הערה...">{{ c.agent_notes or '' }}</textarea>
+        <div class="mt-2">
+          <button id="clarify-btn" class="btn btn-outline-warning">
+            <i class="bi bi-person-raised-hand me-1"></i>העברה לאדמין
+          </button>
+          <span id="clarify-msg" class="small ms-2"></span>
+          {% if c.status == 'דורש בירור' %}
+          <span class="badge bg-warning text-dark ms-2"><i class="bi bi-clock-history me-1"></i>הועבר לאדמין</span>
+          {% endif %}
+        </div>
       </div>
     </div>
 
@@ -188,18 +196,9 @@
     <div class="card border-0 shadow-sm mb-3 border-warning">
       <div class="card-header bg-warning fw-bold">הערות שרון (מנהל בלבד)</div>
       <div class="card-body">
-        <textarea id="det-sharon-notes" class="form-control mb-2" rows="2" placeholder="הערות שרון...">{{ c.sharon_notes or '' }}</textarea>
-        <label class="form-label fw-semibold">בקשות משרון</label>
-        <input type="text" id="det-requests" class="form-control" value="{{ c.requests_to_sharon or '' }}" placeholder="בקשות...">
+        <textarea id="det-sharon-notes" class="form-control" rows="2" placeholder="הערות שרון...">{{ c.sharon_notes or '' }}</textarea>
       </div>
     </div>
-    {% else %}
-    <!-- נציג רואה בקשות משרון בקריאה בלבד -->
-    {% if c.requests_to_sharon %}
-    <div class="alert alert-warning">
-      <strong><i class="bi bi-bell-fill me-1"></i>בקשה משרון:</strong> {{ c.requests_to_sharon }}
-    </div>
-    {% endif %}
     {% endif %}
 
     <button id="save-btn" class="btn btn-primary px-4">
@@ -226,7 +225,6 @@ document.getElementById('save-btn').addEventListener('click', () => {
   };
   {% if session.role == 'admin' %}
   data.sharon_notes = document.getElementById('det-sharon-notes').value;
-  data.requests_to_sharon = document.getElementById('det-requests').value;
   {% endif %}
 
   fetch('/customer/{{ c.id }}/update', {
@@ -237,6 +235,38 @@ document.getElementById('save-btn').addEventListener('click', () => {
     const msg = document.getElementById('save-msg');
     msg.classList.remove('d-none');
     setTimeout(() => msg.classList.add('d-none'), 2000);
+  });
+});
+
+// Transfer to admin — requires the rep to fill in הערות נציג as the reason
+document.getElementById('clarify-btn').addEventListener('click', () => {
+  const notes = document.getElementById('det-agent-notes').value.trim();
+  const msg = document.getElementById('clarify-msg');
+  if (!notes) {
+    msg.textContent = 'נא לפרט את הסיבה להעברה לאדמין (בהערות נציג)';
+    msg.className = 'small ms-2 text-danger';
+    document.getElementById('det-agent-notes').focus();
+    return;
+  }
+  const btn = document.getElementById('clarify-btn');
+  btn.disabled = true;
+  // Save the notes first, then move to the admin queue with them as the reason
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({agent_notes: notes})
+  }).then(() => fetch('/customer/{{ c.id }}/clarify', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({note: notes})
+  })).then(r => r.json()).then(res => {
+    if (res.ok) {
+      msg.textContent = 'הועבר לאדמין ✓';
+      msg.className = 'small ms-2 text-success';
+      setTimeout(() => window.location.href = '/customers', 900);
+    } else {
+      msg.textContent = res.error || 'שגיאה בהעברה';
+      msg.className = 'small ms-2 text-danger';
+      btn.disabled = false;
+    }
   });
 });
 

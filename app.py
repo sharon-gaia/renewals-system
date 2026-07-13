@@ -587,9 +587,11 @@ def policy_records():
 @app.route('/customer/<int:cid>/clarify', methods=['POST'])
 @login_required
 def mark_clarify(cid):
-    """Move customer to admin queue for clarification."""
+    """Move customer to admin queue for clarification. Requires a reason (rep notes)."""
     data = request.get_json(silent=True) or {}
-    note = data.get('note', '')
+    note = (data.get('note') or '').strip()
+    if not note:
+        return jsonify({'ok': False, 'error': 'נא לפרט את הסיבה להעברה לאדמין'}), 400
     agent = session.get('display_name') or session.get('username', '')
     conn = get_db()
     c = conn.execute("SELECT * FROM customers WHERE id=?", (cid,)).fetchone()
