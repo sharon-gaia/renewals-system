@@ -1,0 +1,70 @@
+{% extends 'base.html' %}
+{% block title %} — חיפוש לקוח{% endblock %}
+{% block content %}
+
+<div class="d-flex flex-column flex-md-row justify-content-md-between align-items-start align-items-md-center mb-3 gap-2">
+  <h5 class="mb-0"><i class="bi bi-search text-primary me-2"></i>תוצאות חיפוש{% if search %} — "{{ search }}"{% endif %}</h5>
+  {% if search %}
+  <span class="badge bg-secondary fs-6">{{ customers|length }} תוצאות</span>
+  {% endif %}
+</div>
+
+<!-- חיפוש -->
+<form method="GET" action="/search" class="row g-2 mb-3">
+  <div class="col-8 col-md-4">
+    <input type="text" name="q" class="form-control" autofocus
+           placeholder="חיפוש לפי שם / טלפון / מספר פוליסה" value="{{ search }}">
+  </div>
+  <div class="col-4 col-md-2">
+    <button type="submit" class="btn btn-primary w-100"><i class="bi bi-search me-1"></i>חפש</button>
+  </div>
+</form>
+
+{% if not search %}
+  <p class="text-muted">הקלד שם, מספר טלפון או מספר פוליסה כדי למצוא לקוח.</p>
+{% elif customers %}
+<div style="overflow-x:auto; margin-top:8px;">
+<table class="table table-hover table-sm align-middle mb-0">
+  <thead>
+    <tr style="background:#1a1a2e; color:#fff;">
+      <th class="px-3 py-2">שם</th>
+      <th class="px-3 py-2">טלפון</th>
+      <th class="px-3 py-2 d-none d-md-table-cell">פוליסה</th>
+      <th class="px-3 py-2 d-none d-md-table-cell">מותג</th>
+      <th class="px-3 py-2">סטטוס</th>
+      <th class="px-3 py-2 d-none d-lg-table-cell">חודש</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for c in customers %}
+  <tr class="{% if c.status == 'חודש' %}table-success{% elif c.status == 'לא רוצים לחדש' %}table-danger{% elif c.status == 'לקוח ענה/ V כחול' %}table-warning{% elif c.status == 'טופס התקבל' %}table-info{% endif %}">
+    <td class="px-3 py-2" style="min-width:130px">
+      <a href="/customer/{{ c.id }}" class="text-decoration-none text-dark d-flex align-items-center gap-2">
+        {% if c.is_vip %}<i class="bi bi-star-fill text-warning" style="font-size:0.9rem; flex-shrink:0"></i>{% endif %}
+        <span class="fw-semibold">{{ c.name }}</span>
+        <i class="bi bi-box-arrow-up-left text-secondary" style="font-size:0.8rem; flex-shrink:0"></i>
+      </a>
+    </td>
+    <td class="px-3">
+      {% if c.phone %}
+      <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank" class="text-decoration-none">
+        <i class="bi bi-whatsapp text-success me-1"></i>{{ c.phone }}
+      </a>
+      {% endif %}
+    </td>
+    <td class="px-3 d-none d-md-table-cell"><small>{{ c.policy_number or '' }}</small></td>
+    <td class="px-3 d-none d-md-table-cell">
+      {% if c.brand %}<span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand }}</span>{% endif %}
+    </td>
+    <td class="px-3"><small>{{ c.status or 'ממתין' }}</small></td>
+    <td class="px-3 d-none d-lg-table-cell"><small class="text-muted">{{ c.month_name or '' }}</small></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% else %}
+  <div class="alert alert-warning"><i class="bi bi-exclamation-circle me-1"></i>לא נמצאו לקוחות התואמים לחיפוש "{{ search }}".</div>
+{% endif %}
+
+{% endblock %}

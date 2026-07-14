@@ -364,6 +364,34 @@ def customers():
                            brand_filter=brand_filter, status_filter=status_filter, search=search,
                            statuses=STATUSES)
 
+@app.route('/search')
+@login_required
+def search_customers():
+    """Global customer search (across all months) by name, phone or policy number."""
+    search = request.args.get('q', '').strip()
+    rows = []
+    if search:
+        conn = get_db()
+        like = f'%{search}%'
+        # Normalised phone match too, so 050-123 finds 0501234567 etc.
+        digits = re.sub(r'\D', '', search)
+        phone_like = f'%{digits}%' if digits else like
+        rows = conn.execute(
+            """SELECT c.*, m.name AS month_name
+               FROM customers c
+               LEFT JOIN months m ON m.id = c.month_id
+               WHERE c.name LIKE ?
+                  OR c.phone LIKE ?
+                  OR replace(replace(c.phone,'-',''),' ','') LIKE ?
+                  OR c.policy_number LIKE ?
+                  OR ltrim(c.id_number,'0') LIKE ?
+               ORDER BY m.id DESC, c.name""",
+            (like, like, phone_like, like, like)
+        ).fetchall()
+        conn.close()
+    return render_template('search_results.html', customers=rows, search=search)
+
+
 @app.route('/customer/<int:cid>', methods=['GET', 'POST'])
 @login_required
 def customer_detail(cid):
