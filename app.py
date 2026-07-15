@@ -406,6 +406,16 @@ def init_db():
     existing_us = [r[1] for r in conn.execute("PRAGMA table_info(unmatched_submissions)").fetchall()]
     if 'handled_by' not in existing_us:
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_by TEXT")
+    # One-time cleanup: purge automated morning monitor tests captured before the
+    # ingestion-level filter existed. Marker-based rows, plus fully-empty rows (the
+    # no-field monitor forms like 'מינוי סוכן' leave no identifying data → not actionable).
+    conn.execute(
+        "DELETE FROM unmatched_submissions WHERE "
+        "COALESCE(id_number,'')='999999999' OR COALESCE(email,'')='monitor-check@example.com' "
+        "OR COALESCE(name,'')='MONITOR-CHECK-DO-NOT-PROCESS' OR ("
+        "COALESCE(name,'')='' AND COALESCE(id_number,'')='' "
+        "AND COALESCE(phone,'')='' AND COALESCE(email,'')='')"
+    )
     # Add doc_date to policy_records if missing; backfill from linked document date
     existing_pr = [r[1] for r in conn.execute("PRAGMA table_info(policy_records)").fetchall()]
     if 'doc_date' not in existing_pr:
@@ -523,7 +533,7 @@ def index():
         winner = sum(1 for r in rows if r['brand'] in ('ווינר', 'אופיר'))
         gaia_renewed = sum(1 for r in rows if r['brand'] == 'גאיה' and r['status'] == 'חודש')
         winner_renewed = sum(1 for r in rows if r['brand'] in ('ווינר', 'אופיר') and r['status'] == 'חודש')
-        unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='pending'").fetchone()[0]
+        unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='ממתין'").fetchone()[0]
         conn.close()
         stats = dict(total=total, renewed=renewed, no_renew=no_renew, seen=seen, forms=forms, pending=pending,
                      renewed_from_forms=renewed_from_forms, no_contact=no_contact,
@@ -745,7 +755,7 @@ def export_customers_excel():
 def admin_queue():
     conn = get_db()
     items = conn.execute(
-        "SELECT * FROM unmatched_submissions WHERE status='pending' ORDER BY received_at DESC"
+        "SELECT * FROM unmatched_submissions WHERE status='ממתין' ORDER BY received_at DESC"
     ).fetchall()
     conn.close()
     return render_template('admin_queue.html', items=items)
@@ -770,8 +780,15 @@ def other_forms():
     conn = get_db()
     rows = []
 
+    # Only real website-form submissions here. Harel policy PDFs are intentionally
+    # excluded — they already live in the insureds master ("כל הלקוחות"), so showing
+    # them here too was double-bookkeeping. Automated morning monitor tests are filtered.
     for r in conn.execute(
-        "SELECT * FROM unmatched_submissions WHERE status='pending' ORDER BY received_at DESC"
+        "SELECT * FROM unmatched_submissions WHERE status='ממתין' "
+        "AND COALESCE(id_number,'') != '999999999' "
+        "AND COALESCE(email,'') != 'monitor-check@example.com' "
+        "AND COALESCE(name,'') != 'MONITOR-CHECK-DO-NOT-PROCESS' "
+        "ORDER BY received_at DESC"
     ).fetchall():
         d = dict(r)
         rows.append({
@@ -779,17 +796,6 @@ def other_forms():
             'title': d['name'] or '(ללא שם)', 'detail': d['id_number'] or d['phone'] or '',
             'source': 'טופס', 'category': guess_category(d['subject'], 'form'),
             'link': None, 'kind': 'form', 'full': d,
-        })
-
-    for r in conn.execute(
-        "SELECT * FROM policy_documents WHERE customer_id IS NULL ORDER BY received_at DESC"
-    ).fetchall():
-        d = dict(r)
-        rows.append({
-            'id': d['id'], 'received_at': d['received_at'], 'subject': f"פוליסה {d['policy_number']}",
-            'title': d['filename'], 'detail': d['policy_number'] or '',
-            'source': 'פוליסה (הראל)', 'category': guess_category('', 'policy'),
-            'link': url_for('download_policy_document', doc_id=d['id']), 'kind': 'policy', 'full': d,
         })
 
     rows.sort(key=lambda x: x['received_at'] or '', reverse=True)
@@ -1596,6 +1602,17 @@ def _check_email_inbox_impl():
             _, full_data = mail.fetch(mid, '(BODY.PEEK[])')
             msg = email_lib.message_from_bytes(full_data[0][1])
             body = get_email_body(msg)
+            # Skip the automated morning monitor submissions (uptime check on the website
+            # forms). They carry a sentinel in the body, so this catches every form type —
+            # even ones with no name/ID (e.g. 'מינוי סוכן').
+            if any(m in body for m in ('MONITOR-CHECK-DO-NOT-PROCESS', 'automated-daily-check', 'monitor-check@example.com')):
+                if message_id:
+                    conn.execute(
+                        'INSERT OR IGNORE INTO processed_emails (message_id, processed_at) VALUES (?,?)',
+                        (message_id, datetime.datetime.now().isoformat())
+                    )
+                    conn.commit()
+                continue
             fields = parse_renewal_email(body, subject)
             cid = process_renewal_data(fields, message_id=message_id,
                                         subject=subject, received_at=email_dt_str)
