@@ -533,7 +533,9 @@ def index():
         winner = sum(1 for r in rows if r['brand'] in ('ווינר', 'אופיר'))
         gaia_renewed = sum(1 for r in rows if r['brand'] == 'גאיה' and r['status'] == 'חודש')
         winner_renewed = sum(1 for r in rows if r['brand'] in ('ווינר', 'אופיר') and r['status'] == 'חודש')
-        unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='ממתין'").fetchone()[0]
+        # 'pending' = items a rep explicitly escalated to the admin queue (mark_clarify).
+        # Raw website intake stays 'ממתין' and lives in /admin/other-forms, not here.
+        unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='pending'").fetchone()[0]
         conn.close()
         stats = dict(total=total, renewed=renewed, no_renew=no_renew, seen=seen, forms=forms, pending=pending,
                      renewed_from_forms=renewed_from_forms, no_contact=no_contact,
@@ -754,8 +756,10 @@ def export_customers_excel():
 @admin_required
 def admin_queue():
     conn = get_db()
+    # Only rep-escalated items ('pending', set by mark_clarify). Raw website intake
+    # ('ממתין') belongs to /admin/other-forms — keeping them apart avoids duplication.
     items = conn.execute(
-        "SELECT * FROM unmatched_submissions WHERE status='ממתין' ORDER BY received_at DESC"
+        "SELECT * FROM unmatched_submissions WHERE status='pending' ORDER BY received_at DESC"
     ).fetchall()
     conn.close()
     return render_template('admin_queue.html', items=items)
