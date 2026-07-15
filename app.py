@@ -746,6 +746,7 @@ def policy_records():
     policy PDFs. Best-effort extraction — some fields may need correction."""
     q = request.args.get('q', '').strip()
     conn = get_db()
+    recompute_insured_statuses(conn)  # keep פעיל/לא פעיל current on view
     if q:
         like = f'%{q}%'
         rows = conn.execute(
