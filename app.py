@@ -1998,7 +1998,7 @@ if EMAIL_CONFIG['enabled']:
 
 if __name__ == '__main__':
     print("=" * 50)
-    print("מערכת חידושים פועלת!")
+    print("מערכת שירות לקוחות פועלת!")
     print("כתובת גישה: http://localhost:5000")
     print("=" * 50)
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=False)

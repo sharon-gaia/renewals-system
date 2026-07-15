@@ -58,7 +58,7 @@ def build_report():
     conn.close()
 
     lines = []
-    lines.append(f"דוח יומי — מערכת חידושים | {today}")
+    lines.append(f"דוח יומי — מערכת שירות לקוחות | {today}")
     lines.append(f"חודש פעיל: {month_name}")
     lines.append("")
 
@@ -118,7 +118,7 @@ def send_report(body):
 
     today = datetime.date.today().strftime('%d/%m/%Y')
     has_alerts = '⚠️' in body or '📋' in body or '❓' in body
-    subject = f"{'⚠️ ' if has_alerts else '✅ '}דוח מערכת חידושים — {today}"
+    subject = f"{'⚠️ ' if has_alerts else '✅ '}דוח מערכת שירות לקוחות — {today}"
 
     msg = MIMEMultipart('alternative')
     msg['Subject'] = subject
