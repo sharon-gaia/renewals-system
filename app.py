@@ -761,6 +761,80 @@ def policy_records():
     conn.close()
     return render_template('policy_records.html', items=rows, q=q)
 
+def build_followup_wa_link_generic(phone, brand):
+    """Pre-filled WhatsApp reminder link from a phone + brand (works for insureds too)."""
+    from urllib.parse import quote
+    p = re.sub(r'\D', '', str(phone or ''))
+    if not p:
+        return None
+    if p.startswith('0'):
+        p = p[1:]
+    p = '972' + p
+    site = 'https://www.winner-ins.co.il/renew' if brand in ('ווינר', 'אופיר') \
+        else 'https://www.gaia-ins.co.il/renew'
+    msg = ('היי, \nניסינו להשיג אותך לחידוש הפוליסה. נשמח אם תוכל ליצור איתנו קשר '
+           'לטובת החידוש, או לחדש את הפוליסה אונליין באתר ' + site)
+    return f'https://wa.me/{p}?text={quote(msg)}'
+
+@app.route('/insured/<int:iid>')
+@login_required
+@admin_required
+def insured_detail(iid):
+    conn = get_db()
+    ins = conn.execute("SELECT * FROM insureds WHERE id=?", (iid,)).fetchone()
+    if not ins:
+        conn.close()
+        flash('לקוח לא נמצא', 'danger')
+        return redirect(url_for('policy_records'))
+    # PDF history for this insured (by ID), newest policy first
+    docs = conn.execute(
+        """SELECT pd.id AS doc_id, pd.filename, pd.received_at,
+                  pr.doc_type_label, pr.period_start, pr.period_end
+           FROM policy_records pr JOIN policy_documents pd ON pr.policy_document_id = pd.id
+           WHERE ltrim(pr.insured_id,'0') = ltrim(?,'0')
+           ORDER BY pr.extracted_at DESC""",
+        (ins['id_number'],)
+    ).fetchall()
+    conn.close()
+    wa_link = build_followup_wa_link_generic(ins['phone'], ins['brand'])
+    return render_template('insured_detail.html', c=ins, docs=docs, wa_link=wa_link)
+
+@app.route('/insured/<int:iid>/update', methods=['POST'])
+@login_required
+@admin_required
+def insured_update(iid):
+    data = request.json or {}
+    allowed = ['agent_notes', 'whatsapp_source', 'is_vip',
+               'call_date_1', 'call_status_1', 'call_by_1',
+               'call_date_2', 'call_status_2', 'call_by_2',
+               'call_date_3', 'call_status_3', 'call_by_3']
+    agent = session.get('display_name') or session.get('username', '')
+    conn = get_db()
+
+    # Manual status change is an admin override that sticks (req 8)
+    if 'status' in data and data['status']:
+        conn.execute("UPDATE insureds SET status=?, status_override=1, updated_at=? WHERE id=?",
+                     (data['status'], datetime.datetime.now().isoformat(), iid))
+
+    # Auto-capture the rep who logged a call attempt (like the renewals page)
+    if agent and any(f'call_date_{n}' in data for n in (1, 2, 3)):
+        prev = conn.execute(
+            "SELECT call_date_1, call_date_2, call_date_3 FROM insureds WHERE id=?", (iid,)
+        ).fetchone()
+        for n in (1, 2, 3):
+            key = f'call_date_{n}'
+            if key in data and data[key] and (not prev or data[key] != prev[f'call_date_{n}']):
+                data[f'call_by_{n}'] = agent
+
+    sets = ', '.join(f"{k}=?" for k in data if k in allowed)
+    if sets:
+        vals = [data[k] for k in data if k in allowed]
+        vals.append(iid)
+        conn.execute(f"UPDATE insureds SET {sets} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
 @app.route('/customer/<int:cid>/clarify', methods=['POST'])
 @login_required
 def mark_clarify(cid):
