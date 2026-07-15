@@ -14,6 +14,21 @@
   </div>
 </div>
 
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-body py-2 d-flex flex-wrap align-items-center gap-2">
+    <span class="small fw-semibold"><i class="bi bi-cloud-download me-1"></i>מילוי לקוחות מהמייל (סריקה אחורה, נתונים בלבד):</span>
+    {% if backfill and backfill.running %}
+    <span class="badge bg-warning text-dark"><span class="spinner-border spinner-border-sm me-1"></span>סריקה רצה ({{ backfill.days }} ימים, מ-{{ backfill.started }})</span>
+    <span class="small text-muted">רענן את הדף לעדכון</span>
+    {% else %}
+    <form method="POST" action="/admin/backfill" class="d-inline"><input type="hidden" name="days" value="30"><button class="btn btn-outline-primary btn-sm">חודש</button></form>
+    <form method="POST" action="/admin/backfill" class="d-inline"><input type="hidden" name="days" value="90"><button class="btn btn-outline-primary btn-sm">3 חודשים</button></form>
+    <form method="POST" action="/admin/backfill" class="d-inline"><input type="hidden" name="days" value="365"><button class="btn btn-primary btn-sm" onclick="return confirm('לסרוק שנה שלמה אחורה? זה ירוץ ברקע ויכול לקחת זמן.')">שנה שלמה</button></form>
+    {% if backfill and backfill.done %}<span class="small text-success">✓ סריקה קודמת: {{ backfill.done }} מסמכים</span>{% endif %}
+    {% endif %}
+  </div>
+</div>
+
 <p class="text-muted small mb-3">
   לקוח אחד לכל ת.ז, נבנה אוטומטית מקבצי ה-PDF של הראל. סטטוס פעיל/לא-פעיל מחושב לפי תקופת הביטוח.
   חילוץ במיטב המאמץ — לעיתים שדה (בעיקר שם) עשוי לדרוש תיקון ידני.

@@ -127,11 +127,19 @@ def recompute_insured_statuses(conn):
     conn.commit()
     return changed
 
+def _event_sort_key(r):
+    """Order a policy_records row on the timeline: prefer the document date, then period start."""
+    d = str(r['doc_date'] or '')
+    ps = parse_dmy(r['period_start'])
+    return (d, ps.isoformat() if ps else '')
+
 def rebuild_insureds(conn):
     """Build/refresh the insureds master from policy_records — one row per ID number,
-    using the policy with the latest start date. Preserves any existing activity
-    (notes, calls, VIP, status override) on rows that already exist."""
-    # Group policy_records by normalized ID, pick the latest by period_start
+    using each person's LATEST policy event (by document date). If that latest event is
+    a cancellation (ביטול) the insured is marked 'בוטל'; otherwise status is by policy
+    period. A stand-alone cancellation with no prior policy still creates the insured
+    from the cancellation's own details. Preserves existing activity and admin overrides."""
+    # Group policy_records by normalized ID, keep the latest event on the timeline
     best = {}
     for r in conn.execute(
         "SELECT * FROM policy_records WHERE insured_id IS NOT NULL AND insured_id != ''"
@@ -139,9 +147,9 @@ def rebuild_insureds(conn):
         idn = normalize_id_number(r['insured_id'])
         if not idn:
             continue
-        start = parse_dmy(r['period_start']) or datetime.date.min
-        if idn not in best or start >= best[idn][0]:
-            best[idn] = (start, r)
+        k = _event_sort_key(r)
+        if idn not in best or k >= best[idn][0]:
+            best[idn] = (k, r)
 
     now = datetime.datetime.now().isoformat()
     upserted = 0
@@ -150,7 +158,11 @@ def rebuild_insureds(conn):
         brand = brand_from_agency(agency)
         wa_source = 'ווינר' if brand in ('ווינר', 'אופיר') else None
         existing = conn.execute("SELECT id, status_override FROM insureds WHERE id_number=?", (idn,)).fetchone()
-        status = compute_active_status(r['period_end'])
+        # Cancellation wins when it is the latest event; otherwise status by period
+        if 'ביטול' in str(r['doc_type_label'] or ''):
+            status = 'בוטל'
+        else:
+            status = compute_active_status(r['period_end'])
         if existing:
             # Refresh policy/contact facts but never clobber activity or an admin override
             keep_status = existing['status_override'] == 1
@@ -340,6 +352,7 @@ def init_db():
             period_end TEXT,
             premium TEXT,
             total_payment TEXT,
+            doc_date TEXT,
             extracted_at TEXT NOT NULL,
             FOREIGN KEY (policy_document_id) REFERENCES policy_documents(id),
             FOREIGN KEY (customer_id) REFERENCES customers(id)
@@ -393,6 +406,13 @@ def init_db():
     existing_us = [r[1] for r in conn.execute("PRAGMA table_info(unmatched_submissions)").fetchall()]
     if 'handled_by' not in existing_us:
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_by TEXT")
+    # Add doc_date to policy_records if missing; backfill from linked document date
+    existing_pr = [r[1] for r in conn.execute("PRAGMA table_info(policy_records)").fetchall()]
+    if 'doc_date' not in existing_pr:
+        conn.execute("ALTER TABLE policy_records ADD COLUMN doc_date TEXT")
+        conn.execute("""UPDATE policy_records SET doc_date=(
+            SELECT received_at FROM policy_documents WHERE policy_documents.id=policy_records.policy_document_id)
+            WHERE doc_date IS NULL""")
     conn.commit()
 
     # Zero-pad short numeric ID numbers to 9 digits (idempotent — once padded,
@@ -817,8 +837,10 @@ def policy_records():
         ).fetchall()
     else:
         rows = conn.execute('SELECT * FROM insureds ORDER BY name LIMIT 500').fetchall()
+    total = conn.execute('SELECT COUNT(*) FROM insureds').fetchone()[0]
     conn.close()
-    return render_template('policy_records.html', items=rows, q=q)
+    return render_template('policy_records.html', items=rows, q=q, total=total,
+                           backfill=_backfill_state)
 
 def build_followup_wa_link_generic(phone, brand):
     """Pre-filled WhatsApp reminder link from a phone + brand (works for insureds too)."""
@@ -1597,13 +1619,14 @@ def _check_email_inbox_impl():
 
 POLICY_DOCS_DIR = os.path.join(ATTACHMENTS_DIR, 'policies')
 
-def parse_harel_policy_pdf(filepath):
+def parse_harel_policy_pdf(source):
     """Best-effort field extraction from a Harel policy-schedule ('דף הרשימה') PDF page.
-    Layout is consistent across doc types (new/renewal/cancellation/change) — same
-    template, different coverage sections. Some fields (agent name, rare names with
-    unusual glyph sequences) may occasionally need manual correction."""
+    `source` may be a file path or raw PDF bytes. Layout is consistent across doc types
+    (new/renewal/cancellation/change) — same template, different coverage sections.
+    Some fields (agent name, rare names with unusual glyphs) may need manual correction."""
     try:
-        with pdfplumber.open(filepath) as pdf:
+        pdf_src = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+        with pdfplumber.open(pdf_src) as pdf:
             text = None
             for page in pdf.pages:
                 t = page.extract_text() or ''
@@ -1676,33 +1699,41 @@ def parse_harel_policy_pdf(filepath):
             if len(nums) > 1:
                 result['total_payment'] = nums[-1]
 
+    # Robust cancellation flag: the doc-type parenthetical can be mis-parsed, but a
+    # cancellation reliably carries the "תוספת ביטול לפוליסה" header — trust that.
+    full = '\n'.join(lines)
+    if 'ביטול לפוליסה' in full or 'תוספת ביטול' in full:
+        result['doc_type_label'] = 'ביטול'
+
     return result
 
 _policy_check_lock = threading.Lock()
 
-def check_policy_documents():
-    """Connect to IMAP, look for confirmed-policy emails (e.g. from Harel ComposeDoc),
-    match by policy number to a customer, and save the PDF locally."""
+def check_policy_documents(days_back=30, keep_pdf=True):
+    """Connect to IMAP, look for confirmed-policy emails (Harel ComposeDoc), extract the
+    data, and (optionally) save the PDF. `days_back` widens the scan for backfills;
+    `keep_pdf=False` parses in memory without storing the file (saves volume space)."""
     if not _policy_check_lock.acquire(blocking=False):
         print('[policy-docs] בדיקה כבר רצה — דילוג')
         return 0
     try:
-        return _check_policy_documents_impl()
+        return _check_policy_documents_impl(days_back, keep_pdf)
     finally:
         _policy_check_lock.release()
 
-def _check_policy_documents_impl():
+def _check_policy_documents_impl(days_back=30, keep_pdf=True):
     cfg = EMAIL_CONFIG
     if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
         return 0
 
+    from email.utils import parsedate_to_datetime
     processed = 0
     try:
         mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
 
-        since_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%d-%b-%Y')
+        since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
         status, data = mail.search(None, f'FROM "ComposeDoc@harel-ins.co.il" SINCE {since_date}')
         if status != 'OK':
             mail.logout()
@@ -1714,6 +1745,10 @@ def _check_policy_documents_impl():
             hdr = email_lib.message_from_bytes(hdr_data[0][1])
             message_id = hdr.get('Message-ID', '').strip()
             subject = decode_str(hdr.get('Subject', ''))
+            try:
+                doc_date = parsedate_to_datetime(hdr.get('Date', '')).astimezone().strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                doc_date = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
             if message_id and conn.execute(
                 'SELECT 1 FROM policy_documents WHERE message_id=?', (message_id,)
@@ -1746,42 +1781,43 @@ def _check_policy_documents_impl():
                 data_bytes = part.get_payload(decode=True)
                 if not data_bytes:
                     continue
-                folder_key = str(customer_id) if customer_id else f'unmatched_{policy_number}'
-                doc_dir = os.path.join(POLICY_DOCS_DIR, folder_key)
-                os.makedirs(doc_dir, exist_ok=True)
-                safe_fn = re.sub(r'[\\/*?:"<>|]', '_', filename)
-                filepath = os.path.join(doc_dir, safe_fn)
-                with open(filepath, 'wb') as f:
-                    f.write(data_bytes)
+                filepath = ''
+                if keep_pdf:
+                    folder_key = str(customer_id) if customer_id else f'unmatched_{policy_number}'
+                    doc_dir = os.path.join(POLICY_DOCS_DIR, folder_key)
+                    os.makedirs(doc_dir, exist_ok=True)
+                    safe_fn = re.sub(r'[\\/*?:"<>|]', '_', filename)
+                    filepath = os.path.join(doc_dir, safe_fn)
+                    with open(filepath, 'wb') as f:
+                        f.write(data_bytes)
                 cur = conn.execute(
                     '''INSERT OR IGNORE INTO policy_documents
                        (customer_id, policy_number, filename, filepath, received_at, message_id)
                        VALUES (?,?,?,?,?,?)''',
-                    (customer_id, policy_number, filename, filepath,
-                     datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), message_id)
+                    (customer_id, policy_number, filename, filepath, doc_date, message_id)
                 )
                 conn.commit()
                 saved_any = True
                 status_label = f'ללקוח {customer_id}' if customer_id else 'לא זוהה לקוח'
-                print(f'[policy-docs] נשמר: {filename} ({policy_number}) {status_label}')
+                print(f'[policy-docs] {"נשמר" if keep_pdf else "עובד"}: {filename} ({policy_number}) {status_label}')
 
                 if cur.lastrowid:
-                    fields = parse_harel_policy_pdf(filepath)
+                    fields = parse_harel_policy_pdf(filepath if keep_pdf else data_bytes)
                     if fields:
                         conn.execute(
                             '''INSERT INTO policy_records
                                (policy_document_id, customer_id, policy_number, doc_type_label,
                                 doc_type_code, branch, agent_name, agent_number, insured_name,
                                 insured_id, spouse_id, address, phone_mobile, phone_home, email,
-                                period_start, period_end, premium, total_payment, extracted_at)
-                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                                period_start, period_end, premium, total_payment, doc_date, extracted_at)
+                               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                             (cur.lastrowid, customer_id, policy_number,
                              fields.get('doc_type_label'), fields.get('doc_type_code'),
                              fields.get('branch'), fields.get('agent_name'), fields.get('agent_number'),
                              fields.get('insured_name'), fields.get('insured_id'), fields.get('spouse_id'),
                              fields.get('address'), fields.get('phone_mobile'), fields.get('phone_home'),
                              fields.get('email'), fields.get('period_start'), fields.get('period_end'),
-                             fields.get('premium'), fields.get('total_payment'),
+                             fields.get('premium'), fields.get('total_payment'), doc_date,
                              datetime.datetime.now().isoformat())
                         )
                         conn.commit()
@@ -1853,6 +1889,44 @@ def refresh_data():
     threading.Thread(target=_run, daemon=True).start()
     flash('רענון הופעל — הנתונים יתעדכנו תוך מספר שניות. רענן את הדף.', 'info')
     return redirect(url_for('index'))
+
+
+_backfill_state = {'running': False, 'done': 0, 'started': None, 'days': 0}
+
+@app.route('/admin/backfill', methods=['POST'])
+@login_required
+@admin_required
+def admin_backfill():
+    """One-time backfill: scan up to a year of Harel PDFs, extract customer data +
+    cancellations into the master. Data-only (keep_pdf=False) to stay within storage.
+    Runs in the background; safe to leave and check back."""
+    if _backfill_state['running']:
+        flash('סריקה כבר רצה ברקע — המתן לסיומה', 'warning')
+        return redirect(url_for('policy_records'))
+    try:
+        days = int(request.form.get('days', '30'))
+    except ValueError:
+        days = 30
+    days = max(1, min(days, 400))
+
+    def _run(days_back):
+        _backfill_state.update(running=True, done=0, started=datetime.datetime.now().strftime('%H:%M'), days=days_back)
+        try:
+            n = check_policy_documents(days_back=days_back, keep_pdf=False)
+            conn = get_db()
+            rebuild_insureds(conn)
+            recompute_insured_statuses(conn)
+            conn.close()
+            _backfill_state['done'] = n
+            print(f'[backfill] הסתיים — {n} מסמכים חדשים, {days_back} ימים אחורה')
+        except Exception as e:
+            print(f'[backfill] שגיאה: {e}')
+        finally:
+            _backfill_state['running'] = False
+
+    threading.Thread(target=_run, args=(days,), daemon=True).start()
+    flash(f'סריקה אחורה של {days} ימים הופעלה ברקע — זה עשוי לקחת זמן. רענן את הדף מדי פעם.', 'info')
+    return redirect(url_for('policy_records'))
 
 
 @app.route('/submit', methods=['POST'])
