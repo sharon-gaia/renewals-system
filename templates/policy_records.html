@@ -15,7 +15,7 @@
 </div>
 
 <p class="text-muted small mb-3">
-  מידע שחולץ אוטומטית מקבצי ה-PDF שמגיעים מהראל (ComposeDoc) — לא רק חידושים, כל פוליסה שהופקה.
+  לקוח אחד לכל ת.ז, נבנה אוטומטית מקבצי ה-PDF של הראל. סטטוס פעיל/לא-פעיל מחושב לפי תקופת הביטוח.
   חילוץ במיטב המאמץ — לעיתים שדה (בעיקר שם) עשוי לדרוש תיקון ידני.
 </p>
 
@@ -36,31 +36,39 @@
   <table class="table table-sm table-hover align-middle bg-white shadow-sm">
     <thead class="table-light">
       <tr>
-        <th>סוג</th>
+        <th>סטטוס</th>
         <th>שם מבוטח</th>
         <th>ת.ז</th>
+        <th>סוכנות</th>
         <th>טלפון</th>
         <th>אימייל</th>
         <th>כתובת</th>
         <th>פוליסה</th>
-        <th>סוכן</th>
         <th>תקופה</th>
-        <th>תשלום</th>
       </tr>
     </thead>
     <tbody>
       {% for item in items %}
       <tr>
-        <td><span class="badge bg-info-subtle text-info-emphasis">{{ item.doc_type_label or '—' }}</span></td>
-        <td class="small fw-semibold">{{ item.insured_name or '—' }}</td>
-        <td class="small">{{ item.insured_id or '—' }}</td>
-        <td class="small">{{ item.phone_mobile or item.phone_home or '—' }}</td>
+        <td>
+          {% if item.status == 'פעיל' %}
+          <span class="badge bg-success">פעיל</span>
+          {% elif item.status == 'בוטל' %}
+          <span class="badge bg-danger">בוטל</span>
+          {% else %}
+          <span class="badge bg-secondary">לא פעיל</span>
+          {% endif %}
+        </td>
+        <td class="small fw-semibold">{{ item.name or '—' }}</td>
+        <td class="small">{{ item.id_number or '—' }}</td>
+        <td class="small">
+          {% if item.brand %}<span class="badge {{ 'bg-info' if item.brand == 'גאיה' else 'bg-purple' }}">{{ item.brand }}</span>{% else %}—{% endif %}
+        </td>
+        <td class="small">{{ item.phone or '—' }}</td>
         <td class="small">{{ item.email or '—' }}</td>
         <td class="small">{{ item.address or '—' }}</td>
         <td class="small">{{ item.policy_number or '—' }}</td>
-        <td class="small">{{ item.agent_name or '—' }}</td>
         <td class="small text-nowrap">{{ item.period_start or '—' }} – {{ item.period_end or '—' }}</td>
-        <td class="small">{{ item.total_payment or '—' }}</td>
       </tr>
       {% endfor %}
     </tbody>

@@ -83,6 +83,100 @@ def normalize_id_number(s):
         return s.zfill(9)
     return s
 
+def parse_dmy(s):
+    """Parse a DD/MM/YYYY date string (as extracted from Harel PDFs) to a date. None on failure."""
+    s = str(s or '').strip()
+    m = re.match(r'(\d{2})/(\d{2})/(\d{4})', s)
+    if not m:
+        return None
+    try:
+        return datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+    except ValueError:
+        return None
+
+def brand_from_agency(agency):
+    """Derive the brand (גאיה/ווינר/אופיר) from the agency name on the policy."""
+    a = str(agency or '')
+    if 'גאיה' in a:
+        return 'גאיה'
+    if 'ווינר' in a or 'וינר' in a:
+        return 'ווינר'
+    if 'אופיר' in a:
+        return 'אופיר'
+    return ''
+
+def compute_active_status(period_end):
+    """Active if today is on/before the policy end date; inactive once it has passed."""
+    end = parse_dmy(period_end)
+    if not end:
+        return 'פעיל'  # unknown end date — assume active until told otherwise
+    return 'פעיל' if datetime.date.today() <= end else 'לא פעיל'
+
+def recompute_insured_statuses(conn):
+    """Weekly job: refresh פעיל/לא פעיל by date. Never touches admin-overridden rows
+    or ones already marked בוטל."""
+    changed = 0
+    for r in conn.execute(
+        "SELECT id, period_end, status FROM insureds WHERE status_override=0 AND status != 'בוטל'"
+    ).fetchall():
+        new_status = compute_active_status(r['period_end'])
+        if new_status != r['status']:
+            conn.execute("UPDATE insureds SET status=?, updated_at=? WHERE id=?",
+                         (new_status, datetime.datetime.now().isoformat(), r['id']))
+            changed += 1
+    conn.commit()
+    return changed
+
+def rebuild_insureds(conn):
+    """Build/refresh the insureds master from policy_records — one row per ID number,
+    using the policy with the latest start date. Preserves any existing activity
+    (notes, calls, VIP, status override) on rows that already exist."""
+    # Group policy_records by normalized ID, pick the latest by period_start
+    best = {}
+    for r in conn.execute(
+        "SELECT * FROM policy_records WHERE insured_id IS NOT NULL AND insured_id != ''"
+    ).fetchall():
+        idn = normalize_id_number(r['insured_id'])
+        if not idn:
+            continue
+        start = parse_dmy(r['period_start']) or datetime.date.min
+        if idn not in best or start >= best[idn][0]:
+            best[idn] = (start, r)
+
+    now = datetime.datetime.now().isoformat()
+    upserted = 0
+    for idn, (_, r) in best.items():
+        agency = r['agent_name'] or ''
+        brand = brand_from_agency(agency)
+        wa_source = 'ווינר' if brand in ('ווינר', 'אופיר') else None
+        existing = conn.execute("SELECT id, status_override FROM insureds WHERE id_number=?", (idn,)).fetchone()
+        status = compute_active_status(r['period_end'])
+        if existing:
+            # Refresh policy/contact facts but never clobber activity or an admin override
+            keep_status = existing['status_override'] == 1
+            conn.execute(
+                """UPDATE insureds SET name=?, agency=?, brand=?, phone=?, email=?, address=?,
+                   policy_number=?, period_start=?, period_end=?, whatsapp_source=COALESCE(whatsapp_source, ?),
+                   status=CASE WHEN status_override=1 THEN status ELSE ? END, updated_at=?
+                   WHERE id=?""",
+                (r['insured_name'], agency, brand, r['phone_mobile'] or r['phone_home'] or '',
+                 r['email'], r['address'], r['policy_number'], r['period_start'], r['period_end'],
+                 wa_source, status, now, existing['id'])
+            )
+        else:
+            conn.execute(
+                """INSERT INTO insureds
+                   (id_number, name, agency, brand, phone, email, address, policy_number,
+                    period_start, period_end, status, whatsapp_source, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (idn, r['insured_name'], agency, brand, r['phone_mobile'] or r['phone_home'] or '',
+                 r['email'], r['address'], r['policy_number'], r['period_start'], r['period_end'],
+                 status, wa_source, now, now)
+            )
+        upserted += 1
+    conn.commit()
+    return upserted
+
 # ── DB helpers ──────────────────────────────────────────────
 
 def get_db():
@@ -191,6 +285,30 @@ def init_db():
             FOREIGN KEY (policy_document_id) REFERENCES policy_documents(id),
             FOREIGN KEY (customer_id) REFERENCES customers(id)
         );
+        CREATE TABLE IF NOT EXISTS insureds (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id_number TEXT UNIQUE,
+            name TEXT,
+            agency TEXT,
+            brand TEXT,
+            phone TEXT,
+            email TEXT,
+            address TEXT,
+            policy_number TEXT,
+            period_start TEXT,
+            period_end TEXT,
+            status TEXT DEFAULT 'פעיל',
+            status_override INTEGER DEFAULT 0,
+            whatsapp_source TEXT,
+            agent_notes TEXT,
+            is_vip INTEGER DEFAULT 0,
+            handled_by TEXT,
+            call_date_1 TEXT, call_status_1 TEXT, call_by_1 TEXT,
+            call_date_2 TEXT, call_status_2 TEXT, call_by_2 TEXT,
+            call_date_3 TEXT, call_status_3 TEXT, call_by_3 TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS unmatched_submissions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             received_at TEXT,
@@ -237,6 +355,16 @@ def init_db():
             ('sharon', generate_password_hash('admin123'), 'שרון', 'admin')
         )
     conn.commit()
+
+    # First-time backfill of the insureds master from existing policy PDFs
+    have_insureds = conn.execute("SELECT COUNT(*) FROM insureds").fetchone()[0]
+    have_records = conn.execute("SELECT COUNT(*) FROM policy_records").fetchone()[0]
+    if have_insureds == 0 and have_records > 0:
+        try:
+            rebuild_insureds(conn)
+        except Exception as e:
+            print(f'[init] insureds backfill שגיאה: {e}')
+
     conn.close()
 
 def active_month():
@@ -614,21 +742,21 @@ def other_forms_delete():
 @login_required
 @admin_required
 def policy_records():
-    """All customer/policy data extracted from Harel policy PDFs — beyond just this
-    month's renewal batch. Best-effort extraction — some fields may need correction."""
+    """All customers (master) — one row per insured (by ID), built from the Harel
+    policy PDFs. Best-effort extraction — some fields may need correction."""
     q = request.args.get('q', '').strip()
     conn = get_db()
     if q:
         like = f'%{q}%'
         rows = conn.execute(
-            '''SELECT * FROM policy_records
-               WHERE insured_name LIKE ? OR insured_id LIKE ? OR policy_number LIKE ?
-                  OR phone_mobile LIKE ? OR email LIKE ?
-               ORDER BY extracted_at DESC''',
+            '''SELECT * FROM insureds
+               WHERE name LIKE ? OR id_number LIKE ? OR policy_number LIKE ?
+                  OR phone LIKE ? OR email LIKE ?
+               ORDER BY name''',
             (like, like, like, like, like)
         ).fetchall()
     else:
-        rows = conn.execute('SELECT * FROM policy_records ORDER BY extracted_at DESC LIMIT 300').fetchall()
+        rows = conn.execute('SELECT * FROM insureds ORDER BY name LIMIT 500').fetchall()
     conn.close()
     return render_template('policy_records.html', items=rows, q=q)
 
@@ -1572,6 +1700,10 @@ def refresh_data():
         try:
             check_email_inbox()
             check_policy_documents()
+            conn = get_db()
+            rebuild_insureds(conn)
+            recompute_insured_statuses(conn)
+            conn.close()
         except Exception as e:
             print(f'[refresh] שגיאה: {e}')
 
