@@ -177,6 +177,65 @@ def rebuild_insureds(conn):
     conn.commit()
     return upserted
 
+def promote_customers_to_insureds(conn, month_id):
+    """Move a renewal month's customers into the insureds master (req 4), preserving
+    all activity (calls, notes, VIP, rep credit). Renewed → פעיל, otherwise → לא פעיל
+    (req 5). Non-destructive: the original customers rows are left intact as history."""
+    now = datetime.datetime.now().isoformat()
+    promoted = 0
+    for cst in conn.execute("SELECT * FROM customers WHERE month_id=?", (month_id,)).fetchall():
+        idn = normalize_id_number(cst['id_number'])
+        if not idn:
+            continue
+        status = 'פעיל' if cst['status'] == 'חודש' else 'לא פעיל'
+        existing = conn.execute("SELECT * FROM insureds WHERE id_number=?", (idn,)).fetchone()
+        if existing:
+            # Fill blanks and set renewal-based status; never wipe existing activity.
+            insured_has_calls = bool(existing['call_status_1'] or existing['call_status_2'] or existing['call_status_3'])
+            conn.execute(
+                """UPDATE insureds SET
+                   name=COALESCE(NULLIF(name,''), ?),
+                   phone=COALESCE(NULLIF(phone,''), ?),
+                   brand=COALESCE(NULLIF(brand,''), ?),
+                   whatsapp_source=COALESCE(whatsapp_source, ?),
+                   agent_notes=COALESCE(NULLIF(agent_notes,''), ?),
+                   is_vip=MAX(COALESCE(is_vip,0), ?),
+                   handled_by=COALESCE(NULLIF(handled_by,''), ?),
+                   policy_number=COALESCE(NULLIF(policy_number,''), ?),
+                   status=?, updated_at=?
+                   WHERE id=?""",
+                (cst['name'], cst['phone'], cst['brand'], cst['whatsapp_source'],
+                 cst['agent_notes'], cst['is_vip'] or 0, cst['handled_by'], cst['policy_number'],
+                 status, now, existing['id'])
+            )
+            if not insured_has_calls:
+                conn.execute(
+                    """UPDATE insureds SET call_date_1=?, call_status_1=?, call_by_1=?,
+                       call_date_2=?, call_status_2=?, call_by_2=?,
+                       call_date_3=?, call_status_3=?, call_by_3=? WHERE id=?""",
+                    (cst['call_date_1'], cst['call_status_1'], cst['call_by_1'],
+                     cst['call_date_2'], cst['call_status_2'], cst['call_by_2'],
+                     cst['call_date_3'], cst['call_status_3'], cst['call_by_3'], existing['id'])
+                )
+        else:
+            wa_source = cst['whatsapp_source'] or ('ווינר' if cst['brand'] in ('ווינר', 'אופיר') else None)
+            conn.execute(
+                """INSERT INTO insureds
+                   (id_number, name, phone, brand, whatsapp_source, agent_notes, is_vip, handled_by,
+                    policy_number, status,
+                    call_date_1, call_status_1, call_by_1, call_date_2, call_status_2, call_by_2,
+                    call_date_3, call_status_3, call_by_3, created_at, updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (idn, cst['name'], cst['phone'], cst['brand'], wa_source, cst['agent_notes'],
+                 cst['is_vip'] or 0, cst['handled_by'], cst['policy_number'], status,
+                 cst['call_date_1'], cst['call_status_1'], cst['call_by_1'],
+                 cst['call_date_2'], cst['call_status_2'], cst['call_by_2'],
+                 cst['call_date_3'], cst['call_status_3'], cst['call_by_3'], now, now)
+            )
+        promoted += 1
+    conn.commit()
+    return promoted
+
 # ── DB helpers ──────────────────────────────────────────────
 
 def get_db():
@@ -985,6 +1044,12 @@ def import_excel():
         ws = wb.active
 
         conn = get_db()
+        # Req 4+5: before starting the new cycle, move the outgoing month's customers
+        # into the "all customers" master (renewed → פעיל, else → לא פעיל), preserving activity.
+        prev = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+        promoted = 0
+        if prev:
+            promoted = promote_customers_to_insureds(conn, prev['id'])
         # Deactivate all months
         conn.execute("UPDATE months SET is_active=0")
         # Create new month
@@ -1053,7 +1118,10 @@ def import_excel():
 
         conn.commit()
         conn.close()
-        flash(f'נטענו {count} לקוחות לחודש {month_name}', 'success')
+        msg = f'נטענו {count} לקוחות לחודש {month_name}'
+        if promoted:
+            msg += f' · {promoted} לקוחות מהחודש הקודם עברו ל"כל הלקוחות"'
+        flash(msg, 'success')
     except Exception as e:
         flash(f'שגיאה בייבוא: {e}', 'danger')
 
