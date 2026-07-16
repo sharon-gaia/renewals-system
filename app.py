@@ -665,6 +665,25 @@ def superadmin_required(f):
         return f(*args, **kwargs)
     return decorated
 
+@app.before_request
+def _refresh_session_from_db():
+    """Keep role + agency grants fresh from the DB so a role/permission change takes
+    effect on the next request — a session created before such a change won't get stuck
+    with stale (and possibly over-restrictive) permissions."""
+    uid = session.get('user_id')
+    if not uid:
+        return
+    conn = get_db()
+    u = conn.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
+    if u:
+        session['role'] = u['role']
+        if u['role'] == 'superadmin':
+            session.pop('brands', None)
+        else:
+            session['brands'] = [r['brand'] for r in
+                                 conn.execute("SELECT brand FROM user_brands WHERE user_id=?", (uid,)).fetchall()]
+    conn.close()
+
 # ── Routes ──────────────────────────────────────────────────
 
 @app.route('/login', methods=['GET', 'POST'])
