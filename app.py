@@ -134,9 +134,9 @@ def brand_from_agency(agency):
 
 
 def allowed_brands():
-    """Agencies the current user may access. Returns None for admins (= everything),
-    otherwise the list of granted brands (possibly empty → sees nothing)."""
-    if session.get('role') == 'admin':
+    """Agencies the current user may access. Returns None for super-admins (= everything);
+    managers and agents are limited to their granted brands (possibly empty → sees nothing)."""
+    if session.get('role') == 'superadmin':
         return None
     if 'brands' not in session:
         uid = session.get('user_id')
@@ -511,6 +511,13 @@ def init_db():
         conn.execute("UPDATE customers SET brand='ווינר' WHERE brand NOT IN ('גאיה','ווינר','אופיר') AND brand IS NOT NULL AND brand != ''")
         conn.execute("INSERT INTO app_meta (key, value) VALUES ('fix_stray_brand_done', ?)",
                      (datetime.datetime.now().isoformat(),))
+    # One-time (guarded): introduce the super-admin tier. Sharon becomes 'superadmin';
+    # any other existing 'admin' stays a manager (agency-scoped). Mark more super-admins
+    # later from the users screen.
+    if not conn.execute("SELECT 1 FROM app_meta WHERE key='superadmin_seed_done'").fetchone():
+        conn.execute("UPDATE users SET role='superadmin' WHERE username='sharon'")
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('superadmin_seed_done', ?)",
+                     (datetime.datetime.now().isoformat(),))
     # One-time (guarded): rename the old "לקוח ענה/ V כחול" status to "נוצר קשר עם לקוח".
     if not conn.execute("SELECT 1 FROM app_meta WHERE key='status_rename_done'").fetchone():
         for tbl in ('customers', 'insureds'):
@@ -594,11 +601,24 @@ def login_required(f):
     return decorated
 
 def admin_required(f):
+    """Manager-level and above (superadmin + admin). Data is still agency-scoped for
+    managers via allowed_brands(); superadmins see everything."""
     from functools import wraps
     @wraps(f)
     def decorated(*args, **kwargs):
-        if session.get('role') != 'admin':
+        if session.get('role') not in ('superadmin', 'admin'):
             flash('גישה מנהל בלבד', 'danger')
+            return redirect(url_for('index'))
+        return f(*args, **kwargs)
+    return decorated
+
+def superadmin_required(f):
+    """Super-admin only — user management, imports, cross-agency structural changes."""
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if session.get('role') != 'superadmin':
+            flash('גישה למנהל-על בלבד', 'danger')
             return redirect(url_for('index'))
         return f(*args, **kwargs)
     return decorated
@@ -618,7 +638,7 @@ def login():
             session['username'] = user['username']
             session['display_name'] = user['display_name']
             session['role'] = user['role']
-            if user['role'] != 'admin':
+            if user['role'] != 'superadmin':
                 conn = get_db()
                 brows = conn.execute("SELECT brand FROM user_brands WHERE user_id=?", (user['id'],)).fetchall()
                 conn.close()
@@ -781,8 +801,9 @@ def build_followup_wa_link(customer):
 @login_required
 def update_customer(cid):
     data = request.json or {}
-    # Permission fence: agents may only modify customers within their agencies.
-    if session.get('role') != 'admin':
+    # Permission fence: only super-admins skip it; managers and agents may modify
+    # customers only within their agencies.
+    if session.get('role') != 'superadmin':
         _c = get_db()
         _row = _c.execute("SELECT brand FROM customers WHERE id=?", (cid,)).fetchone()
         _c.close()
@@ -794,8 +815,8 @@ def update_customer(cid):
                 'call_date_1', 'call_status_1', 'call_by_1',
                 'call_date_2', 'call_status_2', 'call_by_2',
                 'call_date_3', 'call_status_3', 'call_by_3']
-    # Agents cannot update sharon fields or brand (admin-only)
-    if session.get('role') != 'admin':
+    # Agents cannot update sharon fields or brand (manager/super-admin only)
+    if session.get('role') not in ('superadmin', 'admin'):
         for f in ['sharon_notes', 'requests_to_sharon', 'brand']:
             data.pop(f, None)
 
@@ -858,7 +879,9 @@ def export_customers_excel():
     if not month:
         flash('אין חודש פעיל', 'warning')
         return redirect(url_for('customers'))
-    rows = conn.execute("SELECT * FROM customers WHERE month_id=? ORDER BY id", (month['id'],)).fetchall()
+    bc, bp = brand_clause()
+    rows = conn.execute("SELECT * FROM customers WHERE month_id=?" + bc + " ORDER BY id",
+                        [month['id']] + bp).fetchall()
     conn.close()
 
     wb = openpyxl.Workbook()
@@ -901,8 +924,10 @@ def admin_queue():
     conn = get_db()
     # Only rep-escalated items ('pending', set by mark_clarify). Raw website intake
     # ('ממתין') belongs to /admin/other-forms — keeping them apart avoids duplication.
+    bc, bp = brand_clause()  # managers see only their agencies' items
     items = conn.execute(
-        "SELECT * FROM unmatched_submissions WHERE status='pending' ORDER BY received_at DESC"
+        "SELECT * FROM unmatched_submissions WHERE status='pending'" + bc +
+        " ORDER BY received_at DESC", bp
     ).fetchall()
     conn.close()
     return render_template('admin_queue.html', items=items)
@@ -930,12 +955,13 @@ def other_forms():
     # Only real website-form submissions here. Harel policy PDFs are intentionally
     # excluded — they already live in the insureds master ("כל הלקוחות"), so showing
     # them here too was double-bookkeeping. Automated morning monitor tests are filtered.
+    bc, bp = brand_clause()  # managers see only their agencies' forms
     for r in conn.execute(
         "SELECT * FROM unmatched_submissions WHERE status='ממתין' "
         "AND COALESCE(id_number,'') != '999999999' "
         "AND COALESCE(email,'') != 'monitor-check@example.com' "
-        "AND COALESCE(name,'') != 'MONITOR-CHECK-DO-NOT-PROCESS' "
-        "ORDER BY received_at DESC"
+        "AND COALESCE(name,'') != 'MONITOR-CHECK-DO-NOT-PROCESS' " + bc +
+        " ORDER BY received_at DESC", bp
     ).fetchall():
         d = dict(r)
         rows.append({
@@ -979,18 +1005,18 @@ def policy_records():
     q = request.args.get('q', '').strip()
     conn = get_db()
     recompute_insured_statuses(conn)  # keep פעיל/לא פעיל current on view
+    bc, bp = brand_clause()  # managers see only their agencies; super-admins see all
     if q:
         like = f'%{q}%'
         rows = conn.execute(
             '''SELECT * FROM insureds
-               WHERE name LIKE ? OR id_number LIKE ? OR policy_number LIKE ?
-                  OR phone LIKE ? OR email LIKE ?
-               ORDER BY name''',
-            (like, like, like, like, like)
+               WHERE (name LIKE ? OR id_number LIKE ? OR policy_number LIKE ?
+                  OR phone LIKE ? OR email LIKE ?)''' + bc + ' ORDER BY name',
+            [like, like, like, like, like] + bp
         ).fetchall()
     else:
-        rows = conn.execute('SELECT * FROM insureds ORDER BY name LIMIT 500').fetchall()
-    total = conn.execute('SELECT COUNT(*) FROM insureds').fetchone()[0]
+        rows = conn.execute('SELECT * FROM insureds WHERE 1=1' + bc + ' ORDER BY name LIMIT 500', bp).fetchall()
+    total = conn.execute('SELECT COUNT(*) FROM insureds WHERE 1=1' + bc, bp).fetchone()[0]
     conn.close()
     return render_template('policy_records.html', items=rows, q=q, total=total,
                            backfill=_backfill_state)
@@ -1197,7 +1223,7 @@ def queue():
 
 @app.route('/admin')
 @login_required
-@admin_required
+@superadmin_required
 def admin():
     conn = get_db()
     users = conn.execute("SELECT id, username, display_name, role FROM users ORDER BY role, display_name").fetchall()
@@ -1212,7 +1238,7 @@ def admin():
 
 @app.route('/admin/import', methods=['POST'])
 @login_required
-@admin_required
+@superadmin_required
 def import_excel():
     f = request.files.get('file')
     month_name = request.form.get('month_name', '').strip()
@@ -1381,7 +1407,7 @@ def _import_ofir(conn, ws, month_id):
 
 @app.route('/admin/users/add', methods=['POST'])
 @login_required
-@admin_required
+@superadmin_required
 def add_user():
     username = request.form['username'].strip()
     display_name = request.form['display_name'].strip()
@@ -1393,8 +1419,8 @@ def add_user():
         conn.execute("INSERT INTO users (username, password_hash, display_name, role) VALUES (?,?,?,?)",
                      (username, generate_password_hash(password), display_name, role))
         uid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        # Admins implicitly see everything, so agency grants only matter for agents.
-        if role != 'admin':
+        # Super-admins implicitly see everything; managers and agents are agency-scoped.
+        if role != 'superadmin':
             for b in brands:
                 conn.execute("INSERT OR IGNORE INTO user_brands (user_id, brand) VALUES (?,?)", (uid, b))
         conn.commit()
@@ -1407,7 +1433,7 @@ def add_user():
 
 @app.route('/admin/users/<int:uid>/brands', methods=['POST'])
 @login_required
-@admin_required
+@superadmin_required
 def set_user_brands(uid):
     """Replace a user's agency access with the submitted set."""
     brands = [b for b in request.form.getlist('brands') if b in BRANDS]
@@ -1426,7 +1452,7 @@ def set_user_brands(uid):
 
 @app.route('/admin/users/delete/<int:uid>', methods=['POST'])
 @login_required
-@admin_required
+@superadmin_required
 def delete_user(uid):
     if uid == session['user_id']:
         flash('לא ניתן למחוק את עצמך', 'danger')
@@ -1440,7 +1466,7 @@ def delete_user(uid):
 
 @app.route('/admin/users/reset-password/<int:uid>', methods=['POST'])
 @login_required
-@admin_required
+@superadmin_required
 def reset_password(uid):
     new_pass = request.form['new_password']
     conn = get_db()

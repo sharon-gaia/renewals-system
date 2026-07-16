@@ -123,14 +123,16 @@
               <td>{{ u['display_name'] }}</td>
               <td><code>{{ u['username'] }}</code></td>
               <td>
-                {% if u['role'] == 'admin' %}
+                {% if u['role'] == 'superadmin' %}
+                <span class="badge bg-danger">מנהל על</span>
+                {% elif u['role'] == 'admin' %}
                 <span class="badge bg-warning text-dark">מנהל</span>
                 {% else %}
                 <span class="badge bg-secondary">נציג</span>
                 {% endif %}
               </td>
               <td>
-                {% if u['role'] == 'admin' %}
+                {% if u['role'] == 'superadmin' %}
                 <span class="text-muted small"><i class="bi bi-infinity me-1"></i>כל הסוכנויות</span>
                 {% else %}
                 <form method="POST" action="/admin/users/{{ u['id'] }}/brands" class="d-flex flex-wrap align-items-center gap-2">
@@ -182,6 +184,7 @@
             <select name="role" class="form-select">
               <option value="agent">נציג</option>
               <option value="admin">מנהל</option>
+              <option value="superadmin">מנהל על</option>
             </select>
           </div>
           <div class="col-6 col-md-2">

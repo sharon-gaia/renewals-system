@@ -34,15 +34,18 @@
       <ul class="navbar-nav me-auto">
         <li class="nav-item"><a class="nav-link" href="/"><i class="bi bi-house me-1"></i>דשבורד</a></li>
         <li class="nav-item"><a class="nav-link" href="/customers"><i class="bi bi-arrow-repeat me-1"></i>חידושים</a></li>
-        {% if session.role == 'admin' %}
-        <li class="nav-item"><a class="nav-link" href="/admin"><i class="bi bi-gear me-1"></i>ניהול</a></li>
+        {% if session.role in ('admin', 'superadmin') %}
         <li class="nav-item"><a class="nav-link" href="/admin/other-forms"><i class="bi bi-inbox me-1"></i>טפסים שאינם חידושים</a></li>
         <li class="nav-item"><a class="nav-link" href="/admin/policy-records"><i class="bi bi-people me-1"></i>כל הלקוחות</a></li>
+        {% endif %}
+        {% if session.role == 'superadmin' %}
+        <li class="nav-item"><a class="nav-link" href="/admin"><i class="bi bi-gear me-1"></i>ניהול</a></li>
         {% endif %}
       </ul>
       <span class="navbar-text text-white-50 ms-3">
         <i class="bi bi-person-circle me-1"></i>{{ session.display_name }}
-        {% if session.role == 'admin' %}<span class="badge bg-warning text-dark me-1">מנהל</span>{% endif %}
+        {% if session.role == 'superadmin' %}<span class="badge bg-danger me-1">מנהל על</span>
+        {% elif session.role == 'admin' %}<span class="badge bg-warning text-dark me-1">מנהל</span>{% endif %}
       </span>
       <a class="btn btn-outline-light btn-sm ms-3" href="/logout">יציאה</a>
     </div>
