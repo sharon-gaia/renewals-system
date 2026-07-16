@@ -75,6 +75,32 @@ def format_date(value):
 STATUSES = ['', 'טופס התקבל', 'חודש', 'לא רוצים לחדש', 'לקוח ענה/ V כחול']
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
 
+# Optional elementary/car fields (mainly the Ofir/Meir book). Ordered (column, Hebrew
+# label). Stored on both customers and insureds; the UI renders each only when it has a
+# value, so Gaia/Winner records simply don't show them.
+EXTRA_FIELD_DEFS = [
+    ('insurer',            'חברה'),
+    ('sector',             'ענף'),
+    ('license_number',     'רישוי'),
+    ('secondary_status',   'סטטוס משני'),
+    ('cover_third_party',  "צד ג'"),
+    ('cover_compulsory',   'חובה'),
+    ('cover_comprehensive','מקיף'),
+    ('cover_riders',       'ריידרים'),
+    ('sum_insured',        'ס/מ'),
+    ('offer_company',      'חברת ההצעה'),
+    ('done_company',       'חברה שנעשה'),
+    ('handler',            'מטפל'),
+    ('sub_agent',          'סוכן מטפל'),
+]
+EXTRA_FIELDS = [c for c, _ in EXTRA_FIELD_DEFS]
+
+
+@app.context_processor
+def inject_extra_fields():
+    """Make the optional-field defs available to every template."""
+    return {'extra_field_defs': EXTRA_FIELD_DEFS}
+
 def normalize_id_number(s):
     """Israeli ID numbers are 9 digits — left-pad short numeric IDs with zeros
     (e.g. 33775065 → 033775065). Leaves non-numeric or 9+ digit values untouched."""
@@ -442,6 +468,13 @@ def init_db():
                      ('form_id_card_holder','TEXT'), ('handled_by','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
+    # Extra elementary/car fields (mainly from the Ofir/Meir book). All optional — shown
+    # in the UI only when populated. Added to both customers and the insureds master.
+    for tbl in ('customers', 'insureds'):
+        have = [r[1] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()]
+        for col in EXTRA_FIELDS:
+            if col not in have:
+                conn.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT")
 
     # Add handled_by to unmatched_submissions if missing
     existing_us = [r[1] for r in conn.execute("PRAGMA table_info(unmatched_submissions)").fetchall()]

@@ -61,6 +61,11 @@
             <td><span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand or '—' }}</span></td>
           </tr>
           <tr><th>פרמיה שנה שעברה</th><td>{{ c.premium_last_year or '—' }}</td></tr>
+          {% for col, label in extra_field_defs %}
+          {% if c[col] %}
+          <tr><th>{{ label }}</th><td>{{ c[col] }}</td></tr>
+          {% endif %}
+          {% endfor %}
         </table>
       </div>
     </div>

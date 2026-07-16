@@ -59,6 +59,11 @@
             <td>{% if c.brand %}<span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand }}</span>{% else %}{{ c.agency or '—' }}{% endif %}</td>
           </tr>
           <tr><th>תקופת ביטוח</th><td>{{ c.period_start or '—' }} – {{ c.period_end or '—' }}</td></tr>
+          {% for col, label in extra_field_defs %}
+          {% if c[col] %}
+          <tr><th>{{ label }}</th><td>{{ c[col] }}</td></tr>
+          {% endif %}
+          {% endfor %}
         </table>
       </div>
     </div>
