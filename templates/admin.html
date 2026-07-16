@@ -106,7 +106,7 @@
         <div class="table-responsive mb-4">
           <table class="table table-sm align-middle">
             <thead class="table-light">
-              <tr><th>שם תצוגה</th><th>שם משתמש</th><th>תפקיד</th><th>איפוס סיסמה</th><th>מחיקה</th></tr>
+              <tr><th>שם תצוגה</th><th>שם משתמש</th><th>תפקיד</th><th>גישת סוכנויות</th><th>איפוס סיסמה</th><th>מחיקה</th></tr>
             </thead>
             <tbody>
             {% for u in users %}
@@ -118,6 +118,23 @@
                 <span class="badge bg-warning text-dark">מנהל</span>
                 {% else %}
                 <span class="badge bg-secondary">נציג</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if u['role'] == 'admin' %}
+                <span class="text-muted small"><i class="bi bi-infinity me-1"></i>כל הסוכנויות</span>
+                {% else %}
+                <form method="POST" action="/admin/users/{{ u['id'] }}/brands" class="d-flex flex-wrap align-items-center gap-2">
+                  {% for ag in agencies %}
+                  <div class="form-check form-check-inline m-0">
+                    <input class="form-check-input" type="checkbox" name="brands" value="{{ ag }}"
+                           id="ub{{ u['id'] }}-{{ loop.index }}"
+                           {% if ag in user_brands.get(u['id'], []) %}checked{% endif %}>
+                    <label class="form-check-label small" for="ub{{ u['id'] }}-{{ loop.index }}">{{ ag }}</label>
+                  </div>
+                  {% endfor %}
+                  <button type="submit" class="btn btn-outline-primary btn-sm py-0">שמור</button>
+                </form>
                 {% endif %}
               </td>
               <td>
@@ -162,6 +179,16 @@
             <button type="submit" class="btn btn-success w-100">
               <i class="bi bi-person-plus me-1"></i>הוסף
             </button>
+          </div>
+          <div class="col-12">
+            <span class="small text-muted me-2">גישת סוכנויות (לנציג):</span>
+            {% for ag in agencies %}
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="checkbox" name="brands" value="{{ ag }}" id="newub-{{ loop.index }}" checked>
+              <label class="form-check-label small" for="newub-{{ loop.index }}">{{ ag }}</label>
+            </div>
+            {% endfor %}
+            <span class="small text-muted">· מנהל רואה הכול ממילא</span>
           </div>
         </form>
       </div>

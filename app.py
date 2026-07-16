@@ -95,15 +95,49 @@ def parse_dmy(s):
         return None
 
 def brand_from_agency(agency):
-    """Derive the brand (גאיה/ווינר/אופיר) from the agency name on the policy."""
+    """Derive the brand (גאיה/ווינר) from the agency name on the policy. Historical
+    'אופיר' agency names map to 'ווינר' — Ofir was mislabeled Winner business. Ofir
+    remains a selectable agency (BRANDS) for permissions/manual assignment, just not
+    auto-derived here, so the one-time relabel is not undone on the next rebuild."""
     a = str(agency or '')
     if 'גאיה' in a:
         return 'גאיה'
-    if 'ווינר' in a or 'וינר' in a:
+    if 'ווינר' in a or 'וינר' in a or 'אופיר' in a:
         return 'ווינר'
-    if 'אופיר' in a:
-        return 'אופיר'
     return ''
+
+
+def allowed_brands():
+    """Agencies the current user may access. Returns None for admins (= everything),
+    otherwise the list of granted brands (possibly empty → sees nothing)."""
+    if session.get('role') == 'admin':
+        return None
+    if 'brands' not in session:
+        uid = session.get('user_id')
+        if not uid:
+            return []
+        conn = get_db()
+        rows = conn.execute("SELECT brand FROM user_brands WHERE user_id=?", (uid,)).fetchall()
+        conn.close()
+        session['brands'] = [r['brand'] for r in rows]
+    return session['brands']
+
+
+def brand_clause(col='brand'):
+    """SQL fragment + params limiting `col` to the user's agencies. ('', []) for admins;
+    a never-true clause when a non-admin has no agencies granted."""
+    ab = allowed_brands()
+    if ab is None:
+        return '', []
+    if not ab:
+        return ' AND 1=0', []
+    return f" AND {col} IN ({','.join('?' * len(ab))})", list(ab)
+
+
+def can_access_brand(brand):
+    """Whether the current user may see a record with the given brand."""
+    ab = allowed_brands()
+    return ab is None or (brand in ab)
 
 def compute_active_status(period_end):
     """Active if today is on/before the policy end date; inactive once it has passed."""
@@ -265,6 +299,13 @@ def init_db():
             display_name TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'agent'
         );
+        -- Which agencies (brands) each non-admin user may access. Admins see everything.
+        CREATE TABLE IF NOT EXISTS user_brands (
+            user_id INTEGER NOT NULL,
+            brand TEXT NOT NULL,
+            PRIMARY KEY (user_id, brand)
+        );
+        CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS months (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -406,6 +447,23 @@ def init_db():
     existing_us = [r[1] for r in conn.execute("PRAGMA table_info(unmatched_submissions)").fetchall()]
     if 'handled_by' not in existing_us:
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_by TEXT")
+    # One-time (guarded): the historical 'אופיר' brand was mislabeled Winner business —
+    # fold it into 'ווינר' across all data. Ofir stays a selectable agency for permissions
+    # but is no longer auto-derived (see brand_from_agency), so this relabel sticks.
+    if not conn.execute("SELECT 1 FROM app_meta WHERE key='ofir_to_winner_done'").fetchone():
+        for tbl in ('customers', 'insureds', 'unmatched_submissions'):
+            conn.execute(f"UPDATE {tbl} SET brand='ווינר' WHERE brand='אופיר'")
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('ofir_to_winner_done', ?)",
+                     (datetime.datetime.now().isoformat(),))
+    # One-time (guarded): seed agency access for pre-existing agents so nobody is locked
+    # out — default to Gaia + Winner (not Ofir), matching the intended baseline.
+    if not conn.execute("SELECT 1 FROM app_meta WHERE key='seed_user_brands_done'").fetchone():
+        for u in conn.execute("SELECT id FROM users WHERE role != 'admin'").fetchall():
+            if not conn.execute("SELECT 1 FROM user_brands WHERE user_id=?", (u[0],)).fetchone():
+                for b in ('גאיה', 'ווינר'):
+                    conn.execute("INSERT OR IGNORE INTO user_brands (user_id, brand) VALUES (?,?)", (u[0], b))
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('seed_user_brands_done', ?)",
+                     (datetime.datetime.now().isoformat(),))
     # One-time cleanup: purge automated morning monitor tests captured before the
     # ingestion-level filter existed. Marker-based rows, plus fully-empty rows (the
     # no-field monitor forms like 'מינוי סוכן' leave no identifying data → not actionable).
@@ -498,6 +556,11 @@ def login():
             session['username'] = user['username']
             session['display_name'] = user['display_name']
             session['role'] = user['role']
+            if user['role'] != 'admin':
+                conn = get_db()
+                brows = conn.execute("SELECT brand FROM user_brands WHERE user_id=?", (user['id'],)).fetchall()
+                conn.close()
+                session['brands'] = [b['brand'] for b in brows]
             return redirect(url_for('index'))
         flash('שם משתמש או סיסמה שגויים', 'danger')
     return render_template('login.html')
@@ -514,9 +577,11 @@ def index():
     stats = {}
     if month:
         conn = get_db()
+        bc, bp = brand_clause()
         rows = conn.execute("""SELECT status, brand, form_received_at,
                                call_status_1, call_status_2, call_status_3
-                               FROM customers WHERE month_id=?""", (month['id'],)).fetchall()
+                               FROM customers WHERE month_id=?""" + bc,
+                            [month['id']] + bp).fetchall()
         total = len(rows)
         renewed = sum(1 for r in rows if r['status'] == 'חודש')
         no_renew = sum(1 for r in rows if r['status'] == 'לא רוצים לחדש')
@@ -558,6 +623,11 @@ def customers():
     query = "SELECT * FROM customers WHERE month_id=?"
     params = [month['id']]
 
+    # Hard permission fence: non-admins only ever see their granted agencies.
+    bc, bp = brand_clause()
+    query += bc
+    params += bp
+
     if brand_filter:
         if brand_filter == 'ווינר':
             query += " AND brand IN ('ווינר','אופיר')"
@@ -595,17 +665,18 @@ def search_customers():
         # Normalised phone match too, so 050-123 finds 0501234567 etc.
         digits = re.sub(r'\D', '', search)
         phone_like = f'%{digits}%' if digits else like
+        bc, bp = brand_clause('c.brand')
         rows = conn.execute(
             """SELECT c.*, m.name AS month_name
                FROM customers c
                LEFT JOIN months m ON m.id = c.month_id
-               WHERE c.name LIKE ?
+               WHERE (c.name LIKE ?
                   OR c.phone LIKE ?
                   OR replace(replace(c.phone,'-',''),' ','') LIKE ?
                   OR c.policy_number LIKE ?
-                  OR ltrim(c.id_number,'0') LIKE ?
+                  OR ltrim(c.id_number,'0') LIKE ?)""" + bc + """
                ORDER BY m.id DESC, c.name""",
-            (like, like, phone_like, like, like)
+            [like, like, phone_like, like, like] + bp
         ).fetchall()
         conn.close()
     return render_template('search_results.html', customers=rows, search=search)
@@ -620,6 +691,9 @@ def customer_detail(cid):
     conn.close()
     if not customer:
         flash('לקוח לא נמצא', 'danger')
+        return redirect(url_for('customers'))
+    if not can_access_brand(customer['brand']):
+        flash('אין לך הרשאה לצפות בלקוח של סוכנות זו', 'danger')
         return redirect(url_for('customers'))
     wa_link = build_followup_wa_link(customer)
     return render_template('customer_detail.html', c=customer, month=month,
@@ -645,6 +719,13 @@ def build_followup_wa_link(customer):
 @login_required
 def update_customer(cid):
     data = request.json or {}
+    # Permission fence: agents may only modify customers within their agencies.
+    if session.get('role') != 'admin':
+        _c = get_db()
+        _row = _c.execute("SELECT brand FROM customers WHERE id=?", (cid,)).fetchone()
+        _c.close()
+        if not _row or not can_access_brand(_row['brand']):
+            return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
     allowed = ['status', 'agent_notes', 'contact_date', 'interested_in_products',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
                 'whatsapp_source', 'brand',
@@ -1034,9 +1115,11 @@ def queue():
         flash('אין חודש פעיל', 'warning')
         return redirect(url_for('index'))
     conn = get_db()
+    bc, bp = brand_clause()
     rows = conn.execute(
-        "SELECT * FROM customers WHERE month_id=? AND status='טופס התקבל' ORDER BY form_received_at DESC",
-        (month['id'],)
+        "SELECT * FROM customers WHERE month_id=? AND status='טופס התקבל'" + bc +
+        " ORDER BY form_received_at DESC",
+        [month['id']] + bp
     ).fetchall()
     # Fetch attachments per customer
     attachments = {}
@@ -1057,9 +1140,13 @@ def admin():
     conn = get_db()
     users = conn.execute("SELECT id, username, display_name, role FROM users ORDER BY role, display_name").fetchall()
     months = conn.execute("SELECT * FROM months ORDER BY id DESC").fetchall()
+    ub_map = {}
+    for r in conn.execute("SELECT user_id, brand FROM user_brands").fetchall():
+        ub_map.setdefault(r['user_id'], []).append(r['brand'])
     conn.close()
     return render_template('admin.html', users=users, months=months,
-                           email_sync_enabled=EMAIL_CONFIG['enabled'])
+                           email_sync_enabled=EMAIL_CONFIG['enabled'],
+                           agencies=BRANDS, user_brands=ub_map)
 
 @app.route('/admin/import', methods=['POST'])
 @login_required
@@ -1167,15 +1254,41 @@ def add_user():
     display_name = request.form['display_name'].strip()
     password = request.form['password']
     role = request.form.get('role', 'agent')
+    brands = [b for b in request.form.getlist('brands') if b in BRANDS]
     try:
         conn = get_db()
         conn.execute("INSERT INTO users (username, password_hash, display_name, role) VALUES (?,?,?,?)",
                      (username, generate_password_hash(password), display_name, role))
+        uid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # Admins implicitly see everything, so agency grants only matter for agents.
+        if role != 'admin':
+            for b in brands:
+                conn.execute("INSERT OR IGNORE INTO user_brands (user_id, brand) VALUES (?,?)", (uid, b))
         conn.commit()
         conn.close()
         flash(f'משתמש {display_name} נוצר', 'success')
     except Exception as e:
         flash(f'שגיאה: {e}', 'danger')
+    return redirect(url_for('admin'))
+
+
+@app.route('/admin/users/<int:uid>/brands', methods=['POST'])
+@login_required
+@admin_required
+def set_user_brands(uid):
+    """Replace a user's agency access with the submitted set."""
+    brands = [b for b in request.form.getlist('brands') if b in BRANDS]
+    conn = get_db()
+    conn.execute("DELETE FROM user_brands WHERE user_id=?", (uid,))
+    for b in brands:
+        conn.execute("INSERT OR IGNORE INTO user_brands (user_id, brand) VALUES (?,?)", (uid, b))
+    conn.commit()
+    conn.close()
+    # If the edited user is logged in, their session cache refreshes on next login;
+    # drop our own cache if we edited ourselves (harmless for admins).
+    if uid == session.get('user_id'):
+        session.pop('brands', None)
+    flash('הרשאות הסוכנות עודכנו', 'success')
     return redirect(url_for('admin'))
 
 @app.route('/admin/users/delete/<int:uid>', methods=['POST'])
