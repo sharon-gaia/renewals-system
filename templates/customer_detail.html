@@ -134,11 +134,9 @@
           <div class="col-md-6">
             <label class="form-label fw-semibold">סטטוס</label>
             <select id="det-status" class="form-select">
-              <option value="" {% if not c.status %}selected{% endif %}>ממתין לטיפול</option>
-              <option value="טופס התקבל" {% if c.status == 'טופס התקבל' %}selected{% endif %}>📋 טופס התקבל</option>
-              <option value="חודש" {% if c.status == 'חודש' %}selected{% endif %}>חודש ✓</option>
-              <option value="נוצר קשר עם לקוח" {% if c.status == 'נוצר קשר עם לקוח' %}selected{% endif %}>נוצר קשר עם לקוח</option>
-              <option value="לא רוצים לחדש" {% if c.status == 'לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
+              {% for val, label in status_options %}
+              <option value="{{ val }}" {% if (c.status or '') == val %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
             </select>
           </div>
           <div class="col-md-6">

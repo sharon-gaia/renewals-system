@@ -75,6 +75,45 @@ def format_date(value):
 STATUSES = ['', 'טופס התקבל', 'חודש', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
 
+# Status dropdowns differ per agency. Gaia/Winner keep the renewals workflow; Ofir
+# (Meir's elementary book) has its own pipeline. Each entry is (stored value, label);
+# '' is the default/unstarted state.
+GW_STATUS_OPTIONS = [
+    ('', 'ממתין לטיפול'),
+    ('טופס התקבל', '📋 טופס התקבל'),
+    ('חודש', 'חודש ✓'),
+    ('נוצר קשר עם לקוח', 'נוצר קשר עם לקוח'),
+    ('לא רוצים לחדש', 'לא רוצים לחדש'),
+]
+OFIR_STATUS_OPTIONS = [
+    ('', 'לא התחיל'),
+    ('תומחר', 'תומחר'),
+    ('קיבל פניה', 'קיבל פניה'),
+    ('הלקוח אישר', 'הלקוח אישר'),
+    ('חודש', 'חודש ✓'),
+    ('בוטל', 'בוטל'),
+    ('לא מחדש', 'לא מחדש'),
+    ('פרוייקט הסתיים', 'פרוייקט הסתיים'),
+    ('רק לשלם', 'רק לשלם'),
+]
+
+def status_options_for(brand):
+    return OFIR_STATUS_OPTIONS if brand == 'אופיר' else GW_STATUS_OPTIONS
+
+# Ofir renewal categories, split by the ענף (sector) column. Dashboard shows renewal
+# % per category. Each entry is (label, [aliases]); a row matches if any alias is a
+# substring of its sector (so 'דירות' lands in 'דירה', 'עסק'→'עסקים', etc.).
+OFIR_CATEGORIES = [
+    ('רכב',         ['רכב']),
+    ('דירה',        ['דירה', 'דירות']),
+    ('עסקים',       ['עסק']),
+    ('משכנתא',      ['משכנת']),
+    ('חובה',        ['חובה']),
+    ('חבויות',      ['חבוי']),
+    ('בריאות',      ['בריאות']),
+    ('עובדים זרים', ['עובדים']),
+]
+
 # Optional elementary/car fields (mainly the Ofir/Meir book). Ordered (column, Hebrew
 # label). Stored on both customers and insureds; the UI renders each only when it has a
 # value, so Gaia/Winner records simply don't show them.
@@ -660,7 +699,7 @@ def index():
     if month:
         conn = get_db()
         bc, bp = brand_clause()
-        rows = conn.execute("""SELECT status, brand, form_received_at,
+        rows = conn.execute("""SELECT status, brand, sector, form_received_at,
                                call_status_1, call_status_2, call_status_3
                                FROM customers WHERE month_id=?""" + bc,
                             [month['id']] + bp).fetchall()
@@ -677,16 +716,30 @@ def index():
             return bool(r['call_status_1'] or r['call_status_2'] or r['call_status_3'])
         no_contact = sum(1 for r in rows if not r['status'] and not _contacted(r))
         gaia = sum(1 for r in rows if r['brand'] == 'גאיה')
-        winner = sum(1 for r in rows if r['brand'] in ('ווינר', 'אופיר'))
+        winner = sum(1 for r in rows if r['brand'] == 'ווינר')
+        ofir = sum(1 for r in rows if r['brand'] == 'אופיר')
         gaia_renewed = sum(1 for r in rows if r['brand'] == 'גאיה' and r['status'] == 'חודש')
-        winner_renewed = sum(1 for r in rows if r['brand'] in ('ווינר', 'אופיר') and r['status'] == 'חודש')
+        winner_renewed = sum(1 for r in rows if r['brand'] == 'ווינר' and r['status'] == 'חודש')
+        ofir_renewed = sum(1 for r in rows if r['brand'] == 'אופיר' and r['status'] == 'חודש')
+        # Ofir renewals split by ענף (sector): total vs renewed (חודש) per category → %.
+        ofir_rows = [r for r in rows if r['brand'] == 'אופיר']
+        ofir_by_category = []
+        for cat, aliases in OFIR_CATEGORIES:
+            in_cat = [r for r in ofir_rows if any(a in (r['sector'] or '') for a in aliases)]
+            t = len(in_cat)
+            rnw = sum(1 for r in in_cat if r['status'] == 'חודש')
+            if t:
+                ofir_by_category.append({'category': cat, 'total': t, 'renewed': rnw,
+                                         'pct': round(rnw / t * 100, 1)})
         # 'pending' = items a rep explicitly escalated to the admin queue (mark_clarify).
         # Raw website intake stays 'ממתין' and lives in /admin/other-forms, not here.
         unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='pending'").fetchone()[0]
         conn.close()
         stats = dict(total=total, renewed=renewed, no_renew=no_renew, seen=seen, forms=forms, pending=pending,
                      renewed_from_forms=renewed_from_forms, no_contact=no_contact,
-                     gaia=gaia, winner=winner, gaia_renewed=gaia_renewed, winner_renewed=winner_renewed,
+                     gaia=gaia, winner=winner, ofir=ofir,
+                     gaia_renewed=gaia_renewed, winner_renewed=winner_renewed, ofir_renewed=ofir_renewed,
+                     ofir_by_category=ofir_by_category,
                      pct=round(renewed / total * 100, 1) if total else 0, unmatched=unmatched)
     return render_template('dashboard.html', month=month, stats=stats)
 
@@ -779,7 +832,8 @@ def customer_detail(cid):
         return redirect(url_for('customers'))
     wa_link = build_followup_wa_link(customer)
     return render_template('customer_detail.html', c=customer, month=month,
-                           statuses=STATUSES, wa_link=wa_link)
+                           statuses=STATUSES, status_options=status_options_for(customer['brand']),
+                           wa_link=wa_link)
 
 
 def build_followup_wa_link(customer):
@@ -1302,6 +1356,13 @@ IMPORT_STATUS_MAP = {
 }
 
 
+def _ofir_status(raw):
+    """Ofir has its own status set — keep the sheet value as-is (only the unstarted
+    'לא התחיל' collapses to the empty/default state)."""
+    raw = (raw or '').strip()
+    return '' if raw in ('', 'לא התחיל') else raw
+
+
 def _import_gaia_winner(conn, ws, month_id):
     """Gaia/Winner export: header row contains 'פוליסה' in col A; brand comes from the
     'מותג' column so a single file may hold both Gaia and Winner rows."""
@@ -1395,7 +1456,7 @@ def _import_ofir(conn, ws, month_id):
         """, (
             month_id, policy, name,
             normalize_id_number(col('זהות', row)), col('טלפון', row), col('Email', row),
-            'אופיר', IMPORT_STATUS_MAP.get(col('סטטוס ראשוני', row), ''),
+            'אופיר', _ofir_status(col('סטטוס ראשוני', row)),
             col('פרמיה', row), col('הערות ועדכונים', row),
             col('חברה', row), col('ענף', row), col('רשוי', row), col('סטטוס משני', row),
             col("צד ג'", row), col('חובה', row), col('מקיף', row), col('ריידרים', row),
