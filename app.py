@@ -455,6 +455,12 @@ def init_db():
             conn.execute(f"UPDATE {tbl} SET brand='ווינר' WHERE brand='אופיר'")
         conn.execute("INSERT INTO app_meta (key, value) VALUES ('ofir_to_winner_done', ?)",
                      (datetime.datetime.now().isoformat(),))
+    # One-time (guarded): a stray customer row had a garbage brand ('י', an import
+    # typo). Assign it to Winner per request so it stops being invisible to agents.
+    if not conn.execute("SELECT 1 FROM app_meta WHERE key='fix_stray_brand_done'").fetchone():
+        conn.execute("UPDATE customers SET brand='ווינר' WHERE brand NOT IN ('גאיה','ווינר','אופיר') AND brand IS NOT NULL AND brand != ''")
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('fix_stray_brand_done', ?)",
+                     (datetime.datetime.now().isoformat(),))
     # One-time (guarded): seed agency access for pre-existing agents so nobody is locked
     # out — default to Gaia + Winner (not Ofir), matching the intended baseline.
     if not conn.execute("SELECT 1 FROM app_meta WHERE key='seed_user_brands_done'").fetchone():
