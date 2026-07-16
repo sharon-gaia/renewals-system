@@ -37,6 +37,11 @@
       <option value="חודש" {% if status_filter=='חודש' %}selected{% endif %}>חודש ✓</option>
       <option value="נוצר קשר עם לקוח" {% if status_filter=='נוצר קשר עם לקוח' %}selected{% endif %}>נוצר קשר עם לקוח</option>
       <option value="לא רוצים לחדש" {% if status_filter=='לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
+      <optgroup label="אופיר">
+        {% for val, label in ofir_status_options %}{% if val and val != 'חודש' %}
+        <option value="{{ val }}" {% if status_filter==val %}selected{% endif %}>{{ label }}</option>
+        {% endif %}{% endfor %}
+      </optgroup>
     </select>
   </div>
   <div class="col-6 col-md-2">
@@ -64,7 +69,7 @@
   </thead>
   <tbody>
   {% for c in customers %}
-  <tr class="customer-row {% if c.status == 'חודש' %}table-success{% elif c.status == 'לא רוצים לחדש' %}table-danger{% elif c.status == 'נוצר קשר עם לקוח' %}table-warning{% elif c.status == 'טופס התקבל' %}table-info{% endif %}"
+  <tr class="customer-row {% if c.status == 'חודש' %}table-success{% elif c.status in ['לא רוצים לחדש','לא מחדש','בוטל'] %}table-danger{% elif c.status in ['נוצר קשר עם לקוח','קיבל פניה'] %}table-warning{% elif c.status in ['טופס התקבל','הלקוח אישר'] %}table-info{% endif %}"
       data-id="{{ c.id }}">
     <td class="px-3 py-2" style="min-width:130px">
       <a href="/customer/{{ c.id }}" class="text-decoration-none text-dark d-flex align-items-center gap-2">
@@ -153,9 +158,9 @@ document.querySelectorAll('.status-select').forEach(sel => {
 
 function statusClass(s) {
   if (s === 'חודש') return 'table-success';
-  if (s === 'לא רוצים לחדש') return 'table-danger';
-  if (s === 'נוצר קשר עם לקוח') return 'table-warning';
-  if (s === 'טופס התקבל') return 'table-info';
+  if (['לא רוצים לחדש','לא מחדש','בוטל'].includes(s)) return 'table-danger';
+  if (['נוצר קשר עם לקוח','קיבל פניה'].includes(s)) return 'table-warning';
+  if (['טופס התקבל','הלקוח אישר'].includes(s)) return 'table-info';
   return '';
 }
 

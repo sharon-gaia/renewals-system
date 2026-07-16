@@ -37,7 +37,7 @@
   </thead>
   <tbody>
   {% for c in customers %}
-  <tr class="{% if c.status == 'חודש' %}table-success{% elif c.status == 'לא רוצים לחדש' %}table-danger{% elif c.status == 'נוצר קשר עם לקוח' %}table-warning{% elif c.status == 'טופס התקבל' %}table-info{% endif %}">
+  <tr class="{% if c.status == 'חודש' %}table-success{% elif c.status in ['לא רוצים לחדש','לא מחדש','בוטל'] %}table-danger{% elif c.status in ['נוצר קשר עם לקוח','קיבל פניה'] %}table-warning{% elif c.status in ['טופס התקבל','הלקוח אישר'] %}table-info{% endif %}">
     <td class="px-3 py-2" style="min-width:130px">
       <a href="/customer/{{ c.id }}" class="text-decoration-none text-dark d-flex align-items-center gap-2">
         {% if c.is_vip %}<i class="bi bi-star-fill text-warning" style="font-size:0.9rem; flex-shrink:0"></i>{% endif %}
