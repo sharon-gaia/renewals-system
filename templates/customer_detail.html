@@ -58,7 +58,7 @@
             </td>
           </tr>
           <tr><th>מותג</th>
-            <td><span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand or '—' }}</span></td>
+            <td><span class="badge {{ 'bg-info' if c.brand == 'גאיה' else ('bg-ofir' if c.brand == 'אופיר' else 'bg-purple') }}">{{ c.brand or '—' }}</span></td>
           </tr>
           <tr><th>פרמיה שנה שעברה</th><td>{{ c.premium_last_year or '—' }}</td></tr>
           {% for col, label in extra_field_defs %}

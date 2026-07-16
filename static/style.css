@@ -19,6 +19,17 @@ body {
   background-color: #6f42c1 !important;
 }
 
+/* Ofir agency — champagne-gold theme matching the logo (no black) */
+.bg-ofir {
+  background: linear-gradient(135deg, #a9832e, #c9a24b 45%, #ecdca2 60%, #bf9b45) !important;
+  color: #4a4f57 !important;
+  border: none;
+}
+.bg-ofir .small, .bg-ofir .text-success { color: #3f4a2e !important; }
+.badge.bg-ofir { color: #4a4f57 !important; }
+.text-ofir { color: #a9832e !important; }
+.brand-logo { height: 40px; width: auto; }
+
 .card {
   border-radius: 10px;
 }

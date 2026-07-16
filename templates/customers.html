@@ -87,7 +87,7 @@
       </a>
     </td>
     <td class="px-3 d-none d-md-table-cell">
-      <span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand }}</span>
+      <span class="badge {{ 'bg-info' if c.brand == 'גאיה' else ('bg-ofir' if c.brand == 'אופיר' else 'bg-purple') }}">{{ c.brand }}</span>
     </td>
     <td class="px-3">
       <select class="form-select form-select-sm status-select" data-id="{{ c.id }}">

@@ -186,10 +186,10 @@
 <div class="row g-3 mb-4">
   <div class="col-12">
     <div class="card border-0 shadow-sm">
-      <div class="card-header bg-dark text-white fw-bold d-flex justify-content-between align-items-center">
-        <span>אופיר</span>
+      <div class="card-header bg-ofir fw-bold d-flex justify-content-between align-items-center">
+        <span><img src="{{ url_for('static', filename='ofir-logo.svg') }}" alt="אופיר" style="height:26px;vertical-align:middle" class="ms-2">אופיר</span>
         <span class="small">
-          סה"כ {{ stats.ofir }} · חידשו <span class="text-success">{{ stats.ofir_renewed }}</span>
+          סה"כ {{ stats.ofir }} · חידשו {{ stats.ofir_renewed }}
           · אחוז חידוש {{ (100 * stats.ofir_renewed / stats.ofir) | round(1) }}%
         </span>
       </div>
