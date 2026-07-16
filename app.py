@@ -730,6 +730,7 @@ def logout():
 def index():
     month = active_month()
     stats = {}
+    views, view_labels = {}, []
     if month:
         conn = get_db()
         bc, bp = brand_clause()
@@ -737,27 +738,32 @@ def index():
                                call_status_1, call_status_2, call_status_3
                                FROM customers WHERE month_id=?""" + bc,
                             [month['id']] + bp).fetchall()
-        total = len(rows)
         # Status buckets span both pipelines: Gaia/Winner and the Ofir equivalents.
         NO_RENEW = ('לא רוצים לחדש', 'לא מחדש', 'בוטל')
         CONTACTED = ('נוצר קשר עם לקוח', 'קיבל פניה', 'הלקוח אישר')
-        renewed = sum(1 for r in rows if r['status'] == 'חודש')
-        no_renew = sum(1 for r in rows if r['status'] in NO_RENEW)
-        seen = sum(1 for r in rows if r['status'] in CONTACTED)
-        forms = sum(1 for r in rows if r['status'] == 'טופס התקבל')
-        renewed_from_forms = sum(1 for r in rows if r['status'] == 'חודש' and r['form_received_at'])
-        pending = total - renewed - no_renew - seen - forms
-        # "No contact made" — still pending (blank status) AND no call attempt logged.
-        # A customer with any אין מענה 1/2/3 counts once as contacted and drops out.
         def _contacted(r):
             return bool(r['call_status_1'] or r['call_status_2'] or r['call_status_3'])
-        no_contact = sum(1 for r in rows if not r['status'] and not _contacted(r))
-        gaia = sum(1 for r in rows if r['brand'] == 'גאיה')
-        winner = sum(1 for r in rows if r['brand'] == 'ווינר')
-        ofir = sum(1 for r in rows if r['brand'] == 'אופיר')
-        gaia_renewed = sum(1 for r in rows if r['brand'] == 'גאיה' and r['status'] == 'חודש')
-        winner_renewed = sum(1 for r in rows if r['brand'] == 'ווינר' and r['status'] == 'חודש')
-        ofir_renewed = sum(1 for r in rows if r['brand'] == 'אופיר' and r['status'] == 'חודש')
+        def _funnel(subset):
+            """Renewal funnel counts over a subset of customer rows."""
+            t = len(subset)
+            rnw = sum(1 for r in subset if r['status'] == 'חודש')
+            no_renew = sum(1 for r in subset if r['status'] in NO_RENEW)
+            seen = sum(1 for r in subset if r['status'] in CONTACTED)
+            forms = sum(1 for r in subset if r['status'] == 'טופס התקבל')
+            return {
+                'total': t, 'renewed': rnw,
+                'renewed_from_forms': sum(1 for r in subset if r['status'] == 'חודש' and r['form_received_at']),
+                'forms': forms, 'no_renew': no_renew, 'seen': seen,
+                'no_contact': sum(1 for r in subset if not r['status'] and not _contacted(r)),
+                'pending': t - rnw - no_renew - seen - forms,
+                'pct': round(rnw / t * 100, 1) if t else 0,
+            }
+        # Per-agency views for the top-of-dashboard toggle (client-side switch).
+        present = [b for b in ('גאיה', 'ווינר', 'אופיר') if any(r['brand'] == b for r in rows)]
+        views = {'הכל': _funnel(rows)}
+        for b in present:
+            views[b] = _funnel([r for r in rows if r['brand'] == b])
+        view_labels = (['הכל'] + present) if len(present) > 1 else present or ['הכל']
         # Ofir renewals split by ענף (sector): total vs renewed (חודש) per category → %.
         ofir_rows = [r for r in rows if r['brand'] == 'אופיר']
         ofir_by_category = []
@@ -768,17 +774,15 @@ def index():
             if t:
                 ofir_by_category.append({'category': cat, 'total': t, 'renewed': rnw,
                                          'pct': round(rnw / t * 100, 1)})
-        # 'pending' = items a rep explicitly escalated to the admin queue (mark_clarify).
-        # Raw website intake stays 'ממתין' and lives in /admin/other-forms, not here.
+        # 'pending' badge = items a rep escalated to the admin queue (mark_clarify).
         unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='pending'").fetchone()[0]
         conn.close()
-        stats = dict(total=total, renewed=renewed, no_renew=no_renew, seen=seen, forms=forms, pending=pending,
-                     renewed_from_forms=renewed_from_forms, no_contact=no_contact,
-                     gaia=gaia, winner=winner, ofir=ofir,
-                     gaia_renewed=gaia_renewed, winner_renewed=winner_renewed, ofir_renewed=ofir_renewed,
-                     ofir_by_category=ofir_by_category,
-                     pct=round(renewed / total * 100, 1) if total else 0, unmatched=unmatched)
-    return render_template('dashboard.html', month=month, stats=stats)
+        stats = dict(views['הכל'], ofir=len(ofir_rows),
+                     ofir_renewed=sum(1 for r in ofir_rows if r['status'] == 'חודש'),
+                     ofir_by_category=ofir_by_category, unmatched=unmatched)
+    return render_template('dashboard.html', month=month, stats=stats,
+                           views=views, view_labels=view_labels,
+                           views_json=json.dumps(views, ensure_ascii=False))
 
 @app.route('/customers')
 @login_required
