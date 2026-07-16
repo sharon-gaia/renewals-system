@@ -11,6 +11,7 @@ from flask_cors import CORS
 import sqlite3
 import os
 import io
+import json
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook
 from openpyxl import Workbook as NewWorkbook
@@ -391,6 +392,17 @@ def init_db():
             PRIMARY KEY (user_id, brand)
         );
         CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT);
+        -- Recycle bin: a deleted customer is copied here (full row as JSON) before
+        -- removal, so an accidental delete can be restored.
+        CREATE TABLE IF NOT EXISTS deleted_customers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER,
+            name TEXT,
+            brand TEXT,
+            data TEXT,
+            deleted_at TEXT,
+            deleted_by TEXT
+        );
         CREATE TABLE IF NOT EXISTS months (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -939,12 +951,83 @@ def update_customer(cid):
 @admin_required
 def delete_customer(cid):
     conn = get_db()
+    row = conn.execute("SELECT * FROM customers WHERE id=?", (cid,)).fetchone()
+    if not row:
+        conn.close()
+        flash('לקוח לא נמצא', 'danger')
+        return redirect(url_for('customers'))
+    # Managers may only delete within their agencies.
+    if not can_access_brand(row['brand']):
+        conn.close()
+        flash('אין הרשאה למחוק לקוח של סוכנות זו', 'danger')
+        return redirect(url_for('customers'))
+    # Back up the full row to the recycle bin before removing it.
+    conn.execute(
+        "INSERT INTO deleted_customers (customer_id, name, brand, data, deleted_at, deleted_by) VALUES (?,?,?,?,?,?)",
+        (cid, row['name'], row['brand'], json.dumps(dict(row), ensure_ascii=False),
+         datetime.datetime.now().isoformat(), session.get('display_name') or session.get('username', ''))
+    )
     conn.execute("DELETE FROM customers WHERE id=?", (cid,))
     conn.execute("DELETE FROM customer_attachments WHERE customer_id=?", (cid,))
     conn.commit()
     conn.close()
-    flash('לקוח נמחק', 'warning')
+    flash('הלקוח נמחק והועבר לסל המיחזור — ניתן לשחזר', 'warning')
     return redirect(url_for('customers'))
+
+
+@app.route('/admin/trash')
+@login_required
+@superadmin_required
+def trash():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, customer_id, name, brand, deleted_at, deleted_by FROM deleted_customers ORDER BY deleted_at DESC LIMIT 500"
+    ).fetchall()
+    conn.close()
+    return render_template('trash.html', items=rows)
+
+
+@app.route('/admin/trash/<int:tid>/restore', methods=['POST'])
+@login_required
+@superadmin_required
+def restore_customer(tid):
+    conn = get_db()
+    t = conn.execute("SELECT * FROM deleted_customers WHERE id=?", (tid,)).fetchone()
+    if not t:
+        conn.close()
+        flash('הפריט לא נמצא בסל המיחזור', 'danger')
+        return redirect(url_for('trash'))
+    data = json.loads(t['data'])
+    # Only restore columns that still exist in the table; drop the old id so it re-inserts.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()}
+    data.pop('id', None)
+    fields = {k: v for k, v in data.items() if k in cols}
+    # If the original month is gone, drop it into the active month so it stays visible.
+    if 'month_id' in fields:
+        exists = conn.execute("SELECT 1 FROM months WHERE id=?", (fields['month_id'],)).fetchone()
+        if not exists:
+            am = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+            fields['month_id'] = am['id'] if am else None
+    keys = list(fields.keys())
+    conn.execute(f"INSERT INTO customers ({','.join(keys)}) VALUES ({','.join('?' * len(keys))})",
+                 [fields[k] for k in keys])
+    conn.execute("DELETE FROM deleted_customers WHERE id=?", (tid,))
+    conn.commit()
+    conn.close()
+    flash('הלקוח שוחזר', 'success')
+    return redirect(url_for('trash'))
+
+
+@app.route('/admin/trash/<int:tid>/purge', methods=['POST'])
+@login_required
+@superadmin_required
+def purge_customer(tid):
+    conn = get_db()
+    conn.execute("DELETE FROM deleted_customers WHERE id=?", (tid,))
+    conn.commit()
+    conn.close()
+    flash('נמחק לצמיתות מסל המיחזור', 'warning')
+    return redirect(url_for('trash'))
 
 
 @app.route('/export/customers-excel')

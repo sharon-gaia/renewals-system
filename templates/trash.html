@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% block title %} — סל מיחזור{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h5 class="mb-0"><i class="bi bi-trash me-2 text-secondary"></i>סל מיחזור — לקוחות שנמחקו</h5>
+  <a href="/admin" class="btn btn-outline-secondary btn-sm">חזרה לניהול</a>
+</div>
+
+<div class="alert alert-info small">
+  לקוח שנמחק נשמר כאן וניתן לשחזרו. "מחיקה לצמיתות" מסירה אותו סופית.
+</div>
+
+<div class="card border-0 shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0">
+      <thead class="table-light">
+        <tr><th class="ps-3">שם</th><th>סוכנות</th><th>נמחק בתאריך</th><th>נמחק ע"י</th><th class="text-end pe-3">פעולות</th></tr>
+      </thead>
+      <tbody>
+        {% for it in items %}
+        <tr>
+          <td class="ps-3 fw-semibold">{{ it.name or '(ללא שם)' }}</td>
+          <td><span class="badge {{ 'bg-info' if it.brand == 'גאיה' else ('bg-ofir' if it.brand == 'אופיר' else 'bg-purple') }}">{{ it.brand or '—' }}</span></td>
+          <td class="small text-muted">{{ it.deleted_at[:16]|replace('T',' ') if it.deleted_at else '—' }}</td>
+          <td class="small">{{ it.deleted_by or '—' }}</td>
+          <td class="text-end pe-3">
+            <form method="POST" action="/admin/trash/{{ it.id }}/restore" class="d-inline">
+              <button class="btn btn-success btn-sm"><i class="bi bi-arrow-counterclockwise me-1"></i>שחזר</button>
+            </form>
+            <form method="POST" action="/admin/trash/{{ it.id }}/purge" class="d-inline"
+                  onsubmit="return confirm('למחוק את {{ it.name }} לצמיתות? לא ניתן לשחזר.')">
+              <button class="btn btn-outline-danger btn-sm"><i class="bi bi-x-lg"></i></button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-4">סל המיחזור ריק</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

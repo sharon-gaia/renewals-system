@@ -17,7 +17,7 @@
               class="btn {% if c.whatsapp_source == 'ווינר' %}btn-warning{% else %}btn-outline-secondary{% endif %}">
         <i class="bi bi-whatsapp me-1"></i>ווינר
       </button>
-      {% if session.role == 'admin' %}
+      {% if session.role in ('admin', 'superadmin') %}
       <button type="button" onclick="setOfirBrand()" title="מסמן את הלקוח כמותג אופיר (מנהל בלבד)"
               class="btn {% if c.brand == 'אופיר' %}btn-warning{% else %}btn-outline-secondary{% endif %}">
         <i class="bi bi-whatsapp me-1"></i>אופיר
@@ -30,7 +30,7 @@
     </div>
     {% endif %}
     <a href="/customers" class="btn btn-outline-secondary btn-sm"><i class="bi bi-arrow-right me-1"></i>חזרה לרשימה</a>
-    {% if session.role == 'admin' %}
+    {% if session.role in ('admin', 'superadmin') %}
     <form method="POST" action="/customer/{{ c.id }}/delete"
           onsubmit="return confirm('למחוק את {{ c.name }} לצמיתות?')">
       <button type="submit" class="btn btn-outline-danger btn-sm">
@@ -194,7 +194,7 @@
       </div>
     </div>
 
-    {% if session.role == 'admin' %}
+    {% if session.role in ('admin', 'superadmin') %}
     <!-- הערות שרון -->
     <div class="card border-0 shadow-sm mb-3 border-warning">
       <div class="card-header bg-warning fw-bold">הערות שרון (מנהל בלבד)</div>
@@ -226,7 +226,7 @@ document.getElementById('save-btn').addEventListener('click', () => {
     call_date_3: document.getElementById('det-call-date-3').value,
     call_status_3: document.getElementById('det-call-status-3').value,
   };
-  {% if session.role == 'admin' %}
+  {% if session.role in ('admin', 'superadmin') %}
   data.sharon_notes = document.getElementById('det-sharon-notes').value;
   {% endif %}
 
