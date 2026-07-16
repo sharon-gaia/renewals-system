@@ -70,9 +70,9 @@
               <div class="col-md-5">
                 <select name="new_status" class="form-select form-select-sm">
                   <option value="">בחר סטטוס...</option>
-                  <option value="חודש">✓ חודש</option>
-                  <option value="לא רוצים לחדש">✗ לא רוצים לחדש</option>
-                  <option value="נוצר קשר עם לקוח">נוצר קשר עם לקוח</option>
+                  {% for val, label in (ofir_status_options if item.brand == 'אופיר' else gw_status_options) %}{% if val %}
+                  <option value="{{ val }}">{{ label }}</option>
+                  {% endif %}{% endfor %}
                 </select>
               </div>
               <div class="col-md-4">
