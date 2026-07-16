@@ -726,9 +726,12 @@ def index():
                                FROM customers WHERE month_id=?""" + bc,
                             [month['id']] + bp).fetchall()
         total = len(rows)
+        # Status buckets span both pipelines: Gaia/Winner and the Ofir equivalents.
+        NO_RENEW = ('לא רוצים לחדש', 'לא מחדש', 'בוטל')
+        CONTACTED = ('נוצר קשר עם לקוח', 'קיבל פניה', 'הלקוח אישר')
         renewed = sum(1 for r in rows if r['status'] == 'חודש')
-        no_renew = sum(1 for r in rows if r['status'] == 'לא רוצים לחדש')
-        seen = sum(1 for r in rows if r['status'] == 'נוצר קשר עם לקוח')
+        no_renew = sum(1 for r in rows if r['status'] in NO_RENEW)
+        seen = sum(1 for r in rows if r['status'] in CONTACTED)
         forms = sum(1 for r in rows if r['status'] == 'טופס התקבל')
         renewed_from_forms = sum(1 for r in rows if r['status'] == 'חודש' and r['form_received_at'])
         pending = total - renewed - no_renew - seen - forms
