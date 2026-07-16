@@ -137,8 +137,11 @@ EXTRA_FIELDS = [c for c, _ in EXTRA_FIELD_DEFS]
 
 @app.context_processor
 def inject_extra_fields():
-    """Make the optional-field defs available to every template."""
-    return {'extra_field_defs': EXTRA_FIELD_DEFS}
+    """Make the optional-field defs and per-agency status sets available to every
+    template (e.g. the customers list renders each row's dropdown by its brand)."""
+    return {'extra_field_defs': EXTRA_FIELD_DEFS,
+            'gw_status_options': GW_STATUS_OPTIONS,
+            'ofir_status_options': OFIR_STATUS_OPTIONS}
 
 def normalize_id_number(s):
     """Israeli ID numbers are 9 digits — left-pad short numeric IDs with zeros

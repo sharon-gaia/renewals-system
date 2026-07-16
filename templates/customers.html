@@ -86,11 +86,9 @@
     </td>
     <td class="px-3">
       <select class="form-select form-select-sm status-select" data-id="{{ c.id }}">
-        <option value="" {% if not c.status %}selected{% endif %}>ממתין</option>
-        <option value="טופס התקבל" {% if c.status == 'טופס התקבל' %}selected{% endif %}>📋 טופס התקבל</option>
-        <option value="חודש" {% if c.status == 'חודש' %}selected{% endif %}>חודש ✓</option>
-        <option value="נוצר קשר עם לקוח" {% if c.status == 'נוצר קשר עם לקוח' %}selected{% endif %}>נוצר קשר עם לקוח</option>
-        <option value="לא רוצים לחדש" {% if c.status == 'לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
+        {% for val, label in (ofir_status_options if c.brand == 'אופיר' else gw_status_options) %}
+        <option value="{{ val }}" {% if (c.status or '') == val %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
       </select>
       {% if c.status == 'טופס התקבל' and (c.form_email or c.form_installments or c.form_payment_method) %}
       <div class="mt-1 p-1 rounded small" style="background:#cff4fc; font-size:0.78rem; line-height:1.5;">
