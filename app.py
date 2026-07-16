@@ -249,13 +249,19 @@ def rebuild_insureds(conn):
     conn.commit()
     return upserted
 
-def promote_customers_to_insureds(conn, month_id):
+def promote_customers_to_insureds(conn, month_id, brands=None):
     """Move a renewal month's customers into the insureds master (req 4), preserving
     all activity (calls, notes, VIP, rep credit). Renewed → פעיל, otherwise → לא פעיל
-    (req 5). Non-destructive: the original customers rows are left intact as history."""
+    (req 5). Non-destructive: the original customers rows are left intact as history.
+    `brands` limits promotion to specific agencies (used when loading one agency)."""
     now = datetime.datetime.now().isoformat()
     promoted = 0
-    for cst in conn.execute("SELECT * FROM customers WHERE month_id=?", (month_id,)).fetchall():
+    q = "SELECT * FROM customers WHERE month_id=?"
+    p = [month_id]
+    if brands:
+        q += f" AND brand IN ({','.join('?' * len(brands))})"
+        p += list(brands)
+    for cst in conn.execute(q, p).fetchall():
         idn = normalize_id_number(cst['id_number'])
         if not idn:
             continue
@@ -304,6 +310,17 @@ def promote_customers_to_insureds(conn, month_id):
                  cst['call_date_2'], cst['call_status_2'], cst['call_by_2'],
                  cst['call_date_3'], cst['call_status_3'], cst['call_by_3'], now, now)
             )
+        # Carry the optional elementary fields (+ email) into the master, filling blanks
+        # only so a re-promotion never wipes a value already curated on the insured.
+        iid_row = conn.execute("SELECT id FROM insureds WHERE id_number=?", (idn,)).fetchone()
+        if iid_row:
+            ckeys = cst.keys()
+            for colname in EXTRA_FIELDS + ['email']:
+                val = cst[colname] if colname in ckeys else None
+                if val:
+                    conn.execute(
+                        f"UPDATE insureds SET {colname}=COALESCE(NULLIF({colname},''), ?) WHERE id=?",
+                        (val, iid_row['id']))
         promoted += 1
     conn.commit()
     return promoted
@@ -465,7 +482,7 @@ def init_db():
     # Add card + tracking columns if missing
     existing = [r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()]
     for col, typ in [('form_card_number','TEXT'), ('form_card_expiry','TEXT'),
-                     ('form_id_card_holder','TEXT'), ('handled_by','TEXT')]:
+                     ('form_id_card_holder','TEXT'), ('handled_by','TEXT'), ('email','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     # Extra elementary/car fields (mainly from the Ofir/Meir book). All optional — shown
@@ -1197,93 +1214,163 @@ def import_excel():
         flash('חסר קובץ או שם חודש', 'danger')
         return redirect(url_for('admin'))
 
+    # Which agency/format is being loaded. Each source is imported independently and only
+    # replaces its own rows in the single active month — other agencies stay untouched.
+    source = request.form.get('source', 'gaia_winner')
+    source_brands = ['אופיר'] if source == 'ofir' else ['גאיה', 'ווינר']
+
     try:
         wb = load_workbook(f, data_only=True)
         ws = wb.active
 
         conn = get_db()
-        # Req 4+5: before starting the new cycle, move the outgoing month's customers
-        # into the "all customers" master (renewed → פעיל, else → לא פעיל), preserving activity.
-        prev = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
-        promoted = 0
-        if prev:
-            promoted = promote_customers_to_insureds(conn, prev['id'])
-        # Deactivate all months
-        conn.execute("UPDATE months SET is_active=0")
-        # Create new month
-        conn.execute("INSERT INTO months (name, created_at, is_active) VALUES (?,?,1)",
-                     (month_name, datetime.datetime.now().isoformat()))
-        month_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        # One persistent active month accumulates all agencies. Create it on first load.
+        month = conn.execute("SELECT * FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+        if not month:
+            conn.execute("UPDATE months SET is_active=0")
+            conn.execute("INSERT INTO months (name, created_at, is_active) VALUES (?,?,1)",
+                         (month_name, datetime.datetime.now().isoformat()))
+            month_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        else:
+            month_id = month['id']
+        # Re-load = archive this agency's current renewals into "all customers", then swap
+        # in the fresh file. Only this source's brands are promoted/cleared.
+        promoted = promote_customers_to_insureds(conn, month_id, brands=source_brands)
+        conn.execute(
+            f"DELETE FROM customers WHERE month_id=? AND brand IN ({','.join('?' * len(source_brands))})",
+            [month_id] + source_brands)
 
-        count = 0
-        # Find header row (row with 'פוליסה')
-        header_row = None
-        for i, row in enumerate(ws.iter_rows(values_only=True), 1):
-            if row and 'פוליסה' in str(row[0]):
-                header_row = i
-                break
-
-        if not header_row:
-            # Fallback: assume row 3
-            header_row = 3
-
-        headers = [str(c).strip() if c else '' for c in list(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]]
-
-        def col(name, row_vals):
-            try:
-                idx = next(i for i, h in enumerate(headers) if name in h)
-                return str(row_vals[idx]).strip() if row_vals[idx] is not None else ''
-            except StopIteration:
-                return ''
-
-        for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
-            if not row or not row[0]:
-                continue
-            policy = str(row[0]).strip() if row[0] else ''
-            if not policy or policy in ('None', ''):
-                continue
-            # Always increment policy number by 1 (each year the last digit advances: 5→6, 6→7, etc.)
-            if policy.isdigit():
-                policy = str(int(policy) + 1)
-            name = col('שם', row)
-            if not name or name == 'None':
-                continue
-            raw_status = col('סטטוס', row)
-            status_map = {
-                'חודש': 'חודש',
-                'לא חודש': '',
-                'לא רוצים לחדש': 'לא רוצים לחדש',
-                'לקוח ענה/ V כחול': 'לקוח ענה/ V כחול',
-            }
-            mapped_status = status_map.get(raw_status, '')
-
-            row_brand = col('מותג', row)
-            conn.execute("""
-                INSERT INTO customers
-                (month_id, policy_number, name, id_number, phone, brand, status,
-                 premium_last_year, whatsapp_sent_date, sharon_notes, requests_to_sharon,
-                 contact_date, agent_notes, interested_in_products, whatsapp_source)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                month_id, policy, name,
-                normalize_id_number(col('ת.ז', row)), col('טלפון', row), row_brand, mapped_status,
-                col('פרמיה', row), col('וואטסאפ', row), col('הערות שרון', row),
-                col('בקשות משרון', row), col('תאריך התקשרות', row),
-                col('הערות חידושים', row), col('מתעניין', row),
-                'ווינר' if row_brand == 'אופיר' else None
-            ))
-            count += 1
+        if source == 'ofir':
+            count = _import_ofir(conn, ws, month_id)
+        else:
+            count = _import_gaia_winner(conn, ws, month_id)
 
         conn.commit()
         conn.close()
-        msg = f'נטענו {count} לקוחות לחודש {month_name}'
+        label = 'אופיר' if source == 'ofir' else 'גאיה/ווינר'
+        msg = f'נטענו {count} חידושים ({label})'
         if promoted:
-            msg += f' · {promoted} לקוחות מהחודש הקודם עברו ל"כל הלקוחות"'
+            msg += f' · {promoted} לקוחות קודמים של {label} עברו ל"כל הלקוחות"'
         flash(msg, 'success')
     except Exception as e:
         flash(f'שגיאה בייבוא: {e}', 'danger')
 
     return redirect(url_for('admin'))
+
+
+# Map raw sheet statuses to the system's canonical status values.
+IMPORT_STATUS_MAP = {
+    'חודש': 'חודש',
+    'לא חודש': '',
+    'לא התחיל': '',
+    'לא מחדש': 'לא רוצים לחדש',
+    'לא רוצים לחדש': 'לא רוצים לחדש',
+    'לקוח ענה/ V כחול': 'לקוח ענה/ V כחול',
+}
+
+
+def _import_gaia_winner(conn, ws, month_id):
+    """Gaia/Winner export: header row contains 'פוליסה' in col A; brand comes from the
+    'מותג' column so a single file may hold both Gaia and Winner rows."""
+    header_row = None
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        if row and 'פוליסה' in str(row[0]):
+            header_row = i
+            break
+    if not header_row:
+        header_row = 3
+    headers = [str(c).strip() if c else '' for c in
+               list(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]]
+
+    def col(name, row_vals):
+        try:
+            idx = next(i for i, h in enumerate(headers) if name in h)
+            return str(row_vals[idx]).strip() if row_vals[idx] is not None else ''
+        except StopIteration:
+            return ''
+
+    count = 0
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        if not row or not row[0]:
+            continue
+        policy = str(row[0]).strip() if row[0] else ''
+        if not policy or policy in ('None', ''):
+            continue
+        # Each year the policy number's last digit advances (5→6, 6→7, …).
+        if policy.isdigit():
+            policy = str(int(policy) + 1)
+        name = col('שם', row)
+        if not name or name == 'None':
+            continue
+        row_brand = col('מותג', row)
+        conn.execute("""
+            INSERT INTO customers
+            (month_id, policy_number, name, id_number, phone, brand, status,
+             premium_last_year, whatsapp_sent_date, sharon_notes, requests_to_sharon,
+             contact_date, agent_notes, interested_in_products, whatsapp_source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            month_id, policy, name,
+            normalize_id_number(col('ת.ז', row)), col('טלפון', row), row_brand,
+            IMPORT_STATUS_MAP.get(col('סטטוס', row), ''),
+            col('פרמיה', row), col('וואטסאפ', row), col('הערות שרון', row),
+            col('בקשות משרון', row), col('תאריך התקשרות', row),
+            col('הערות חידושים', row), col('מתעניין', row),
+            'ווינר' if row_brand == 'אופיר' else None
+        ))
+        count += 1
+    return count
+
+
+def _import_ofir(conn, ws, month_id):
+    """Ofir/Meir book: header on row 5, elementary/car columns. brand is always 'אופיר';
+    the extra fields (insurer, coverage breakdown, license, sector, …) are captured."""
+    header_row = None
+    for i, row in enumerate(ws.iter_rows(min_row=1, max_row=12, values_only=True), 1):
+        if row and any('מבוטח' in str(c or '') for c in row):
+            header_row = i
+            break
+    if not header_row:
+        header_row = 5
+    headers = [str(c).strip() if c else '' for c in
+               list(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]]
+
+    def col(name, row_vals):
+        try:
+            idx = next(i for i, h in enumerate(headers) if h == name or name in h)
+            v = row_vals[idx]
+            return str(v).strip() if v is not None else ''
+        except (StopIteration, IndexError):
+            return ''
+
+    count = 0
+    for row in ws.iter_rows(min_row=header_row + 1, values_only=True):
+        if not row:
+            continue
+        name = col('מבוטח', row)
+        policy = col('פוליסה', row)
+        if (not name or name == 'None') and not policy:
+            continue
+        conn.execute("""
+            INSERT INTO customers
+            (month_id, policy_number, name, id_number, phone, email, brand, status,
+             premium_last_year, agent_notes,
+             insurer, sector, license_number, secondary_status,
+             cover_third_party, cover_compulsory, cover_comprehensive, cover_riders,
+             sum_insured, offer_company, done_company, handler, sub_agent)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            month_id, policy, name,
+            normalize_id_number(col('זהות', row)), col('טלפון', row), col('Email', row),
+            'אופיר', IMPORT_STATUS_MAP.get(col('סטטוס ראשוני', row), ''),
+            col('פרמיה', row), col('הערות ועדכונים', row),
+            col('חברה', row), col('ענף', row), col('רשוי', row), col('סטטוס משני', row),
+            col("צד ג'", row), col('חובה', row), col('מקיף', row), col('ריידרים', row),
+            col('ס/מ', row), col('חברת ההצעה', row), col('חברה שנעשה', row),
+            col('מטפל', row), col('סוכן', row),
+        ))
+        count += 1
+    return count
 
 @app.route('/admin/users/add', methods=['POST'])
 @login_required

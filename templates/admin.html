@@ -13,19 +13,28 @@
         <i class="bi bi-upload me-2"></i>טעינת חודש חדש
       </div>
       <div class="card-body">
-        <div class="alert alert-warning small mb-3">
-          <i class="bi bi-exclamation-triangle me-1"></i>
-          טעינת חודש חדש תסתיר את נתוני החודש הקודם מהנציגים.
+        <div class="alert alert-info small mb-3">
+          <i class="bi bi-info-circle me-1"></i>
+          כל סוכנות נטענת בנפרד. טעינה מחדש של סוכנות מעבירה את הלקוחות הקיימים שלה
+          ל"כל הלקוחות" ומציגה את החידושים החדשים — הסוכנויות האחרות לא מושפעות.
         </div>
         <form method="POST" action="/admin/import" enctype="multipart/form-data">
           <div class="mb-3">
+            <label class="form-label fw-semibold">סוכנות</label>
+            <select name="source" class="form-select" onchange="document.getElementById('imp-hint').textContent = this.value==='ofir' ? 'פורמט אופיר (מאיר): פוליסה, מבוטח, זהות, חברה, רישוי, כיסויים…' : 'פורמט גאיה/ווינר: פוליסה, שם, ת.ז, טלפון, מותג'">
+              <option value="gaia_winner">גאיה / ווינר</option>
+              <option value="ofir">אופיר (מאיר)</option>
+            </select>
+          </div>
+          <div class="mb-3">
             <label class="form-label fw-semibold">שם החודש</label>
             <input type="text" name="month_name" class="form-control" placeholder="לדוגמה: יולי 2026" required>
+            <div class="form-text">בשימוש רק ביצירת המחזור הראשון; טעינות נוספות מתווספות לחודש הפעיל.</div>
           </div>
           <div class="mb-3">
             <label class="form-label fw-semibold">קובץ Excel</label>
             <input type="file" name="file" class="form-control" accept=".xlsx,.xls" required>
-            <div class="form-text">הקובץ צריך לכלול: פוליסה, שם, ת.ז, טלפון, מותג</div>
+            <div class="form-text" id="imp-hint">פורמט גאיה/ווינר: פוליסה, שם, ת.ז, טלפון, מותג</div>
           </div>
           <button type="submit" class="btn btn-primary">
             <i class="bi bi-upload me-1"></i>טען נתונים
