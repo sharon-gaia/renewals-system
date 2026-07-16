@@ -137,7 +137,7 @@
               <option value="" {% if not c.status %}selected{% endif %}>ממתין לטיפול</option>
               <option value="טופס התקבל" {% if c.status == 'טופס התקבל' %}selected{% endif %}>📋 טופס התקבל</option>
               <option value="חודש" {% if c.status == 'חודש' %}selected{% endif %}>חודש ✓</option>
-              <option value="לקוח ענה/ V כחול" {% if c.status == 'לקוח ענה/ V כחול' %}selected{% endif %}>תגובה / וי כחול</option>
+              <option value="נוצר קשר עם לקוח" {% if c.status == 'נוצר קשר עם לקוח' %}selected{% endif %}>נוצר קשר עם לקוח</option>
               <option value="לא רוצים לחדש" {% if c.status == 'לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
             </select>
           </div>

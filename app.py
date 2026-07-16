@@ -72,7 +72,7 @@ def format_date(value):
             return result
     return s
 
-STATUSES = ['', 'טופס התקבל', 'חודש', 'לא רוצים לחדש', 'לקוח ענה/ V כחול']
+STATUSES = ['', 'טופס התקבל', 'חודש', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
 
 # Optional elementary/car fields (mainly the Ofir/Meir book). Ordered (column, Hebrew
@@ -511,6 +511,12 @@ def init_db():
         conn.execute("UPDATE customers SET brand='ווינר' WHERE brand NOT IN ('גאיה','ווינר','אופיר') AND brand IS NOT NULL AND brand != ''")
         conn.execute("INSERT INTO app_meta (key, value) VALUES ('fix_stray_brand_done', ?)",
                      (datetime.datetime.now().isoformat(),))
+    # One-time (guarded): rename the old "לקוח ענה/ V כחול" status to "נוצר קשר עם לקוח".
+    if not conn.execute("SELECT 1 FROM app_meta WHERE key='status_rename_done'").fetchone():
+        for tbl in ('customers', 'insureds'):
+            conn.execute(f"UPDATE {tbl} SET status='נוצר קשר עם לקוח' WHERE status='לקוח ענה/ V כחול'")
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('status_rename_done', ?)",
+                     (datetime.datetime.now().isoformat(),))
     # One-time (guarded): seed agency access for pre-existing agents so nobody is locked
     # out — default to Gaia + Winner (not Ofir), matching the intended baseline.
     if not conn.execute("SELECT 1 FROM app_meta WHERE key='seed_user_brands_done'").fetchone():
@@ -641,7 +647,7 @@ def index():
         total = len(rows)
         renewed = sum(1 for r in rows if r['status'] == 'חודש')
         no_renew = sum(1 for r in rows if r['status'] == 'לא רוצים לחדש')
-        seen = sum(1 for r in rows if r['status'] == 'לקוח ענה/ V כחול')
+        seen = sum(1 for r in rows if r['status'] == 'נוצר קשר עם לקוח')
         forms = sum(1 for r in rows if r['status'] == 'טופס התקבל')
         renewed_from_forms = sum(1 for r in rows if r['status'] == 'חודש' and r['form_received_at'])
         pending = total - renewed - no_renew - seen - forms
@@ -1265,7 +1271,8 @@ IMPORT_STATUS_MAP = {
     'לא התחיל': '',
     'לא מחדש': 'לא רוצים לחדש',
     'לא רוצים לחדש': 'לא רוצים לחדש',
-    'לקוח ענה/ V כחול': 'לקוח ענה/ V כחול',
+    'לקוח ענה/ V כחול': 'נוצר קשר עם לקוח',  # legacy sheets
+    'נוצר קשר עם לקוח': 'נוצר קשר עם לקוח',
 }
 
 
@@ -1466,7 +1473,7 @@ def export_wasender():
     else:
         # Reminder: only those who haven't renewed and didn't say they don't want to renew
         query = """SELECT id, name, phone FROM customers
-                   WHERE month_id=? AND (status IS NULL OR status='' OR status='לקוח ענה/ V כחול')"""
+                   WHERE month_id=? AND (status IS NULL OR status='' OR status='נוצר קשר עם לקוח')"""
 
     params = [month['id']]
     if brand_filter:

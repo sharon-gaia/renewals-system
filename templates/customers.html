@@ -35,7 +35,7 @@
       <option value="__empty__" {% if status_filter=='__empty__' %}selected{% endif %}>ממתין לטיפול</option>
       <option value="טופס התקבל" {% if status_filter=='טופס התקבל' %}selected{% endif %}>📋 טופס התקבל</option>
       <option value="חודש" {% if status_filter=='חודש' %}selected{% endif %}>חודש ✓</option>
-      <option value="לקוח ענה/ V כחול" {% if status_filter=='לקוח ענה/ V כחול' %}selected{% endif %}>תגובה / וי כחול</option>
+      <option value="נוצר קשר עם לקוח" {% if status_filter=='נוצר קשר עם לקוח' %}selected{% endif %}>נוצר קשר עם לקוח</option>
       <option value="לא רוצים לחדש" {% if status_filter=='לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
     </select>
   </div>
@@ -64,7 +64,7 @@
   </thead>
   <tbody>
   {% for c in customers %}
-  <tr class="customer-row {% if c.status == 'חודש' %}table-success{% elif c.status == 'לא רוצים לחדש' %}table-danger{% elif c.status == 'לקוח ענה/ V כחול' %}table-warning{% elif c.status == 'טופס התקבל' %}table-info{% endif %}"
+  <tr class="customer-row {% if c.status == 'חודש' %}table-success{% elif c.status == 'לא רוצים לחדש' %}table-danger{% elif c.status == 'נוצר קשר עם לקוח' %}table-warning{% elif c.status == 'טופס התקבל' %}table-info{% endif %}"
       data-id="{{ c.id }}">
     <td class="px-3 py-2" style="min-width:130px">
       <a href="/customer/{{ c.id }}" class="text-decoration-none text-dark d-flex align-items-center gap-2">
@@ -89,7 +89,7 @@
         <option value="" {% if not c.status %}selected{% endif %}>ממתין</option>
         <option value="טופס התקבל" {% if c.status == 'טופס התקבל' %}selected{% endif %}>📋 טופס התקבל</option>
         <option value="חודש" {% if c.status == 'חודש' %}selected{% endif %}>חודש ✓</option>
-        <option value="לקוח ענה/ V כחול" {% if c.status == 'לקוח ענה/ V כחול' %}selected{% endif %}>תגובה / וי כחול</option>
+        <option value="נוצר קשר עם לקוח" {% if c.status == 'נוצר קשר עם לקוח' %}selected{% endif %}>נוצר קשר עם לקוח</option>
         <option value="לא רוצים לחדש" {% if c.status == 'לא רוצים לחדש' %}selected{% endif %}>לא רוצים לחדש</option>
       </select>
       {% if c.status == 'טופס התקבל' and (c.form_email or c.form_installments or c.form_payment_method) %}
@@ -156,7 +156,7 @@ document.querySelectorAll('.status-select').forEach(sel => {
 function statusClass(s) {
   if (s === 'חודש') return 'table-success';
   if (s === 'לא רוצים לחדש') return 'table-danger';
-  if (s === 'לקוח ענה/ V כחול') return 'table-warning';
+  if (s === 'נוצר קשר עם לקוח') return 'table-warning';
   if (s === 'טופס התקבל') return 'table-info';
   return '';
 }
