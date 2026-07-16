@@ -9,7 +9,7 @@
     <span class="text-muted small">מסונן</span>
     {% endif %}
     <span class="badge bg-secondary fs-6">{{ customers|length }} רשומות</span>
-    {% if session.role == 'admin' %}
+    {% if session.role in ('admin', 'superadmin') %}
     <a href="/export/customers-excel" class="btn btn-success btn-sm">
       <i class="bi bi-file-earmark-excel me-1"></i>ייצוא Excel
     </a>
@@ -64,7 +64,7 @@
       <th class="px-3 py-2 d-none d-lg-table-cell">וואטסאפ נשלח</th>
       <th class="px-3 py-2 d-none d-lg-table-cell" style="min-width:180px">הערות נציג</th>
       <th class="px-3 py-2 d-none d-xl-table-cell">תאריך התקשרות</th>
-      {% if session.role == 'admin' %}<th class="px-3 py-2 d-none d-xl-table-cell" style="min-width:180px">הערות שרון</th>{% endif %}
+      {% if session.role in ('admin', 'superadmin') %}<th class="px-3 py-2 d-none d-xl-table-cell" style="min-width:180px">הערות שרון</th>{% endif %}
     </tr>
   </thead>
   <tbody>
@@ -129,7 +129,7 @@
         </ul>
       </div>
     </td>
-    {% if session.role == 'admin' %}
+    {% if session.role in ('admin', 'superadmin') %}
     <td class="px-3 d-none d-xl-table-cell">
       <input type="text" class="form-control form-control-sm notes-input"
              data-id="{{ c.id }}" data-field="sharon_notes"

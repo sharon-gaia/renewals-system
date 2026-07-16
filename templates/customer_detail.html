@@ -142,7 +142,7 @@
           <div class="col-md-6">
             <label class="form-label fw-semibold">וואטסאפ נשלח בתאריך</label>
             <input type="date" id="det-wa" class="form-control" value="{{ c.whatsapp_sent_date or '' }}"
-                   {% if session.role != 'admin' %}readonly{% endif %}>
+                   {% if session.role not in ('admin', 'superadmin') %}readonly{% endif %}>
           </div>
         </div>
 
