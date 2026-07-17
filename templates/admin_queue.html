@@ -37,6 +37,11 @@
               <i class="bi bi-person-fill me-1"></i>{{ item.handled_by }}
             </span>
             {% endif %}
+            {% if item.assigned_name %}
+            <span class="badge bg-warning text-dark small">
+              <i class="bi bi-arrow-left-right me-1"></i>מיועד ל{{ item.assigned_name }}
+            </span>
+            {% endif %}
           </div>
           <div class="fw-bold fs-6">{{ item.name or '(ללא שם)' }}</div>
           {% if item.id_number %}<div class="small text-muted">ת.ז: {{ item.id_number }}</div>{% endif %}

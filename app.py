@@ -551,6 +551,8 @@ def init_db():
     existing_us = [r[1] for r in conn.execute("PRAGMA table_info(unmatched_submissions)").fetchall()]
     if 'handled_by' not in existing_us:
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_by TEXT")
+    if 'assigned_to' not in existing_us:  # user_id the rep routed this escalation to
+        conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN assigned_to INTEGER")
     # One-time (guarded): the historical 'אופיר' brand was mislabeled Winner business —
     # fold it into 'ווינר' across all data. Ofir stays a selectable agency for permissions
     # but is no longer auto-derived (see brand_from_agency), so this relabel sticks.
@@ -864,6 +866,10 @@ def customer_detail(cid):
     conn = get_db()
     month = active_month()
     customer = conn.execute("SELECT * FROM customers WHERE id=?", (cid,)).fetchone()
+    # Managers/super-admins a rep can route an escalation to.
+    managers = conn.execute(
+        "SELECT id, display_name, role FROM users WHERE role IN ('admin','superadmin') ORDER BY role DESC, display_name"
+    ).fetchall()
     conn.close()
     if not customer:
         flash('לקוח לא נמצא', 'danger')
@@ -874,7 +880,7 @@ def customer_detail(cid):
     wa_link = build_followup_wa_link(customer)
     return render_template('customer_detail.html', c=customer, month=month,
                            statuses=STATUSES, status_options=status_options_for(customer['brand']),
-                           wa_link=wa_link)
+                           managers=managers, wa_link=wa_link)
 
 
 def build_followup_wa_link(customer):
@@ -1090,11 +1096,20 @@ def admin_queue():
     conn = get_db()
     # Only rep-escalated items ('pending', set by mark_clarify). Raw website intake
     # ('ממתין') belongs to /admin/other-forms — keeping them apart avoids duplication.
-    bc, bp = brand_clause()  # managers see only their agencies' items
-    items = conn.execute(
-        "SELECT * FROM unmatched_submissions WHERE status='pending'" + bc +
-        " ORDER BY received_at DESC", bp
-    ).fetchall()
+    name_col = "(SELECT display_name FROM users WHERE id=assigned_to) AS assigned_name"
+    if session.get('role') == 'superadmin':
+        # Super-admin sees everything, so nothing routed anywhere gets lost.
+        items = conn.execute(
+            f"SELECT *, {name_col} FROM unmatched_submissions WHERE status='pending' ORDER BY received_at DESC"
+        ).fetchall()
+    else:
+        # A manager sees items routed to them, plus unassigned items in their agencies.
+        bc, bp = brand_clause()
+        items = conn.execute(
+            f"SELECT *, {name_col} FROM unmatched_submissions WHERE status='pending' "
+            "AND (assigned_to=? OR (assigned_to IS NULL" + bc + ")) ORDER BY received_at DESC",
+            [session.get('user_id')] + bp
+        ).fetchall()
     conn.close()
     return render_template('admin_queue.html', items=items)
 
@@ -1269,6 +1284,10 @@ def mark_clarify(cid):
     note = (data.get('note') or '').strip()
     if not note:
         return jsonify({'ok': False, 'error': 'נא לפרט את הסיבה להעברה לאדמין'}), 400
+    try:
+        assigned_to = int(data.get('assigned_to')) if data.get('assigned_to') else None
+    except (ValueError, TypeError):
+        assigned_to = None
     agent = session.get('display_name') or session.get('username', '')
     conn = get_db()
     c = conn.execute("SELECT * FROM customers WHERE id=?", (cid,)).fetchone()
@@ -1282,13 +1301,13 @@ def mark_clarify(cid):
         conn.execute('''INSERT OR REPLACE INTO unmatched_submissions
             (received_at, subject, name, id_number, phone, email, brand, installments,
              payment_method, card_number, card_expiry, card_holder_id, coverage, comments,
-             status, handled_by, message_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?)''',
+             status, handled_by, assigned_to, message_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?,?,?)''',
             (now, 'דורש בירור', c['name'], c['id_number'], c['phone'],
              c['form_email'] or '', c['brand'], c['form_installments'] or '',
              c['form_payment_method'] or '', c['form_card_number'] or '',
              c['form_card_expiry'] or '', c['form_id_card_holder'] or '',
-             c['form_coverage'] or '', comments, agent, f'queue-cid-{cid}'))
+             c['form_coverage'] or '', comments, agent, assigned_to, f'queue-cid-{cid}'))
         conn.execute("UPDATE customers SET status='דורש בירור', handled_by=? WHERE id=?", (agent, cid))
         conn.commit()
     conn.close()
