@@ -807,11 +807,9 @@ def customers():
     params += bp
 
     if brand_filter:
-        if brand_filter == 'ווינר':
-            query += " AND brand IN ('ווינר','אופיר')"
-        else:
-            query += " AND brand=?"
-            params.append(brand_filter)
+        # Each agency is its own brand now — Ofir is no longer merged into Winner.
+        query += " AND brand=?"
+        params.append(brand_filter)
     if status_filter == '__empty__':
         query += " AND (status IS NULL OR status='')"
     elif status_filter:
@@ -1695,11 +1693,8 @@ def export_wasender():
 
     params = [month['id']]
     if brand_filter:
-        if brand_filter == 'ווינר':
-            query += " AND brand IN ('ווינר','אופיר')"
-        else:
-            query += " AND brand=?"
-            params.append(brand_filter)
+        query += " AND brand=?"
+        params.append(brand_filter)
     query += " ORDER BY name"
 
     rows = conn.execute(query, params).fetchall()
