@@ -553,6 +553,10 @@ def init_db():
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_by TEXT")
     if 'assigned_to' not in existing_us:  # user_id the rep routed this escalation to
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN assigned_to INTEGER")
+    # Which manager an agent reports to (for the agent-performance view).
+    existing_user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    if 'manager_id' not in existing_user_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN manager_id INTEGER")
     # One-time (guarded): the historical 'אופיר' brand was mislabeled Winner business —
     # fold it into 'ווינר' across all data. Ofir stays a selectable agency for permissions
     # but is no longer auto-derived (see brand_from_agency), so this relabel sticks.
@@ -1409,15 +1413,73 @@ def queue():
 @superadmin_required
 def admin():
     conn = get_db()
-    users = conn.execute("SELECT id, username, display_name, role FROM users ORDER BY role, display_name").fetchall()
+    users = conn.execute("SELECT id, username, display_name, role, manager_id FROM users ORDER BY role, display_name").fetchall()
     months = conn.execute("SELECT * FROM months ORDER BY id DESC").fetchall()
     ub_map = {}
     for r in conn.execute("SELECT user_id, brand FROM user_brands").fetchall():
         ub_map.setdefault(r['user_id'], []).append(r['brand'])
+    managers = conn.execute(
+        "SELECT id, display_name, role FROM users WHERE role IN ('admin','superadmin') ORDER BY role DESC, display_name"
+    ).fetchall()
     conn.close()
     return render_template('admin.html', users=users, months=months,
                            email_sync_enabled=EMAIL_CONFIG['enabled'],
-                           agencies=BRANDS, user_brands=ub_map)
+                           agencies=BRANDS, user_brands=ub_map, managers=managers)
+
+
+@app.route('/admin/users/<int:uid>/manager', methods=['POST'])
+@login_required
+@superadmin_required
+def set_user_manager(uid):
+    """Assign the manager an agent reports to (for performance grouping)."""
+    mid = request.form.get('manager_id')
+    try:
+        mid = int(mid) if mid else None
+    except (ValueError, TypeError):
+        mid = None
+    conn = get_db()
+    conn.execute("UPDATE users SET manager_id=? WHERE id=?", (mid, uid))
+    conn.commit()
+    conn.close()
+    flash('המנהל האחראי עודכן', 'success')
+    return redirect(url_for('admin'))
+
+
+@app.route('/admin/performance')
+@login_required
+@admin_required
+def performance():
+    """Agent performance for the active month, attributed by who logged the calls
+    (call_by). A manager sees only their own agents; a super-admin sees everyone."""
+    conn = get_db()
+    month = active_month()
+    mid = month['id'] if month else -1
+    if session.get('role') == 'superadmin':
+        agents = conn.execute("SELECT id, display_name FROM users WHERE role='agent' ORDER BY display_name").fetchall()
+    else:
+        agents = conn.execute(
+            "SELECT id, display_name FROM users WHERE role='agent' AND manager_id=? ORDER BY display_name",
+            (session.get('user_id'),)
+        ).fetchall()
+    rows = []
+    for a in agents:
+        nm = a['display_name']
+        if not nm:
+            continue
+        q = conn.execute(
+            "SELECT "
+            "SUM((CASE WHEN call_by_1=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_2=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_3=? THEN 1 ELSE 0 END)) AS calls, "
+            "SUM(CASE WHEN call_by_1=? OR call_by_2=? OR call_by_3=? THEN 1 ELSE 0 END) AS touched, "
+            "SUM(CASE WHEN status='חודש' AND (call_by_1=? OR call_by_2=? OR call_by_3=?) THEN 1 ELSE 0 END) AS renewals "
+            "FROM customers WHERE month_id=?",
+            [nm] * 9 + [mid]
+        ).fetchone()
+        calls, touched, renewals = q['calls'] or 0, q['touched'] or 0, q['renewals'] or 0
+        rows.append({'name': nm, 'calls': calls, 'touched': touched, 'renewals': renewals,
+                     'rate': round(renewals / touched * 100, 1) if touched else 0})
+    rows.sort(key=lambda r: (r['renewals'], r['calls']), reverse=True)
+    conn.close()
+    return render_template('performance.html', rows=rows, month=month)
 
 @app.route('/admin/import', methods=['POST'])
 @login_required

@@ -118,7 +118,7 @@
         <div class="table-responsive mb-4">
           <table class="table table-sm align-middle">
             <thead class="table-light">
-              <tr><th>שם תצוגה</th><th>שם משתמש</th><th>תפקיד</th><th>גישת סוכנויות</th><th>איפוס סיסמה</th><th>מחיקה</th></tr>
+              <tr><th>שם תצוגה</th><th>שם משתמש</th><th>תפקיד</th><th>גישת סוכנויות</th><th>מנהל אחראי</th><th>איפוס סיסמה</th><th>מחיקה</th></tr>
             </thead>
             <tbody>
             {% for u in users %}
@@ -148,6 +148,20 @@
                   </div>
                   {% endfor %}
                   <button type="submit" class="btn btn-outline-primary btn-sm py-0">שמור</button>
+                </form>
+                {% endif %}
+              </td>
+              <td>
+                {% if u['role'] == 'superadmin' %}
+                <span class="text-muted small">—</span>
+                {% else %}
+                <form method="POST" action="/admin/users/{{ u['id'] }}/manager" class="d-flex gap-1">
+                  <select name="manager_id" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
+                    <option value="">— ללא —</option>
+                    {% for m in managers %}{% if m.id != u['id'] %}
+                    <option value="{{ m.id }}" {% if u['manager_id'] == m.id %}selected{% endif %}>{{ m.display_name }}{% if m.role == 'superadmin' %} (מנהל על){% endif %}</option>
+                    {% endif %}{% endfor %}
+                  </select>
                 </form>
                 {% endif %}
               </td>

@@ -1,0 +1,53 @@
+{% extends 'base.html' %}
+{% block title %} — ביצועי נציגים{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h5 class="mb-0"><i class="bi bi-graph-up-arrow me-2 text-primary"></i>ביצועי נציגים
+    {% if month %}<span class="text-muted small">— {{ month['name'] }}</span>{% endif %}
+  </h5>
+  <a href="/" class="btn btn-outline-secondary btn-sm">חזרה לדשבורד</a>
+</div>
+
+<div class="alert alert-info small">
+  הביצועים מיוחסים לפי מי שתיעד את השיחות (שדה "בוצע ע\"י"). "לקוחות שטופלו" = לקוחות שהנציג ביצע בהם לפחות שיחה אחת בחודש הפעיל.
+</div>
+
+<div class="card border-0 shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0 text-center">
+      <thead class="table-light">
+        <tr>
+          <th class="text-end ps-3">נציג</th>
+          <th>שיחות</th>
+          <th>לקוחות שטופלו</th>
+          <th>חידושים</th>
+          <th>אחוז חידוש</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td class="text-end ps-3 fw-semibold">{{ r.name }}</td>
+          <td>{{ r.calls }}</td>
+          <td>{{ r.touched }}</td>
+          <td class="text-success fw-bold">{{ r.renewals }}</td>
+          <td>
+            <div class="d-flex align-items-center gap-2" style="min-width:120px">
+              <div class="progress flex-grow-1" style="height:8px">
+                <div class="progress-bar bg-success" style="width: {{ r.rate }}%"></div>
+              </div>
+              <span class="small fw-semibold">{{ r.rate }}%</span>
+            </div>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-4">
+          אין נציגים להצגה. {% if session.role == 'superadmin' %}הגדר נציגים ושייך אותם למנהל במסך הניהול.{% else %}לא שויכו אליך נציגים עדיין.{% endif %}
+        </td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

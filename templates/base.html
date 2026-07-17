@@ -40,6 +40,7 @@
         {% if session.role in ('admin', 'superadmin') %}
         <li class="nav-item"><a class="nav-link" href="/admin/other-forms"><i class="bi bi-inbox me-1"></i>טפסים שאינם חידושים</a></li>
         <li class="nav-item"><a class="nav-link" href="/admin/policy-records"><i class="bi bi-people me-1"></i>כל הלקוחות</a></li>
+        <li class="nav-item"><a class="nav-link" href="/admin/performance"><i class="bi bi-graph-up-arrow me-1"></i>ביצועי נציגים</a></li>
         {% endif %}
         {% if session.role == 'superadmin' %}
         <li class="nav-item"><a class="nav-link" href="/admin"><i class="bi bi-gear me-1"></i>ניהול</a></li>
