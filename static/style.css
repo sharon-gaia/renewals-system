@@ -30,6 +30,13 @@ body {
 .text-ofir { color: #a9832e !important; }
 .brand-logo { height: 40px; width: auto; }
 
+/* Darker amber (toward orange) — readable on white, replaces harsh yellow */
+.text-amber { color: #d97706 !important; }
+
+/* Clickable dashboard stat cards */
+.stat-link .card { transition: box-shadow .15s ease, transform .15s ease; }
+.stat-link:hover .card { box-shadow: 0 .5rem 1rem rgba(0,0,0,.12) !important; transform: translateY(-2px); }
+
 .card {
   border-radius: 10px;
 }

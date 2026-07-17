@@ -63,75 +63,89 @@
 </div>
 {% endif %}
 
-<!-- סיכום ראשי -->
+<!-- סיכום ראשי — כל כרטיס לחיץ, מסנן לפי הסוכנות שנבחרה + סטטוס -->
 <div class="row g-3 mb-4">
   <div class="col-6 col-md-3">
-    <div class="card text-center border-0 shadow-sm">
-      <div class="card-body">
-        <div class="stat-number text-primary" data-stat="total">{{ stats.total }}</div>
-        <div class="stat-label">סה"כ לטיפול</div>
+    <a href="/customers" class="text-decoration-none stat-link" data-status="">
+      <div class="card text-center border-0 shadow-sm h-100">
+        <div class="card-body">
+          <div class="stat-number text-primary" data-stat="total">{{ stats.total }}</div>
+          <div class="stat-label">סה"כ לטיפול</div>
+        </div>
       </div>
-    </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card text-center border-0 shadow-sm">
-      <div class="card-body">
-        <div class="stat-number text-success" data-stat="renewed">{{ stats.renewed }}</div>
-        <div class="stat-label">חידשו ✓</div>
+    <a href="/customers?status=חודש" class="text-decoration-none stat-link" data-status="חודש">
+      <div class="card text-center border-0 shadow-sm h-100">
+        <div class="card-body">
+          <div class="stat-number text-success" data-stat="renewed">{{ stats.renewed }}</div>
+          <div class="stat-label">חידשו ✓</div>
+        </div>
       </div>
-    </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card text-center border-0 shadow-sm">
-      <div class="card-body">
-        <div class="stat-number text-success" data-stat="renewed_from_forms">{{ stats.renewed_from_forms }}</div>
-        <div class="stat-label">חודש דיגיטלית</div>
+    <a href="/customers?status=חודש" class="text-decoration-none stat-link" data-status="חודש">
+      <div class="card text-center border-0 shadow-sm h-100">
+        <div class="card-body">
+          <div class="stat-number text-success" data-stat="renewed_from_forms">{{ stats.renewed_from_forms }}</div>
+          <div class="stat-label">חודש דיגיטלית</div>
+        </div>
       </div>
-    </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <a href="/customers?status=טופס+התקבל" class="text-decoration-none">
-    <div class="card text-center border-0 shadow-sm {% if stats.forms %}border-info{% endif %}">
-      <div class="card-body">
-        <div class="stat-number text-info" data-stat="forms">{{ stats.forms }}</div>
-        <div class="stat-label">📋 ממתין לחידוש מטופס</div>
+    <a href="/customers?status=טופס+התקבל" class="text-decoration-none stat-link" data-status="טופס התקבל">
+      <div class="card text-center border-0 shadow-sm h-100 {% if stats.forms %}border-info{% endif %}">
+        <div class="card-body">
+          <div class="stat-number text-info" data-stat="forms">{{ stats.forms }}</div>
+          <div class="stat-label">📋 ממתין לחידוש מטופס</div>
+        </div>
       </div>
-    </div>
     </a>
   </div>
 </div>
 <div class="row g-3 mb-4">
   <div class="col-6 col-md-3">
-    <div class="card text-center border-0 shadow-sm">
-      <div class="card-body">
-        <div class="stat-number text-danger" data-stat="no_renew">{{ stats.no_renew }}</div>
-        <div class="stat-label">לא רוצים לחדש</div>
+    <a href="/customers?status=לא+רוצים+לחדש" class="text-decoration-none stat-link" data-status="לא רוצים לחדש">
+      <div class="card text-center border-0 shadow-sm h-100">
+        <div class="card-body">
+          <div class="stat-number text-danger" data-stat="no_renew">{{ stats.no_renew }}</div>
+          <div class="stat-label">לא רוצים לחדש</div>
+        </div>
       </div>
-    </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card text-center border-0 shadow-sm">
-      <div class="card-body">
-        <div class="stat-number text-dark" data-stat="no_contact">{{ stats.no_contact }}</div>
-        <div class="stat-label">לא נוצר קשר</div>
+    <a href="/customers?status=__empty__" class="text-decoration-none stat-link" data-status="__empty__">
+      <div class="card text-center border-0 shadow-sm h-100">
+        <div class="card-body">
+          <div class="stat-number text-dark" data-stat="no_contact">{{ stats.no_contact }}</div>
+          <div class="stat-label">לא נוצר קשר</div>
+        </div>
       </div>
-    </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card text-center border-0 shadow-sm">
-      <div class="card-body">
-        <div class="stat-number text-warning" data-stat="seen">{{ stats.seen }}</div>
-        <div class="stat-label">נוצר קשר עם לקוח</div>
+    <a href="/customers?status=נוצר+קשר+עם+לקוח" class="text-decoration-none stat-link" data-status="נוצר קשר עם לקוח">
+      <div class="card text-center border-0 shadow-sm h-100">
+        <div class="card-body">
+          <div class="stat-number text-amber" data-stat="seen">{{ stats.seen }}</div>
+          <div class="stat-label">נוצר קשר עם לקוח</div>
+        </div>
       </div>
-    </div>
+    </a>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card text-center border-0 shadow-sm">
-      <div class="card-body">
-        <div class="stat-number text-secondary" data-stat="pending">{{ stats.pending }}</div>
-        <div class="stat-label">ממתינים לטיפול</div>
+    <a href="/customers?status=__empty__" class="text-decoration-none stat-link" data-status="__empty__">
+      <div class="card text-center border-0 shadow-sm h-100">
+        <div class="card-body">
+          <div class="stat-number text-secondary" data-stat="pending">{{ stats.pending }}</div>
+          <div class="stat-label">ממתינים לטיפול</div>
+        </div>
       </div>
-    </div>
+    </a>
   </div>
 </div>
 
@@ -189,63 +203,55 @@
 </div>
 {% endif %}
 
-<!-- קיצורי דרך -->
+<!-- קיצור דרך -->
 <div class="row g-2">
   <div class="col-6 col-md-3">
-    <a href="/customers?status=__empty__" class="btn btn-outline-secondary w-100">
+    <a href="/customers?status=__empty__" class="btn btn-outline-secondary w-100 stat-link" data-status="__empty__">
       <i class="bi bi-clock me-1"></i>ממתינים לטיפול
-      <span class="badge bg-secondary ms-1">{{ stats.pending }}</span>
+      <span class="badge bg-secondary ms-1" data-stat="pending">{{ stats.pending }}</span>
     </a>
   </div>
-  <div class="col-6 col-md-3">
-    <a href="/customers?status=נוצר+קשר+עם+לקוח" class="btn btn-outline-warning w-100">
-      <i class="bi bi-eye me-1"></i>ראו הודעה
-      <span class="badge bg-warning text-dark ms-1">{{ stats.seen }}</span>
-    </a>
-  </div>
-  <div class="col-6 col-md-3">
-    <a href="/customers?brand=גאיה" class="btn btn-outline-info w-100">
-      <i class="bi bi-filter me-1"></i>גאיה בלבד
-    </a>
-  </div>
-  <div class="col-6 col-md-3">
-    <a href="/customers?brand=ווינר" class="btn btn-outline-primary w-100">
-      <i class="bi bi-filter me-1"></i>ווינר בלבד
-    </a>
-  </div>
-  {% if stats.ofir %}
-  <div class="col-6 col-md-3">
-    <a href="/customers?brand=אופיר" class="btn btn-outline-warning w-100">
-      <i class="bi bi-filter me-1"></i>אופיר בלבד
-    </a>
-  </div>
-  {% endif %}
 </div>
 
 <script>
 (function () {
   const VIEWS = {{ views_json|safe }};
   const toggle = document.getElementById('view-toggle');
-  if (!toggle) return;
   const nameEl = document.getElementById('view-name');
+  function applyLinks(view) {
+    document.querySelectorAll('.stat-link').forEach(a => {
+      const st = a.dataset.status;
+      const p = [];
+      if (view && view !== 'הכל') p.push('brand=' + encodeURIComponent(view));
+      if (st) p.push('status=' + encodeURIComponent(st));
+      a.href = '/customers' + (p.length ? '?' + p.join('&') : '');
+    });
+  }
   function apply(view) {
     const s = VIEWS[view];
-    if (!s) return;
-    document.querySelectorAll('[data-stat]').forEach(el => {
-      const k = el.dataset.stat;
-      if (s[k] !== undefined) el.textContent = s[k];
-    });
-    const bar = document.getElementById('pct-bar');
-    if (bar) bar.style.width = s.pct + '%';
-    if (nameEl) nameEl.textContent = view === 'הכל' ? '' : '· ' + view;
+    if (s) {
+      document.querySelectorAll('[data-stat]').forEach(el => {
+        const k = el.dataset.stat;
+        if (s[k] !== undefined) el.textContent = s[k];
+      });
+      const bar = document.getElementById('pct-bar');
+      if (bar) bar.style.width = s.pct + '%';
+      if (nameEl) nameEl.textContent = view === 'הכל' ? '' : '· ' + view;
+    }
+    applyLinks(view);
   }
-  toggle.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', () => {
-      toggle.querySelectorAll('button').forEach(b => { b.classList.add('btn-outline-primary'); b.classList.remove('btn-primary'); });
-      btn.classList.add('btn-primary'); btn.classList.remove('btn-outline-primary');
-      apply(btn.dataset.view);
+  // Initial links follow the default selected agency (first toggle button, else 'הכל').
+  const active = toggle ? toggle.querySelector('button.btn-primary') : null;
+  applyLinks(active ? active.dataset.view : 'הכל');
+  if (toggle) {
+    toggle.querySelectorAll('button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        toggle.querySelectorAll('button').forEach(b => { b.classList.add('btn-outline-primary'); b.classList.remove('btn-primary'); });
+        btn.classList.add('btn-primary'); btn.classList.remove('btn-outline-primary');
+        apply(btn.dataset.view);
+      });
     });
-  });
+  }
 })();
 </script>
 
