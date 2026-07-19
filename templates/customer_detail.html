@@ -66,6 +66,32 @@
               </span>
             </td>
           </tr>
+          <tr><th>אימייל</th>
+            <td class="inline-edit" data-field="email">
+              <span class="ie-view">{{ c.email or '—' }}
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="ieEdit(this)" title="עריכת אימייל"><i class="bi bi-pencil"></i></button>
+              </span>
+              <span class="ie-edit d-none">
+                <input type="email" class="ie-input form-control form-control-sm d-inline-block align-middle" style="width:180px" value="{{ c.email or '' }}">
+                <button type="button" class="btn btn-success btn-sm py-0" onclick="ieSave(this)"><i class="bi bi-check-lg"></i></button>
+                <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="ieCancel(this)"><i class="bi bi-x-lg"></i></button>
+                <span class="ie-msg small text-danger ms-1"></span>
+              </span>
+            </td>
+          </tr>
+          <tr><th>כתובת</th>
+            <td class="inline-edit" data-field="address">
+              <span class="ie-view">{{ c.address or '—' }}
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="ieEdit(this)" title="עריכת כתובת"><i class="bi bi-pencil"></i></button>
+              </span>
+              <span class="ie-edit d-none">
+                <input type="text" class="ie-input form-control form-control-sm d-inline-block align-middle" style="width:200px" value="{{ c.address or '' }}">
+                <button type="button" class="btn btn-success btn-sm py-0" onclick="ieSave(this)"><i class="bi bi-check-lg"></i></button>
+                <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="ieCancel(this)"><i class="bi bi-x-lg"></i></button>
+                <span class="ie-msg small text-danger ms-1"></span>
+              </span>
+            </td>
+          </tr>
           <tr><th>מותג</th>
             <td><span class="badge {{ 'bg-info' if c.brand == 'גאיה' else ('bg-ofir' if c.brand == 'אופיר' else 'bg-purple') }}">{{ c.brand or '—' }}</span></td>
           </tr>
@@ -324,6 +350,35 @@ document.addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { e.preventDefault(); savePhone(); }
     if (e.key === 'Escape') { cancelPhone(); }
   }
+});
+
+// Generic inline edit (email, address, …) — driven by data-field on the cell.
+function ieEdit(btn) {
+  const td = btn.closest('.inline-edit');
+  td.querySelector('.ie-view').classList.add('d-none');
+  td.querySelector('.ie-edit').classList.remove('d-none');
+  td.querySelector('.ie-input').focus();
+}
+function ieCancel(btn) {
+  const td = btn.closest('.inline-edit');
+  td.querySelector('.ie-edit').classList.add('d-none');
+  td.querySelector('.ie-view').classList.remove('d-none');
+}
+function ieSave(btn) {
+  const td = btn.closest('.inline-edit');
+  const msg = td.querySelector('.ie-msg');
+  const body = {}; body[td.dataset.field] = td.querySelector('.ie-input').value.trim();
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  }).then(r => r.json()).then(res => {
+    if (res.ok) { window.location.reload(); } else { msg.textContent = res.error || 'שגיאה בשמירה'; }
+  }).catch(() => { msg.textContent = 'שגיאה בשמירה'; });
+}
+document.querySelectorAll('.inline-edit .ie-input').forEach(function (inp) {
+  inp.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); ieSave(inp); }
+    if (e.key === 'Escape') { ieCancel(inp); }
+  });
 });
 
 function toggleVip() {

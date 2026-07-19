@@ -536,7 +536,8 @@ def init_db():
     # Add card + tracking columns if missing
     existing = [r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()]
     for col, typ in [('form_card_number','TEXT'), ('form_card_expiry','TEXT'),
-                     ('form_id_card_holder','TEXT'), ('handled_by','TEXT'), ('email','TEXT')]:
+                     ('form_id_card_holder','TEXT'), ('handled_by','TEXT'), ('email','TEXT'),
+                     ('address','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     # Extra elementary/car fields (mainly from the Ofir/Meir book). All optional — shown
@@ -914,7 +915,7 @@ def update_customer(cid):
             return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
     allowed = ['status', 'agent_notes', 'contact_date', 'interested_in_products',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
-                'whatsapp_source', 'brand', 'phone',
+                'whatsapp_source', 'brand', 'phone', 'email', 'address',
                 'call_date_1', 'call_status_1', 'call_by_1',
                 'call_date_2', 'call_status_2', 'call_by_2',
                 'call_date_3', 'call_status_3', 'call_by_3']
