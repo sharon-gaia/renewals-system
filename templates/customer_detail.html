@@ -52,9 +52,18 @@
           <tr><th>ת.ז</th><td>{{ c.id_number or '—' }}</td></tr>
           <tr><th>טלפון</th>
             <td>
-              <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank">
-                <i class="bi bi-whatsapp {{ 'text-warning' if c.whatsapp_source == 'ווינר' else 'text-success' }} me-1"></i>{{ c.phone or '—' }}
-              </a>
+              <span id="phone-view">
+                <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank">
+                  <i class="bi bi-whatsapp {{ 'text-warning' if c.whatsapp_source == 'ווינר' else 'text-success' }} me-1"></i>{{ c.phone or '—' }}
+                </a>
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="editPhone()" title="עריכת טלפון"><i class="bi bi-pencil"></i></button>
+              </span>
+              <span id="phone-edit" class="d-none">
+                <input type="tel" id="phone-input" class="form-control form-control-sm d-inline-block align-middle" style="width:130px" value="{{ c.phone or '' }}">
+                <button type="button" class="btn btn-success btn-sm py-0" onclick="savePhone()"><i class="bi bi-check-lg"></i></button>
+                <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="cancelPhone()"><i class="bi bi-x-lg"></i></button>
+                <span id="phone-msg" class="small text-danger ms-1"></span>
+              </span>
             </td>
           </tr>
           <tr><th>מותג</th>
@@ -287,6 +296,34 @@ document.getElementById('clarify-btn').addEventListener('click', () => {
     const wrap = document.getElementById('wa-followup-wrap');
     if (wrap && sel.value.indexOf('אין מענה') === 0) wrap.classList.remove('d-none');
   });
+});
+
+function editPhone() {
+  document.getElementById('phone-view').classList.add('d-none');
+  document.getElementById('phone-edit').classList.remove('d-none');
+  document.getElementById('phone-input').focus();
+}
+function cancelPhone() {
+  document.getElementById('phone-edit').classList.add('d-none');
+  document.getElementById('phone-view').classList.remove('d-none');
+}
+function savePhone() {
+  const v = document.getElementById('phone-input').value.trim();
+  const msg = document.getElementById('phone-msg');
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({phone: v})
+  }).then(r => r.json()).then(res => {
+    if (res.ok) { window.location.reload(); }
+    else { msg.textContent = res.error || 'שגיאה בשמירה'; }
+  }).catch(() => { msg.textContent = 'שגיאה בשמירה'; });
+}
+document.addEventListener('keydown', function (e) {
+  const inp = document.getElementById('phone-input');
+  if (inp && !document.getElementById('phone-edit').classList.contains('d-none') && document.activeElement === inp) {
+    if (e.key === 'Enter') { e.preventDefault(); savePhone(); }
+    if (e.key === 'Escape') { cancelPhone(); }
+  }
 });
 
 function toggleVip() {

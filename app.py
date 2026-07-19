@@ -914,7 +914,7 @@ def update_customer(cid):
             return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
     allowed = ['status', 'agent_notes', 'contact_date', 'interested_in_products',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
-                'whatsapp_source', 'brand',
+                'whatsapp_source', 'brand', 'phone',
                 'call_date_1', 'call_status_1', 'call_by_1',
                 'call_date_2', 'call_status_2', 'call_by_2',
                 'call_date_3', 'call_status_3', 'call_by_3']
