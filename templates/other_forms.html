@@ -77,6 +77,11 @@
         <td class="small fw-semibold">{{ item.title }}</td>
         <td class="small">{{ item.detail }}</td>
         <td class="text-nowrap" onclick="event.stopPropagation();">
+          <button type="button" class="btn btn-outline-primary btn-sm py-0 mb-1" onclick="openFile({{ item.id }})"
+                  title="{{ 'מעבר לתיק הלקוח' if item.insured_id else 'פתיחת תיק לקוח (משויך ללקוח קיים אם נמצא)' }}">
+            <i class="bi bi-folder2-open me-1"></i>{{ 'תיק הלקוח' if item.insured_id else 'פתח תיק' }}
+          </button>
+          <br>
           {% if item.status == 'ממתין' %}
           <button type="button" class="btn btn-outline-warning btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'בטיפול')">התחל טיפול</button>
           <button type="button" class="btn btn-success btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'טופל')">טופל ✓</button>
@@ -127,6 +132,12 @@
 
   // Advance an item through the work queue. Posted via fetch so we don't nest a
   // <form> inside the bulk-delete form.
+  // Open (or create) the customer file for a form; the server redirects to it.
+  function openFile(id) {
+    fetch('/admin/other-forms/' + id + '/file', {method: 'POST'})
+      .then(r => { window.location = r.url; });
+  }
+
   function setFormStatus(id, status) {
     const fd = new FormData();
     fd.append('status', status);

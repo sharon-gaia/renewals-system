@@ -577,6 +577,8 @@ def init_db():
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN assigned_to INTEGER")
     if 'handled_at' not in existing_us:  # when the form-queue item was last advanced
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_at TEXT")
+    if 'insured_id' not in existing_us:  # the customer file this form was attached to
+        conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN insured_id INTEGER")
     # Which manager an agent reports to (for the agent-performance view).
     existing_user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if 'manager_id' not in existing_user_cols:
@@ -1205,6 +1207,7 @@ def other_forms():
             'title': d['name'] or '(ללא שם)', 'detail': d['id_number'] or d['phone'] or '',
             'source': 'טופס', 'category': guess_category(d['subject'], 'form'),
             'status': d['status'], 'handled_by': d['handled_by'], 'handled_at': d['handled_at'],
+            'insured_id': d['insured_id'],
             'link': None, 'kind': 'form', 'full': d,
         })
     # Counts per queue state, for the filter tabs.
@@ -1218,6 +1221,57 @@ def other_forms():
     conn.close()
     return render_template('other_forms.html', items=rows, counts=counts, show=show,
                            queue_labels=FORM_QUEUE_LABELS)
+
+
+@app.route('/admin/other-forms/<int:sid>/file', methods=['POST'])
+@login_required
+@admin_required
+def other_forms_open_file(sid):
+    """Open the customer file for a form. Reuses the existing client's file when one
+    matches (by ת.ז, else phone); otherwise creates the file from the form's details."""
+    conn = get_db()
+    sub = conn.execute("SELECT * FROM unmatched_submissions WHERE id=?", (sid,)).fetchone()
+    if not sub:
+        conn.close()
+        flash('הפריט לא נמצא', 'danger')
+        return redirect(url_for('other_forms'))
+    if not can_access_brand(sub['brand']):
+        conn.close()
+        flash('אין הרשאה לסוכנות זו', 'danger')
+        return redirect(url_for('other_forms'))
+
+    # Already attached to a file → go straight there.
+    if sub['insured_id']:
+        exists = conn.execute("SELECT id FROM insureds WHERE id=?", (sub['insured_id'],)).fetchone()
+        if exists:
+            conn.close()
+            return redirect(url_for('insured_detail', iid=exists['id']))
+
+    idn = normalize_id_number(sub['id_number']) or None
+    digits = re.sub(r'\D', '', str(sub['phone'] or ''))
+    found = None
+    if idn:
+        found = conn.execute("SELECT id FROM insureds WHERE id_number=?", (idn,)).fetchone()
+    if not found and digits:
+        found = conn.execute(
+            "SELECT id FROM insureds WHERE replace(replace(COALESCE(phone,''),'-',''),' ','')=?",
+            (digits,)).fetchone()
+
+    if found:
+        iid = found['id']
+    else:
+        now = datetime.datetime.now().isoformat()
+        conn.execute(
+            """INSERT INTO insureds (id_number, name, brand, phone, email, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (idn, sub['name'] or '(ללא שם)', sub['brand'], sub['phone'], sub['email'],
+             'לא פעיל', now, now))
+        iid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        flash('נפתח תיק לקוח חדש מפרטי הטופס', 'success')
+    conn.execute("UPDATE unmatched_submissions SET insured_id=? WHERE id=?", (iid, sid))
+    conn.commit()
+    conn.close()
+    return redirect(url_for('insured_detail', iid=iid))
 
 
 @app.route('/admin/other-forms/<int:sid>/status', methods=['POST'])
