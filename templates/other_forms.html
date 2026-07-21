@@ -15,9 +15,19 @@
 </div>
 
 <p class="text-muted small mb-3">
-  גיבוי מרכזי — כל מייל שהגיע ולא הפך לחידוש משויך, מכל המקורות (טפסי אתר, פוליסות מהראל וכו').
-  הקטגוריה היא ניחוש גס לפי מילות מפתח, לא סיווג מדויק.
+  תור עבודה לטפסים שהגיעו מהאתרים ולא הפכו לחידוש משויך.
+  כל פריט מתקדם: <strong>ממתין לטיפול</strong> ← <strong>בטיפול</strong> ← <strong>טופל</strong>.
 </p>
+
+<div class="btn-group mb-3" role="group">
+  <a href="?show=active" class="btn btn-sm {{ 'btn-primary' if show == 'active' else 'btn-outline-primary' }}">
+    בתור <span class="badge bg-light text-dark ms-1">{{ counts['ממתין'] + counts['בטיפול'] }}</span>
+  </a>
+  <a href="?show=done" class="btn btn-sm {{ 'btn-primary' if show == 'done' else 'btn-outline-primary' }}">
+    טופלו <span class="badge bg-light text-dark ms-1">{{ counts['טופל'] }}</span>
+  </a>
+  <a href="?show=all" class="btn btn-sm {{ 'btn-primary' if show == 'all' else 'btn-outline-primary' }}">הכל</a>
+</div>
 
 {% if not items %}
 <div class="alert alert-success text-center py-5">
@@ -39,12 +49,13 @@
       <tr>
         <th><input type="checkbox" id="select-all"></th>
         <th></th>
+        <th>סטטוס</th>
         <th>תאריך</th>
-        <th>מקור</th>
         <th>קטגוריה</th>
         <th>נושא</th>
-        <th>שם / קובץ</th>
-        <th>ת.ז / טלפון / פוליסה</th>
+        <th>שם</th>
+        <th>ת.ז / טלפון</th>
+        <th>פעולות</th>
       </tr>
     </thead>
     <tbody>
@@ -54,15 +65,31 @@
           <input type="checkbox" class="row-check" name="selected" value="{{ item.kind }}:{{ item.id }}">
         </td>
         <td class="text-muted"><i class="bi bi-chevron-down"></i></td>
+        <td>
+          <span class="badge {{ 'bg-success' if item.status == 'טופל' else ('bg-warning text-dark' if item.status == 'בטיפול' else 'bg-secondary') }}">
+            {{ queue_labels.get(item.status, item.status) }}
+          </span>
+          {% if item.handled_by %}<div class="small text-muted mt-1">{{ item.handled_by }}{% if item.handled_at %} · {{ item.handled_at }}{% endif %}</div>{% endif %}
+        </td>
         <td class="small text-muted text-nowrap">{{ item.received_at }}</td>
-        <td><span class="badge bg-light text-dark border">{{ item.source }}</span></td>
         <td><span class="badge bg-info-subtle text-info-emphasis">{{ item.category }}</span></td>
         <td class="small">{{ item.subject }}</td>
         <td class="small fw-semibold">{{ item.title }}</td>
         <td class="small">{{ item.detail }}</td>
+        <td class="text-nowrap" onclick="event.stopPropagation();">
+          {% if item.status == 'ממתין' %}
+          <button type="button" class="btn btn-outline-warning btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'בטיפול')">התחל טיפול</button>
+          <button type="button" class="btn btn-success btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'טופל')">טופל ✓</button>
+          {% elif item.status == 'בטיפול' %}
+          <button type="button" class="btn btn-success btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'טופל')">טופל ✓</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'ממתין')" title="החזר לממתין"><i class="bi bi-arrow-counterclockwise"></i></button>
+          {% else %}
+          <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'ממתין')">החזר לתור</button>
+          {% endif %}
+        </td>
       </tr>
       <tr class="collapse" id="detail-{{ loop.index }}">
-        <td colspan="8" class="bg-light">
+        <td colspan="9" class="bg-light">
           <div class="p-3">
             {% if item.kind == 'policy' %}
               <div class="mb-2"><strong>מספר פוליסה:</strong> {{ item.full.policy_number }}</div>
@@ -97,6 +124,16 @@
   document.getElementById('select-all').addEventListener('change', function () {
     document.querySelectorAll('.row-check').forEach(cb => cb.checked = this.checked);
   });
+
+  // Advance an item through the work queue. Posted via fetch so we don't nest a
+  // <form> inside the bulk-delete form.
+  function setFormStatus(id, status) {
+    const fd = new FormData();
+    fd.append('status', status);
+    fd.append('show', '{{ show }}');
+    fetch('/admin/other-forms/' + id + '/status', {method: 'POST', body: fd})
+      .then(() => window.location.reload());
+  }
 </script>
 {% endif %}
 {% endblock %}

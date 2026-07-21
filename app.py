@@ -76,6 +76,11 @@ def format_date(value):
 STATUSES = ['', 'טופס התקבל', 'חודש', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
 
+# Work-queue states for /admin/other-forms. 'ממתין' is the stored default from intake;
+# it is displayed as "ממתין לטיפול".
+FORM_QUEUE_STATUSES = ('ממתין', 'בטיפול', 'טופל')
+FORM_QUEUE_LABELS = {'ממתין': 'ממתין לטיפול', 'בטיפול': 'בטיפול', 'טופל': 'טופל'}
+
 # Status dropdowns differ per agency. Gaia/Winner keep the renewals workflow; Ofir
 # (Meir's elementary book) has its own pipeline. Each entry is (stored value, label);
 # '' is the default/unstarted state.
@@ -554,6 +559,8 @@ def init_db():
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_by TEXT")
     if 'assigned_to' not in existing_us:  # user_id the rep routed this escalation to
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN assigned_to INTEGER")
+    if 'handled_at' not in existing_us:  # when the form-queue item was last advanced
+        conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_at TEXT")
     # Which manager an agent reports to (for the agent-performance view).
     existing_user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if 'manager_id' not in existing_user_cols:
@@ -693,9 +700,11 @@ def _refresh_session_from_db():
     if not uid:
         return
     conn = get_db()
-    u = conn.execute("SELECT role FROM users WHERE id=?", (uid,)).fetchone()
+    u = conn.execute("SELECT role, username, display_name FROM users WHERE id=?", (uid,)).fetchone()
     if u:
         session['role'] = u['role']
+        session['username'] = u['username']
+        session['display_name'] = u['display_name']
         if u['role'] == 'superadmin':
             session.pop('brands', None)
         else:
@@ -1140,24 +1149,68 @@ def other_forms():
     # excluded — they already live in the insureds master ("כל הלקוחות"), so showing
     # them here too was double-bookkeeping. Automated morning monitor tests are filtered.
     bc, bp = brand_clause()  # managers see only their agencies' forms
+    not_monitor = ("AND COALESCE(id_number,'') != '999999999' "
+                   "AND COALESCE(email,'') != 'monitor-check@example.com' "
+                   "AND COALESCE(name,'') != 'MONITOR-CHECK-DO-NOT-PROCESS' ")
+    show = request.args.get('show', 'active')
+    wanted = {'done': ('טופל',), 'all': FORM_QUEUE_STATUSES}.get(show, ('ממתין', 'בטיפול'))
+    ph = ','.join('?' * len(wanted))
     for r in conn.execute(
-        "SELECT * FROM unmatched_submissions WHERE status='ממתין' "
-        "AND COALESCE(id_number,'') != '999999999' "
-        "AND COALESCE(email,'') != 'monitor-check@example.com' "
-        "AND COALESCE(name,'') != 'MONITOR-CHECK-DO-NOT-PROCESS' " + bc +
-        " ORDER BY received_at DESC", bp
+        f"SELECT * FROM unmatched_submissions WHERE status IN ({ph}) " + not_monitor + bc +
+        " ORDER BY received_at DESC", list(wanted) + bp
     ).fetchall():
         d = dict(r)
         rows.append({
             'id': d['id'], 'received_at': d['received_at'], 'subject': d['subject'],
             'title': d['name'] or '(ללא שם)', 'detail': d['id_number'] or d['phone'] or '',
             'source': 'טופס', 'category': guess_category(d['subject'], 'form'),
+            'status': d['status'], 'handled_by': d['handled_by'], 'handled_at': d['handled_at'],
             'link': None, 'kind': 'form', 'full': d,
         })
+    # Counts per queue state, for the filter tabs.
+    counts = {}
+    for st in FORM_QUEUE_STATUSES:
+        counts[st] = conn.execute(
+            "SELECT COUNT(*) FROM unmatched_submissions WHERE status=? " + not_monitor + bc,
+            [st] + bp).fetchone()[0]
 
     rows.sort(key=lambda x: x['received_at'] or '', reverse=True)
     conn.close()
-    return render_template('other_forms.html', items=rows)
+    return render_template('other_forms.html', items=rows, counts=counts, show=show,
+                           queue_labels=FORM_QUEUE_LABELS)
+
+
+@app.route('/admin/other-forms/<int:sid>/status', methods=['POST'])
+@login_required
+@admin_required
+def other_forms_status(sid):
+    """Advance a form through the work queue: ממתין → בטיפול → טופל (or back)."""
+    new = request.form.get('status', '')
+    if new not in FORM_QUEUE_STATUSES:
+        flash('סטטוס לא תקין', 'danger')
+        return redirect(url_for('other_forms'))
+    conn = get_db()
+    row = conn.execute("SELECT brand, status FROM unmatched_submissions WHERE id=?", (sid,)).fetchone()
+    if not row or row['status'] not in FORM_QUEUE_STATUSES:
+        conn.close()
+        flash('הפריט לא נמצא בתור', 'danger')
+        return redirect(url_for('other_forms'))
+    if not can_access_brand(row['brand']):
+        conn.close()
+        flash('אין הרשאה לסוכנות זו', 'danger')
+        return redirect(url_for('other_forms'))
+    # Returning to the start clears the handler stamp.
+    if new == 'ממתין':
+        conn.execute("UPDATE unmatched_submissions SET status=?, handled_by=NULL, handled_at=NULL WHERE id=?",
+                     (new, sid))
+    else:
+        conn.execute("UPDATE unmatched_submissions SET status=?, handled_by=?, handled_at=? WHERE id=?",
+                     (new, session.get('display_name') or session.get('username', ''),
+                      datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), sid))
+    conn.commit()
+    conn.close()
+    flash(f'הפריט סומן כ"{new}"', 'success')
+    return redirect(url_for('other_forms', show=request.form.get('show', 'active')))
 
 @app.route('/admin/other-forms/delete', methods=['POST'])
 @login_required
