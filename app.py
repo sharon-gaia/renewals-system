@@ -1304,6 +1304,10 @@ def other_forms_status(sid):
     conn.commit()
     conn.close()
     flash(f'הפריט סומן כ"{new}"', 'success')
+    # Allow advancing the status from inside the customer file and staying there.
+    back = request.form.get('back_insured')
+    if back:
+        return redirect(url_for('insured_detail', iid=back))
     return redirect(url_for('other_forms', show=request.form.get('show', 'active')))
 
 @app.route('/admin/other-forms/delete', methods=['POST'])
@@ -1386,9 +1390,15 @@ def insured_detail(iid):
            ORDER BY pr.extracted_at DESC""",
         (ins['id_number'],)
     ).fetchall()
+    # Website forms attached to this file — shown with their work-queue status so the
+    # whole handling happens here, without bouncing back to the forms list.
+    forms = conn.execute(
+        "SELECT * FROM unmatched_submissions WHERE insured_id=? ORDER BY received_at DESC", (iid,)
+    ).fetchall()
     conn.close()
     wa_link = build_followup_wa_link_generic(ins['phone'], ins['brand'])
-    return render_template('insured_detail.html', c=ins, docs=docs, wa_link=wa_link)
+    return render_template('insured_detail.html', c=ins, docs=docs, wa_link=wa_link,
+                           forms=forms, queue_labels=FORM_QUEUE_LABELS)
 
 @app.route('/insured/<int:iid>/update', methods=['POST'])
 @login_required

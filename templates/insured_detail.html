@@ -124,6 +124,56 @@
       </div>
     </div>
 
+    {% if forms %}
+    <!-- פניות מהאתר המשויכות לתיק — כולל סטטוס הטיפול -->
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-light fw-bold">
+        <i class="bi bi-inbox me-1"></i>פניות מהאתר ({{ forms|length }})
+      </div>
+      <div class="card-body p-0">
+        {% for f in forms %}
+        <div class="border-bottom p-3">
+          <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+            <div>
+              <span class="badge {{ 'bg-success' if f.status == 'טופל' else ('bg-warning text-dark' if f.status == 'בטיפול' else 'bg-secondary') }}">
+                {{ queue_labels.get(f.status, f.status) }}
+              </span>
+              <span class="fw-semibold ms-2">{{ f.subject or 'פנייה' }}</span>
+              <span class="small text-muted ms-2">{{ f.received_at }}</span>
+            </div>
+            <form method="POST" action="/admin/other-forms/{{ f.id }}/status" class="d-flex gap-1 mb-0">
+              <input type="hidden" name="back_insured" value="{{ c.id }}">
+              {% if f.status == 'ממתין' %}
+              <button name="status" value="בטיפול" class="btn btn-outline-warning btn-sm py-0">התחל טיפול</button>
+              <button name="status" value="טופל" class="btn btn-success btn-sm py-0">טופל ✓</button>
+              {% elif f.status == 'בטיפול' %}
+              <button name="status" value="טופל" class="btn btn-success btn-sm py-0">טופל ✓</button>
+              <button name="status" value="ממתין" class="btn btn-outline-secondary btn-sm py-0" title="החזר לממתין"><i class="bi bi-arrow-counterclockwise"></i></button>
+              {% else %}
+              <button name="status" value="ממתין" class="btn btn-outline-secondary btn-sm py-0">החזר לתור</button>
+              {% endif %}
+            </form>
+          </div>
+          {% if f.handled_by %}<div class="small text-muted mb-2">טופל ע"י {{ f.handled_by }}{% if f.handled_at %} · {{ f.handled_at }}{% endif %}</div>{% endif %}
+          <div class="row g-2 small">
+            {% if f.name %}<div class="col-md-4"><strong>שם בטופס:</strong> {{ f.name }}</div>{% endif %}
+            {% if f.id_number %}<div class="col-md-4"><strong>ת.ז:</strong> {{ f.id_number }}</div>{% endif %}
+            {% if f.phone %}<div class="col-md-4"><strong>טלפון:</strong> {{ f.phone }}</div>{% endif %}
+            {% if f.email %}<div class="col-md-4"><strong>אימייל:</strong> {{ f.email }}</div>{% endif %}
+            {% if f.installments %}<div class="col-md-4"><strong>תשלומים:</strong> {{ f.installments }}</div>{% endif %}
+            {% if f.payment_method %}<div class="col-md-4"><strong>אמצעי גבייה:</strong> {{ f.payment_method }}</div>{% endif %}
+            {% if f.coverage %}<div class="col-md-4"><strong>כיסוי:</strong> {{ f.coverage }}</div>{% endif %}
+            {% if f.card_number %}<div class="col-md-4"><strong>כרטיס:</strong> {{ f.card_number }} {{ f.card_expiry or '' }}</div>{% endif %}
+          </div>
+          {% if f.comments %}
+          <div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">{{ f.comments }}</div>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
     <!-- מסמכי פוליסה (היסטוריה) -->
     <div class="card border-0 shadow-sm mb-3">
       <div class="card-header bg-light fw-bold">מסמכי פוליסה (PDF) — היסטוריה</div>
