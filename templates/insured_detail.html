@@ -42,6 +42,21 @@
       <div class="card-header bg-light fw-bold">פרטים</div>
       <div class="card-body">
         <table class="table table-sm table-borderless mb-0">
+          <tr><th>סטטוס</th>
+            <td>
+              {% if session.role in ('admin', 'superadmin') %}
+              <select id="det-status" class="form-select form-select-sm">
+                <option value="">— (אוטומטי לפי תאריך) —</option>
+                <option value="פעיל" {% if c.status == 'פעיל' %}selected{% endif %}>פעיל</option>
+                <option value="לא פעיל" {% if c.status == 'לא פעיל' %}selected{% endif %}>לא פעיל</option>
+                <option value="בוטל" {% if c.status == 'בוטל' %}selected{% endif %}>בוטל</option>
+              </select>
+              {% if c.status_override %}<div class="small text-warning mt-1"><i class="bi bi-hand-index me-1"></i>נקבע ידנית</div>{% endif %}
+              {% else %}
+              <span class="badge {{ 'bg-success' if c.status == 'פעיל' else ('bg-danger' if c.status == 'בוטל' else 'bg-secondary') }}">{{ c.status or '—' }}</span>
+              {% endif %}
+            </td>
+          </tr>
           <tr><th>ת.ז</th><td>{{ c.id_number or '—' }}</td></tr>
           <tr><th>פוליסה</th><td>{{ c.policy_number or '—' }}</td></tr>
           <tr><th>טלפון</th>
@@ -70,37 +85,36 @@
   </div>
 
   <div class="col-md-8">
-    <!-- סטטוס וניסיונות -->
+    <!-- 1. הערות -->
     <div class="card border-0 shadow-sm mb-3">
-      <div class="card-header bg-light fw-bold">סטטוס וטיפול</div>
+      <div class="card-header bg-light fw-bold">הערות</div>
+      <div class="card-body">
+        <textarea id="det-agent-notes" class="form-control" rows="3" placeholder="הוסף הערה...">{{ c.agent_notes or '' }}</textarea>
+      </div>
+    </div>
+
+    <!-- 2. ניסיונות התקשרות — הבא נחשף רק אחרי שהקודם מולא -->
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-light fw-bold">ניסיונות התקשרות</div>
       <div class="card-body">
         <div class="row g-3">
-          <div class="col-md-6">
-            <label class="form-label fw-semibold">סטטוס (שינוי ידני — מנהל)</label>
-            <select id="det-status" class="form-select">
-              <option value="">— (אוטומטי לפי תאריך) —</option>
-              <option value="פעיל" {% if c.status == 'פעיל' %}selected{% endif %}>פעיל</option>
-              <option value="לא פעיל" {% if c.status == 'לא פעיל' %}selected{% endif %}>לא פעיל</option>
-              <option value="בוטל" {% if c.status == 'בוטל' %}selected{% endif %}>בוטל</option>
-            </select>
-            {% if c.status_override %}<div class="small text-warning mt-1"><i class="bi bi-hand-index me-1"></i>נקבע ידנית</div>{% endif %}
-          </div>
-        </div>
-
-        <hr class="my-3">
-        <label class="form-label fw-semibold mb-2">ניסיונות התקשרות</label>
-        <div class="row g-3">
           {% for i in [1, 2, 3] %}
-          <div class="col-md-4">
-            <input type="date" id="det-call-date-{{ i }}" class="form-control mb-2" value="{{ c['call_date_' ~ i] or '' }}">
-            <select id="det-call-status-{{ i }}" class="form-select">
-              <option value="">— סטטוס —</option>
-              {% for opt in ['אין מענה 1', 'אין מענה 2', 'אין מענה 3'] %}
-              <option value="{{ opt }}" {% if c['call_status_' ~ i] == opt %}selected{% endif %}>{{ opt }}</option>
-              {% endfor %}
-            </select>
-            <div class="small text-muted mt-1 text-center">
-              {% if c['call_by_' ~ i] %}<i class="bi bi-person me-1"></i>{{ c['call_by_' ~ i] }}{% else %}&nbsp;{% endif %}
+          {% set shown = (i == 1) or c['call_date_' ~ (i - 1)] or c['call_status_' ~ (i - 1)] %}
+          <div class="col-md-4 call-attempt {% if not shown %}d-none{% endif %}" id="attempt-{{ i }}">
+            <div class="border rounded p-2 h-100">
+              <div class="small fw-semibold text-secondary mb-2">ניסיון {{ i }}</div>
+              <label class="form-label small mb-1" for="det-call-date-{{ i }}">תאריך</label>
+              <input type="date" id="det-call-date-{{ i }}" class="form-control form-control-sm mb-2" value="{{ c['call_date_' ~ i] or '' }}">
+              <label class="form-label small mb-1" for="det-call-status-{{ i }}">סטטוס מענה</label>
+              <select id="det-call-status-{{ i }}" class="form-select form-select-sm">
+                <option value="">— בחר —</option>
+                {% for opt in ['אין מענה 1', 'אין מענה 2', 'אין מענה 3'] %}
+                <option value="{{ opt }}" {% if c['call_status_' ~ i] == opt %}selected{% endif %}>{{ opt }}</option>
+                {% endfor %}
+              </select>
+              <div class="small text-muted mt-1">
+                {% if c['call_by_' ~ i] %}<i class="bi bi-person me-1"></i>{{ c['call_by_' ~ i] }}{% else %}&nbsp;{% endif %}
+              </div>
             </div>
           </div>
           {% endfor %}
@@ -116,11 +130,27 @@
       </div>
     </div>
 
-    <!-- הערות -->
+    <!-- 3. העברה לאדמין -->
     <div class="card border-0 shadow-sm mb-3">
-      <div class="card-header bg-light fw-bold">הערות</div>
       <div class="card-body">
-        <textarea id="det-agent-notes" class="form-control" rows="3" placeholder="הוסף הערה...">{{ c.agent_notes or '' }}</textarea>
+        <button type="button" id="esc-toggle" class="btn btn-outline-warning btn-sm" onclick="toggleEscalate()">
+          <i class="bi bi-person-raised-hand me-1"></i>העברה לאדמין
+        </button>
+        <div id="esc-box" class="d-none mt-3">
+          <label class="form-label small fw-semibold">סיבת ההעברה</label>
+          <textarea id="esc-note" class="form-control mb-2" rows="2" placeholder="פרט את הסיבה להעברה..."></textarea>
+          <div class="d-flex flex-wrap align-items-center gap-2">
+            <select id="esc-target" class="form-select form-select-sm" style="width:auto;max-width:200px">
+              <option value="">— כל המנהלים —</option>
+              {% for m in managers %}
+              <option value="{{ m.id }}">{{ m.display_name }}{% if m.role == 'superadmin' %} (מנהל על){% endif %}</option>
+              {% endfor %}
+            </select>
+            <button type="button" class="btn btn-warning btn-sm" onclick="sendEscalate()">שלח לאדמין</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="toggleEscalate()">ביטול</button>
+            <span id="esc-msg" class="small ms-1"></span>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -218,8 +248,9 @@ function toggleVip() {
 function setWhatsappSource(src) { post({whatsapp_source: src}, () => location.reload()); }
 
 document.getElementById('save-btn').addEventListener('click', () => {
+  const statusEl = document.getElementById('det-status');  // managers only
   post({
-    status: document.getElementById('det-status').value,
+    status: statusEl ? statusEl.value : undefined,
     agent_notes: document.getElementById('det-agent-notes').value,
     call_date_1: document.getElementById('det-call-date-1').value,
     call_status_1: document.getElementById('det-call-status-1').value,
@@ -241,5 +272,45 @@ document.getElementById('save-btn').addEventListener('click', () => {
     if (wrap && sel.value.indexOf('אין מענה') === 0) wrap.classList.remove('d-none');
   });
 });
+
+// Reveal the next call attempt only once the current one has been filled in,
+// so the screen stays uncluttered.
+[1, 2].forEach(function (i) {
+  ['det-call-date-' + i, 'det-call-status-' + i].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('change', function () {
+      const d = document.getElementById('det-call-date-' + i);
+      const s = document.getElementById('det-call-status-' + i);
+      if ((d && d.value) || (s && s.value)) {
+        const next = document.getElementById('attempt-' + (i + 1));
+        if (next) next.classList.remove('d-none');
+      }
+    });
+  });
+});
+
+// ── העברה לאדמין ──
+function toggleEscalate() {
+  document.getElementById('esc-box').classList.toggle('d-none');
+}
+function sendEscalate() {
+  const note = document.getElementById('esc-note').value.trim();
+  const msg = document.getElementById('esc-msg');
+  if (!note) { msg.textContent = 'נא לפרט סיבה'; msg.className = 'small ms-1 text-danger'; return; }
+  fetch('/insured/' + IID + '/clarify', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({note: note, assigned_to: document.getElementById('esc-target').value})
+  }).then(r => r.json()).then(res => {
+    if (res.ok) {
+      msg.textContent = 'הועבר לאדמין ✓';
+      msg.className = 'small ms-1 text-success';
+      setTimeout(() => location.reload(), 900);
+    } else {
+      msg.textContent = res.error || 'שגיאה בהעברה';
+      msg.className = 'small ms-1 text-danger';
+    }
+  });
+}
 </script>
 {% endblock %}

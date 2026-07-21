@@ -42,6 +42,11 @@
               <i class="bi bi-arrow-left-right me-1"></i>מיועד ל{{ item.assigned_name }}
             </span>
             {% endif %}
+            {% if item.insured_id %}
+            <a href="/insured/{{ item.insured_id }}" class="badge bg-primary text-decoration-none">
+              <i class="bi bi-folder2-open me-1"></i>תיק הלקוח
+            </a>
+            {% endif %}
           </div>
           <div class="fw-bold fs-6">{{ item.name or '(ללא שם)' }}</div>
           {% if item.id_number %}<div class="small text-muted">ת.ז: {{ item.id_number }}</div>{% endif %}

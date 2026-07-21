@@ -1395,10 +1395,49 @@ def insured_detail(iid):
     forms = conn.execute(
         "SELECT * FROM unmatched_submissions WHERE insured_id=? ORDER BY received_at DESC", (iid,)
     ).fetchall()
+    managers = conn.execute(
+        "SELECT id, display_name, role FROM users WHERE role IN ('admin','superadmin') ORDER BY role DESC, display_name"
+    ).fetchall()
     conn.close()
     wa_link = build_followup_wa_link_generic(ins['phone'], ins['brand'])
     return render_template('insured_detail.html', c=ins, docs=docs, wa_link=wa_link,
-                           forms=forms, queue_labels=FORM_QUEUE_LABELS)
+                           forms=forms, queue_labels=FORM_QUEUE_LABELS, managers=managers)
+
+
+@app.route('/insured/<int:iid>/clarify', methods=['POST'])
+@login_required
+@admin_required
+def insured_clarify(iid):
+    """Escalate a customer file to the admin queue, optionally routed to a manager."""
+    data = request.get_json(silent=True) or {}
+    note = (data.get('note') or '').strip()
+    if not note:
+        return jsonify({'ok': False, 'error': 'נא לפרט את הסיבה להעברה'}), 400
+    try:
+        assigned_to = int(data.get('assigned_to')) if data.get('assigned_to') else None
+    except (ValueError, TypeError):
+        assigned_to = None
+    conn = get_db()
+    ins = conn.execute("SELECT * FROM insureds WHERE id=?", (iid,)).fetchone()
+    if not ins:
+        conn.close()
+        return jsonify({'ok': False, 'error': 'תיק לא נמצא'}), 404
+    if not can_access_brand(ins['brand']):
+        conn.close()
+        return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
+    conn.execute(
+        """INSERT OR REPLACE INTO unmatched_submissions
+           (received_at, subject, name, id_number, phone, email, brand, comments,
+            status, handled_by, assigned_to, insured_id, message_id)
+           VALUES (?,?,?,?,?,?,?,?,'pending',?,?,?,?)""",
+        (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), 'דורש בירור — תיק לקוח',
+         ins['name'], ins['id_number'], ins['phone'], ins['email'], ins['brand'], note,
+         session.get('display_name') or session.get('username', ''), assigned_to, iid,
+         f'queue-iid-{iid}')
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
 
 @app.route('/insured/<int:iid>/update', methods=['POST'])
 @login_required
