@@ -265,7 +265,7 @@
           <select id="clarify-target" class="form-select form-select-sm" style="width:auto;max-width:180px">
             <option value="">— כל המנהלים —</option>
             {% for m in managers %}
-            <option value="{{ m.id }}">{{ m.display_name }}{% if m.role == 'superadmin' %} (מנהל על){% endif %}</option>
+            <option value="{{ m.id }}">{{ m.display_name }}</option>
             {% endfor %}
           </select>
           <button id="clarify-btn" class="btn btn-outline-warning btn-sm">

@@ -159,7 +159,7 @@
                   <select name="manager_id" class="form-select form-select-sm" style="width:auto" onchange="this.form.submit()">
                     <option value="">— ללא —</option>
                     {% for m in managers %}{% if m.id != u['id'] %}
-                    <option value="{{ m.id }}" {% if u['manager_id'] == m.id %}selected{% endif %}>{{ m.display_name }}{% if m.role == 'superadmin' %} (מנהל על){% endif %}</option>
+                    <option value="{{ m.id }}" {% if u['manager_id'] == m.id %}selected{% endif %}>{{ m.display_name }}</option>
                     {% endif %}{% endfor %}
                   </select>
                 </form>

@@ -143,7 +143,7 @@
             <select id="esc-target" class="form-select form-select-sm" style="width:auto;max-width:200px">
               <option value="">— כל המנהלים —</option>
               {% for m in managers %}
-              <option value="{{ m.id }}">{{ m.display_name }}{% if m.role == 'superadmin' %} (מנהל על){% endif %}</option>
+              <option value="{{ m.id }}">{{ m.display_name }}</option>
               {% endfor %}
             </select>
             <button type="button" class="btn btn-warning btn-sm" onclick="sendEscalate()">שלח לאדמין</button>
