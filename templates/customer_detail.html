@@ -48,8 +48,33 @@
       <div class="card-header bg-light fw-bold">פרטים</div>
       <div class="card-body">
         <table class="table table-sm table-borderless mb-0">
+          <tr><th>שם</th>
+            <td class="inline-edit" data-field="name">
+              <span class="ie-view fw-semibold">{{ c.name or '—' }}
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="ieEdit(this)" title="עריכת שם"><i class="bi bi-pencil"></i></button>
+              </span>
+              <span class="ie-edit d-none">
+                <input type="text" class="ie-input form-control form-control-sm d-inline-block align-middle" style="width:170px" value="{{ c.name or '' }}">
+                <button type="button" class="btn btn-success btn-sm py-0" onclick="ieSave(this)"><i class="bi bi-check-lg"></i></button>
+                <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="ieCancel(this)"><i class="bi bi-x-lg"></i></button>
+                <span class="ie-msg small text-danger ms-1"></span>
+              </span>
+            </td>
+          </tr>
           <tr><th>פוליסה</th><td>{{ c.policy_number or '—' }}</td></tr>
-          <tr><th>ת.ז</th><td>{{ c.id_number or '—' }}</td></tr>
+          <tr><th>ת.ז</th>
+            <td class="inline-edit" data-field="id_number">
+              <span class="ie-view">{{ c.id_number or '—' }}
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="ieEdit(this)" title="עריכת ת.ז"><i class="bi bi-pencil"></i></button>
+              </span>
+              <span class="ie-edit d-none">
+                <input type="text" inputmode="numeric" class="ie-input form-control form-control-sm d-inline-block align-middle" style="width:140px" value="{{ c.id_number or '' }}">
+                <button type="button" class="btn btn-success btn-sm py-0" onclick="ieSave(this)"><i class="bi bi-check-lg"></i></button>
+                <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="ieCancel(this)"><i class="bi bi-x-lg"></i></button>
+                <span class="ie-msg small text-danger ms-1"></span>
+              </span>
+            </td>
+          </tr>
           <tr><th>טלפון</th>
             <td>
               <span id="phone-view">
@@ -102,6 +127,25 @@
           {% endif %}
           {% endfor %}
         </table>
+        {% if changes %}
+        <button class="btn btn-link btn-sm p-0 mt-2 text-secondary" type="button"
+                data-bs-toggle="collapse" data-bs-target="#change-log">
+          <i class="bi bi-clock-history me-1"></i>היסטוריית שינויים ({{ changes|length }})
+        </button>
+        <div class="collapse mt-2" id="change-log">
+          <div class="border rounded p-2 bg-light" style="max-height:220px; overflow-y:auto;">
+            {% for ch in changes %}
+            <div class="small border-bottom py-1">
+              <span class="fw-semibold">{{ audit_labels.get(ch.field, ch.field) }}:</span>
+              <span class="text-danger text-decoration-line-through">{{ ch.old_value or '(ריק)' }}</span>
+              <i class="bi bi-arrow-left mx-1"></i>
+              <span class="text-success">{{ ch.new_value or '(ריק)' }}</span>
+              <div class="text-muted" style="font-size:0.75rem">{{ ch.changed_by or '—' }} · {{ ch.changed_at }}</div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
       </div>
     </div>
   </div>

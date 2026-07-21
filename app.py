@@ -81,6 +81,11 @@ BRANDS = ['גאיה', 'ווינר', 'אופיר']
 FORM_QUEUE_STATUSES = ('ממתין', 'בטיפול', 'טופל')
 FORM_QUEUE_LABELS = {'ממתין': 'ממתין לטיפול', 'בטיפול': 'בטיפול', 'טופל': 'טופל'}
 
+# Identity/contact fields whose every edit is written to the field_changes audit log.
+AUDITED_FIELDS = ('name', 'id_number', 'phone', 'email', 'address', 'policy_number', 'brand')
+AUDIT_LABELS = {'name': 'שם', 'id_number': 'ת.ז', 'phone': 'טלפון', 'email': 'אימייל',
+                'address': 'כתובת', 'policy_number': 'פוליסה', 'brand': 'סוכנות'}
+
 # Status dropdowns differ per agency. Gaia/Winner keep the renewals workflow; Ofir
 # (Meir's elementary book) has its own pipeline. Each entry is (stored value, label);
 # '' is the default/unstarted state.
@@ -399,6 +404,17 @@ def init_db():
         CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value TEXT);
         -- Recycle bin: a deleted customer is copied here (full row as JSON) before
         -- removal, so an accidental delete can be restored.
+        -- Audit trail: every edit to an identity/contact field, old → new.
+        CREATE TABLE IF NOT EXISTS field_changes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            field TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            changed_by TEXT,
+            changed_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_field_changes_customer ON field_changes(customer_id);
         CREATE TABLE IF NOT EXISTS deleted_customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER,
@@ -882,6 +898,9 @@ def customer_detail(cid):
     managers = conn.execute(
         "SELECT id, display_name, role FROM users WHERE role IN ('admin','superadmin') ORDER BY role DESC, display_name"
     ).fetchall()
+    changes = conn.execute(
+        "SELECT * FROM field_changes WHERE customer_id=? ORDER BY id DESC LIMIT 50", (cid,)
+    ).fetchall()
     conn.close()
     if not customer:
         flash('לקוח לא נמצא', 'danger')
@@ -892,7 +911,8 @@ def customer_detail(cid):
     wa_link = build_followup_wa_link(customer)
     return render_template('customer_detail.html', c=customer, month=month,
                            statuses=STATUSES, status_options=status_options_for(customer['brand']),
-                           managers=managers, wa_link=wa_link)
+                           managers=managers, changes=changes, audit_labels=AUDIT_LABELS,
+                           wa_link=wa_link)
 
 
 def build_followup_wa_link(customer):
@@ -924,7 +944,7 @@ def update_customer(cid):
             return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
     allowed = ['status', 'agent_notes', 'contact_date', 'interested_in_products',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
-                'whatsapp_source', 'brand', 'phone', 'email', 'address',
+                'whatsapp_source', 'brand', 'phone', 'email', 'address', 'name', 'id_number',
                 'call_date_1', 'call_status_1', 'call_by_1',
                 'call_date_2', 'call_status_2', 'call_by_2',
                 'call_date_3', 'call_status_3', 'call_by_3']
@@ -951,6 +971,16 @@ def update_customer(cid):
             if key in data and data[key] and (not prev or data[key] != prev[f'call_date_{n}']):
                 data[f'call_by_{n}'] = agent
 
+    # Snapshot audited identity/contact fields before the write, so every change can be
+    # logged old → new. Keys are whitelisted against AUDITED_FIELDS, never raw input.
+    audit_keys = [k for k in data if k in AUDITED_FIELDS and k in allowed]
+    before = {}
+    if audit_keys:
+        snap = conn.execute(
+            f"SELECT {','.join(audit_keys)} FROM customers WHERE id=?", (cid,)).fetchone()
+        if snap:
+            before = {k: snap[k] for k in audit_keys}
+
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
     if not sets:
@@ -962,6 +992,16 @@ def update_customer(cid):
         vals.append(agent)
     vals.append(cid)
     conn.execute(f"UPDATE customers SET {sets} WHERE id=?", vals)
+    # Write the audit trail for any audited field that actually changed.
+    if before:
+        now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        for k in audit_keys:
+            old_v = '' if before.get(k) is None else str(before[k])
+            new_v = '' if data.get(k) is None else str(data[k])
+            if old_v != new_v:
+                conn.execute(
+                    "INSERT INTO field_changes (customer_id, field, old_value, new_value, changed_by, changed_at)"
+                    " VALUES (?,?,?,?,?,?)", (cid, k, old_v, new_v, agent, now_s))
     conn.commit()
     conn.close()
     return jsonify({'ok': True})
