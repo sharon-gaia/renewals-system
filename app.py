@@ -1268,10 +1268,13 @@ def other_forms_open_file(sid):
         iid = found['id']
     else:
         now = datetime.datetime.now().isoformat()
+        # Prefer the form's name; otherwise reuse a name we already hold for this ID
+        # (e.g. from an earlier form) before falling back to the placeholder.
+        new_name = sub['name'] or name_from_records(conn, idn) or NO_NAME
         conn.execute(
             """INSERT INTO insureds (id_number, name, brand, phone, email, status, created_at, updated_at)
                VALUES (?,?,?,?,?,?,?,?)""",
-            (idn, sub['name'] or '(ללא שם)', sub['brand'], sub['phone'], sub['email'],
+            (idn, new_name, sub['brand'], sub['phone'], sub['email'],
              'לא פעיל', now, now))
         iid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         flash('נפתח תיק לקוח חדש מפרטי הטופס', 'success')
@@ -2104,7 +2107,7 @@ def parse_renewal_email(msg_text, subject=''):
         'שם מלא', 'מספר ת.ז', 'birth_date', 'אימייל', 'טלפון',
         'coverage_option', 'מספר תשלומים', 'מספר פוליסה',
         'אמצעי גביה', 'מספר כרטיס', 'תוקף כרטיס',
-        'ת.ז בעל הכרטיס', 'שם בעל הכרטיס', 'הכרטיס על שם המבוטח',
+        'ת.ז בעל הכרטיס', 'שם בעל הכרטיס', 'card_holder_name', 'הכרטיס על שם המבוטח',
         'מקצועות נוספים', 'הערות',
     ]
 
@@ -2131,7 +2134,9 @@ def parse_renewal_email(msg_text, subject=''):
         brand = 'ווינר'
 
     return {
-        'name': result.get('שם מלא', ''),
+        # Payment-update forms carry no "שם מלא" — fall back to the card holder's name.
+        'name': (result.get('שם מלא', '') or result.get('שם בעל הכרטיס', '')
+                 or result.get('card_holder_name', '')),
         'id_number': result.get('מספר ת.ז', ''),
         'phone': result.get('טלפון', ''),
         'email': result.get('אימייל', ''),
@@ -2166,6 +2171,28 @@ def get_email_body(msg):
         return msg.get_payload(decode=True).decode(charset, errors='replace')
     return ''
 
+NO_NAME = '(ללא שם)'
+
+
+def name_from_records(conn, idn):
+    """The known client name for an ID. Payment-update forms often omit the name, so we
+    fill it from anything we already hold — including an earlier form from the same ID —
+    rather than filing it as '(ללא שם)'. The placeholder itself is never treated as a name."""
+    idn = (idn or '').lstrip('0')
+    if not idn:
+        return ''
+    for sql in ("SELECT name FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                "AND COALESCE(name,'') NOT IN ('', ?) LIMIT 1",
+                "SELECT name FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                "AND COALESCE(name,'') NOT IN ('', ?) ORDER BY id DESC LIMIT 1",
+                "SELECT name FROM unmatched_submissions WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                "AND COALESCE(name,'') NOT IN ('', ?) ORDER BY id DESC LIMIT 1"):
+        r = conn.execute(sql, (idn, NO_NAME)).fetchone()
+        if r:
+            return r['name']
+    return ''
+
+
 def process_renewal_data(data, message_id='', subject='', received_at=''):
     """
     Match email form data to a customer in the active month.
@@ -2194,6 +2221,13 @@ def process_renewal_data(data, message_id='', subject='', received_at=''):
         conn.close()
         print('[email-sync] אין חודש פעיל')
         return None
+
+    # No name on the form (common on payment-update forms) but we know this ID → use
+    # the name we already have, so the item is identifiable instead of '(ללא שם)'.
+    if not name and id_number:
+        name = name_from_records(conn, id_number)
+        if name:
+            print(f'[email-sync] הושלם שם לפי ת.ז {id_number}: {name}')
 
     if not id_number and not phone:
         # No identifying info — send to admin
