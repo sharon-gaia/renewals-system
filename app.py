@@ -988,10 +988,14 @@ def update_customer(cid):
     if not sets:
         conn.close()
         return jsonify({'ok': False})
-    # Track who changed the status
+    # Track who changed the status — only when it actually changes. Saving a note (the
+    # form posts the status too) must not reassign the customer to whoever pressed save,
+    # which would both inflate their count and steal credit from the real handler.
     if 'status' in data and agent:
-        sets += ', handled_by=?'
-        vals.append(agent)
+        cur = conn.execute("SELECT status FROM customers WHERE id=?", (cid,)).fetchone()
+        if not cur or (cur['status'] or '') != (data.get('status') or ''):
+            sets += ', handled_by=?'
+            vals.append(agent)
     vals.append(cid)
     conn.execute(f"UPDATE customers SET {sets} WHERE id=?", vals)
     # Write the audit trail for any audited field that actually changed.
