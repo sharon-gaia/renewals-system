@@ -1292,11 +1292,19 @@ def other_forms_open_file(sid):
         # Prefer the form's name; otherwise reuse a name we already hold for this ID
         # (e.g. from an earlier form) before falling back to the placeholder.
         new_name = sub['name'] or name_from_records(conn, idn) or NO_NAME
+        # Carry the address over from the submitted form when it has one.
+        af = {}
+        try:
+            af = json.loads(sub['raw_fields']) if sub['raw_fields'] else {}
+        except (ValueError, TypeError):
+            af = {}
+        addr = ', '.join(x for x in [str(af.get('כתובת', '')).strip(),
+                                     str(af.get('עיר', '')).strip()] if x)
         conn.execute(
-            """INSERT INTO insureds (id_number, name, brand, phone, email, status, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (idn, new_name, sub['brand'], sub['phone'], sub['email'],
-             'לא פעיל', now, now))
+            """INSERT INTO insureds (id_number, name, brand, phone, email, address, status, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (idn, new_name, sub['brand'], sub['phone'], sub['email'] or af.get('אימייל', ''),
+             addr, 'לא פעיל', now, now))
         iid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         flash('נפתח תיק לקוח חדש מפרטי הטופס', 'success')
     conn.execute("UPDATE unmatched_submissions SET insured_id=? WHERE id=?", (iid, sid))
