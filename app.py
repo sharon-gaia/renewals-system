@@ -1646,20 +1646,25 @@ def set_user_manager(uid):
 @login_required
 @admin_required
 def performance():
-    """Agent performance for the active month, attributed by who logged the calls
-    (call_by). A manager sees only their own agents; a super-admin sees everyone."""
+    """Activity for the active month, attributed by who logged the calls (call_by) and
+    who raised escalations. A super-admin sees everyone — agents, managers and other
+    super-admins; a manager sees only their own agents (and never themselves, so nobody
+    is shown their own activity being measured except a super-admin)."""
     conn = get_db()
     month = active_month()
     mid = month['id'] if month else -1
-    if session.get('role') == 'superadmin':
-        agents = conn.execute("SELECT id, display_name FROM users WHERE role='agent' ORDER BY display_name").fetchall()
+    is_super = session.get('role') == 'superadmin'
+    if is_super:
+        people = conn.execute(
+            "SELECT id, display_name, role FROM users ORDER BY role DESC, display_name").fetchall()
     else:
-        agents = conn.execute(
-            "SELECT id, display_name FROM users WHERE role='agent' AND manager_id=? ORDER BY display_name",
+        people = conn.execute(
+            "SELECT id, display_name, role FROM users WHERE role='agent' AND manager_id=? ORDER BY display_name",
             (session.get('user_id'),)
         ).fetchall()
+    role_labels = {'superadmin': 'מנהל על', 'admin': 'מנהל', 'agent': 'נציג'}
     rows = []
-    for a in agents:
+    for a in people:
         nm = a['display_name']
         if not nm:
             continue
@@ -1671,12 +1676,20 @@ def performance():
             "FROM customers WHERE month_id=?",
             [nm] * 9 + [mid]
         ).fetchone()
+        # Escalations raised by this person (customer card or customer file), which are
+        # the queue-* items — not the website-form queue they merely handled.
+        escalations = conn.execute(
+            "SELECT COUNT(*) FROM unmatched_submissions WHERE handled_by=? "
+            "AND (message_id LIKE 'queue-cid-%' OR message_id LIKE 'queue-iid-%')", (nm,)
+        ).fetchone()[0]
         calls, touched, renewals = q['calls'] or 0, q['touched'] or 0, q['renewals'] or 0
-        rows.append({'name': nm, 'calls': calls, 'touched': touched, 'renewals': renewals,
+        rows.append({'name': nm, 'role': role_labels.get(a['role'], a['role']),
+                     'calls': calls, 'touched': touched, 'renewals': renewals,
+                     'escalations': escalations,
                      'rate': round(renewals / touched * 100, 1) if touched else 0})
     rows.sort(key=lambda r: (r['renewals'], r['calls']), reverse=True)
     conn.close()
-    return render_template('performance.html', rows=rows, month=month)
+    return render_template('performance.html', rows=rows, month=month, show_role=is_super)
 
 @app.route('/admin/import', methods=['POST'])
 @login_required

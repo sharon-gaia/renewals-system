@@ -10,7 +10,9 @@
 </div>
 
 <div class="alert alert-info small">
-  הביצועים מיוחסים לפי מי שתיעד את השיחות (שדה "בוצע ע\"י"). "לקוחות שטופלו" = לקוחות שהנציג ביצע בהם לפחות שיחה אחת בחודש הפעיל.
+  הביצועים מיוחסים לפי מי שתיעד את השיחות (שדה "בוצע ע\"י"). "לקוחות שטופלו" = לקוחות שבוצעה בהם לפחות שיחה אחת בחודש הפעיל.
+  "העברות לאדמין" = פניות שנפתחו מכרטיס לקוח או מתיק לקוח.
+  {% if show_role %}כמנהל-על מוצגת כאן פעילות כל המשתמשים — נציגים, מנהלים ומנהלי-על.{% endif %}
 </div>
 
 <div class="card border-0 shadow-sm">
@@ -18,9 +20,11 @@
     <table class="table table-sm align-middle mb-0 text-center">
       <thead class="table-light">
         <tr>
-          <th class="text-end ps-3">נציג</th>
+          <th class="text-end ps-3">{{ 'משתמש' if show_role else 'נציג' }}</th>
+          {% if show_role %}<th>תפקיד</th>{% endif %}
           <th>שיחות</th>
           <th>לקוחות שטופלו</th>
+          <th>העברות לאדמין</th>
           <th>חידושים</th>
           <th>אחוז חידוש</th>
         </tr>
@@ -29,8 +33,12 @@
         {% for r in rows %}
         <tr>
           <td class="text-end ps-3 fw-semibold">{{ r.name }}</td>
+          {% if show_role %}
+          <td><span class="badge {{ 'bg-danger' if r.role == 'מנהל על' else ('bg-warning text-dark' if r.role == 'מנהל' else 'bg-secondary') }}">{{ r.role }}</span></td>
+          {% endif %}
           <td>{{ r.calls }}</td>
           <td>{{ r.touched }}</td>
+          <td>{{ r.escalations }}</td>
           <td class="text-success fw-bold">{{ r.renewals }}</td>
           <td>
             <div class="d-flex align-items-center gap-2" style="min-width:120px">
@@ -42,7 +50,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="5" class="text-center text-muted py-4">
+        <tr><td colspan="{{ 7 if show_role else 6 }}" class="text-center text-muted py-4">
           אין נציגים להצגה. {% if session.role == 'superadmin' %}הגדר נציגים ושייך אותם למנהל במסך הניהול.{% else %}לא שויכו אליך נציגים עדיין.{% endif %}
         </td></tr>
         {% endfor %}
