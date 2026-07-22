@@ -579,6 +579,10 @@ def init_db():
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_at TEXT")
     if 'insured_id' not in existing_us:  # the customer file this form was attached to
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN insured_id INTEGER")
+    # Audit rows can belong to a customer (customer_id) or a customer file (insured_id).
+    existing_fc = [r[1] for r in conn.execute("PRAGMA table_info(field_changes)").fetchall()]
+    if existing_fc and 'insured_id' not in existing_fc:
+        conn.execute("ALTER TABLE field_changes ADD COLUMN insured_id INTEGER")
     # Which manager an agent reports to (for the agent-performance view).
     existing_user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if 'manager_id' not in existing_user_cols:
@@ -1402,8 +1406,13 @@ def insured_detail(iid):
     ).fetchall()
     # Website forms attached to this file — shown with their work-queue status so the
     # whole handling happens here, without bouncing back to the forms list.
+    # Every form from this client — the one this file was opened from, plus any other
+    # submission carrying the same ת.ז, so richer earlier forms aren't hidden.
     forms = conn.execute(
-        "SELECT * FROM unmatched_submissions WHERE insured_id=? ORDER BY received_at DESC", (iid,)
+        "SELECT * FROM unmatched_submissions WHERE insured_id=? "
+        "   OR (COALESCE(?,'')<>'' AND ltrim(COALESCE(id_number,''),'0')=?) "
+        "ORDER BY received_at DESC",
+        (iid, ins['id_number'], (ins['id_number'] or '').lstrip('0'))
     ).fetchall()
     managers = conn.execute(
         "SELECT id, display_name, role FROM users WHERE role IN ('admin','superadmin') ORDER BY role DESC, display_name"
@@ -1455,11 +1464,21 @@ def insured_clarify(iid):
 def insured_update(iid):
     data = request.json or {}
     allowed = ['agent_notes', 'whatsapp_source', 'is_vip',
+               'name', 'id_number', 'phone', 'email', 'address', 'policy_number',
                'call_date_1', 'call_status_1', 'call_by_1',
                'call_date_2', 'call_status_2', 'call_by_2',
                'call_date_3', 'call_status_3', 'call_by_3']
     agent = session.get('display_name') or session.get('username', '')
     conn = get_db()
+
+    # Snapshot audited identity/contact fields so every edit is logged old → new.
+    audit_keys = [k for k in data if k in AUDITED_FIELDS and k in allowed]
+    before = {}
+    if audit_keys:
+        snap = conn.execute(
+            f"SELECT {','.join(audit_keys)} FROM insureds WHERE id=?", (iid,)).fetchone()
+        if snap:
+            before = {k: snap[k] for k in audit_keys}
 
     # Manual status change is an admin override that sticks (req 8)
     if 'status' in data and data['status']:
@@ -1481,6 +1500,17 @@ def insured_update(iid):
         vals = [data[k] for k in data if k in allowed]
         vals.append(iid)
         conn.execute(f"UPDATE insureds SET {sets} WHERE id=?", vals)
+    # Audit trail for identity/contact edits made on the customer file.
+    if before:
+        now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        for k in audit_keys:
+            old_v = '' if before.get(k) is None else str(before[k])
+            new_v = '' if data.get(k) is None else str(data[k])
+            if old_v != new_v:
+                conn.execute(
+                    "INSERT INTO field_changes (customer_id, insured_id, field, old_value,"
+                    " new_value, changed_by, changed_at) VALUES (0,?,?,?,?,?,?)",
+                    (iid, k, old_v, new_v, agent, now_s))
     conn.commit()
     conn.close()
     return jsonify({'ok': True})

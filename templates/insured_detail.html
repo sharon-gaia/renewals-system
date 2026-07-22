@@ -57,19 +57,45 @@
               {% endif %}
             </td>
           </tr>
-          <tr><th>ת.ז</th><td>{{ c.id_number or '—' }}</td></tr>
-          <tr><th>פוליסה</th><td>{{ c.policy_number or '—' }}</td></tr>
+          {% macro ie(field, value, label, width='170px') %}
+          <td class="inline-edit" data-field="{{ field }}">
+            <span class="ie-view">{{ value or '—' }}
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline"
+                      onclick="ieEdit(this)" title="עריכת {{ label }}"><i class="bi bi-pencil"></i></button>
+            </span>
+            <span class="ie-edit d-none">
+              <input type="text" class="ie-input form-control form-control-sm d-inline-block align-middle"
+                     style="width:{{ width }}" value="{{ value or '' }}">
+              <button type="button" class="btn btn-success btn-sm py-0" onclick="ieSave(this)"><i class="bi bi-check-lg"></i></button>
+              <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="ieCancel(this)"><i class="bi bi-x-lg"></i></button>
+              <span class="ie-msg small text-danger ms-1"></span>
+            </span>
+          </td>
+          {% endmacro %}
+          <tr><th>שם</th>{{ ie('name', c.name, 'שם') }}</tr>
+          <tr><th>ת.ז</th>{{ ie('id_number', c.id_number, 'ת.ז', '140px') }}</tr>
+          <tr><th>פוליסה</th>{{ ie('policy_number', c.policy_number, 'פוליסה', '140px') }}</tr>
           <tr><th>טלפון</th>
-            <td>
-              {% if c.phone %}
-              <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank">
-                <i class="bi bi-whatsapp {{ 'text-warning' if c.whatsapp_source == 'ווינר' else 'text-success' }} me-1"></i>{{ c.phone }}
-              </a>
-              {% else %}—{% endif %}
+            <td class="inline-edit" data-field="phone">
+              <span class="ie-view">
+                {% if c.phone %}
+                <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank">
+                  <i class="bi bi-whatsapp {{ 'text-warning' if c.whatsapp_source == 'ווינר' else 'text-success' }} me-1"></i>{{ c.phone }}
+                </a>
+                {% else %}—{% endif %}
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline"
+                        onclick="ieEdit(this)" title="עריכת טלפון"><i class="bi bi-pencil"></i></button>
+              </span>
+              <span class="ie-edit d-none">
+                <input type="tel" class="ie-input form-control form-control-sm d-inline-block align-middle" style="width:140px" value="{{ c.phone or '' }}">
+                <button type="button" class="btn btn-success btn-sm py-0" onclick="ieSave(this)"><i class="bi bi-check-lg"></i></button>
+                <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="ieCancel(this)"><i class="bi bi-x-lg"></i></button>
+                <span class="ie-msg small text-danger ms-1"></span>
+              </span>
             </td>
           </tr>
-          <tr><th>אימייל</th><td>{{ c.email or '—' }}</td></tr>
-          <tr><th>כתובת</th><td>{{ c.address or '—' }}</td></tr>
+          <tr><th>אימייל</th>{{ ie('email', c.email, 'אימייל', '190px') }}</tr>
+          <tr><th>כתובת</th>{{ ie('address', c.address, 'כתובת', '200px') }}</tr>
           <tr><th>סוכנות</th>
             <td>{% if c.brand %}<span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand }}</span>{% else %}{{ c.agency or '—' }}{% endif %}</td>
           </tr>
@@ -246,6 +272,35 @@ function toggleVip() {
   post({is_vip: btn.classList.contains('btn-warning') ? 0 : 1}, () => location.reload());
 }
 function setWhatsappSource(src) { post({whatsapp_source: src}, () => location.reload()); }
+
+// ── Inline edit of the file's details (name, ת.ז, phone, email, address, policy) ──
+function ieEdit(btn) {
+  const td = btn.closest('.inline-edit');
+  td.querySelector('.ie-view').classList.add('d-none');
+  td.querySelector('.ie-edit').classList.remove('d-none');
+  td.querySelector('.ie-input').focus();
+}
+function ieCancel(btn) {
+  const td = btn.closest('.inline-edit');
+  td.querySelector('.ie-edit').classList.add('d-none');
+  td.querySelector('.ie-view').classList.remove('d-none');
+}
+function ieSave(btn) {
+  const td = btn.closest('.inline-edit');
+  const msg = td.querySelector('.ie-msg');
+  const body = {}; body[td.dataset.field] = td.querySelector('.ie-input').value.trim();
+  fetch('/insured/' + IID + '/update', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+  }).then(r => r.json()).then(res => {
+    if (res.ok !== false) { window.location.reload(); } else { msg.textContent = res.error || 'שגיאה בשמירה'; }
+  }).catch(() => { msg.textContent = 'שגיאה בשמירה'; });
+}
+document.querySelectorAll('.inline-edit .ie-input').forEach(function (inp) {
+  inp.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { e.preventDefault(); ieSave(inp); }
+    if (e.key === 'Escape') { ieCancel(inp); }
+  });
+});
 
 document.getElementById('save-btn').addEventListener('click', () => {
   const statusEl = document.getElementById('det-status');  // managers only
