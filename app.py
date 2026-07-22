@@ -558,7 +558,7 @@ def init_db():
     existing = [r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()]
     for col, typ in [('form_card_number','TEXT'), ('form_card_expiry','TEXT'),
                      ('form_id_card_holder','TEXT'), ('handled_by','TEXT'), ('email','TEXT'),
-                     ('address','TEXT')]:
+                     ('address','TEXT'), ('status_changed_at','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     # Extra elementary/car fields (mainly from the Ofir/Meir book). All optional — shown
@@ -991,11 +991,14 @@ def update_customer(cid):
     # Track who changed the status — only when it actually changes. Saving a note (the
     # form posts the status too) must not reassign the customer to whoever pressed save,
     # which would both inflate their count and steal credit from the real handler.
-    if 'status' in data and agent:
+    if 'status' in data:
         cur = conn.execute("SELECT status FROM customers WHERE id=?", (cid,)).fetchone()
         if not cur or (cur['status'] or '') != (data.get('status') or ''):
-            sets += ', handled_by=?'
-            vals.append(agent)
+            sets += ', status_changed_at=?'
+            vals.append(datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))
+            if agent:
+                sets += ', handled_by=?'
+                vals.append(agent)
     vals.append(cid)
     conn.execute(f"UPDATE customers SET {sets} WHERE id=?", vals)
     # Write the audit trail for any audited field that actually changed.
@@ -1511,7 +1514,8 @@ def mark_clarify(cid):
              c['form_payment_method'] or '', c['form_card_number'] or '',
              c['form_card_expiry'] or '', c['form_id_card_holder'] or '',
              c['form_coverage'] or '', comments, agent, assigned_to, f'queue-cid-{cid}'))
-        conn.execute("UPDATE customers SET status='דורש בירור', handled_by=? WHERE id=?", (agent, cid))
+        conn.execute("UPDATE customers SET status='דורש בירור', handled_by=?, status_changed_at=? WHERE id=?",
+                     (agent, now, cid))
         conn.commit()
     conn.close()
     return jsonify({'ok': True})
@@ -1534,11 +1538,12 @@ def admin_queue_action(sid):
                 conn.execute("""UPDATE customers SET status='טופס התקבל',
                     form_email=?, form_installments=?, form_payment_method=?,
                     form_received_at=?, form_coverage=?, form_comments=?,
-                    form_card_number=?, form_card_expiry=?, form_id_card_holder=?
+                    form_card_number=?, form_card_expiry=?, form_id_card_holder=?,
+                    status_changed_at=?
                     WHERE id=?""",
                     (sub['email'], sub['installments'], sub['payment_method'], now,
                      sub['coverage'], sub['comments'], sub['card_number'],
-                     sub['card_expiry'], sub['card_holder_id'], cid))
+                     sub['card_expiry'], sub['card_holder_id'], now, cid))
                 conn.execute("UPDATE unmatched_submissions SET status='linked', admin_note=? WHERE id=?",
                              (f'שויך ללקוח {cid}', sid))
     elif action == 'resolve':
@@ -1551,8 +1556,9 @@ def admin_queue_action(sid):
             if msg_id.startswith('queue-cid-'):
                 cid = msg_id.replace('queue-cid-', '')
                 agent = session.get('display_name') or session.get('username', '')
-                conn.execute("UPDATE customers SET status=?, handled_by=? WHERE id=?",
-                             (new_status, agent, cid))
+                conn.execute("UPDATE customers SET status=?, handled_by=?, status_changed_at=? WHERE id=?",
+                             (new_status, agent,
+                              datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), cid))
             conn.execute("UPDATE unmatched_submissions SET status='resolved', admin_note=? WHERE id=?",
                          (f'סטטוס עודכן: {new_status} | {note}', sid))
     conn.commit()
@@ -2053,9 +2059,9 @@ def api_renewal():
     if customer:
         conn.execute("""UPDATE customers SET status='טופס התקבל',
                         form_email=?, form_installments=?, form_payment_method=?,
-                        form_received_at=?, form_comments=?
+                        form_received_at=?, form_comments=?, status_changed_at=?
                         WHERE id=?""",
-                     (email, installments, payment_method, now, comments, customer['id']))
+                     (email, installments, payment_method, now, comments, now, customer['id']))
         conn.commit()
         conn.close()
         return jsonify({'ok': True, 'matched': True, 'customer': customer['name']})
@@ -2219,10 +2225,11 @@ def process_renewal_data(data, message_id='', subject='', received_at=''):
         conn.execute("""UPDATE customers SET status='טופס התקבל',
                         form_email=?, form_installments=?, form_payment_method=?,
                         form_received_at=?, form_coverage=?, form_comments=?,
-                        form_card_number=?, form_card_expiry=?, form_id_card_holder=?
+                        form_card_number=?, form_card_expiry=?, form_id_card_holder=?,
+                        status_changed_at=?
                         WHERE id=?""",
                      (email_val, installments, payment_method, now, coverage, comments,
-                      card_number, card_expiry, card_holder_id, customer['id']))
+                      card_number, card_expiry, card_holder_id, now, customer['id']))
         conn.commit()
         cid = customer['id']
         conn.close()
