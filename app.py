@@ -146,6 +146,21 @@ EXTRA_FIELD_DEFS = [
 EXTRA_FIELDS = [c for c, _ in EXTRA_FIELD_DEFS]
 
 
+@app.template_filter('form_fields')
+def _form_fields(raw):
+    """The stored submission JSON as (label, value) pairs for the two-column view.
+    Returns [] when there is nothing usable, so the template can fall back."""
+    if not raw:
+        return []
+    try:
+        d = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(d, dict):
+        return []
+    return [(k, v) for k, v in d.items() if str(v).strip() and str(v).strip() != '—']
+
+
 @app.context_processor
 def inject_extra_fields():
     """Make the optional-field defs and per-agency status sets available to every
@@ -579,6 +594,8 @@ def init_db():
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN handled_at TEXT")
     if 'insured_id' not in existing_us:  # the customer file this form was attached to
         conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN insured_id INTEGER")
+    if 'raw_fields' not in existing_us:  # full submitted form, as JSON, for display
+        conn.execute("ALTER TABLE unmatched_submissions ADD COLUMN raw_fields TEXT")
     # Audit rows can belong to a customer (customer_id) or a customer file (insured_id).
     existing_fc = [r[1] for r in conn.execute("PRAGMA table_info(field_changes)").fetchall()]
     if existing_fc and 'insured_id' not in existing_fc:
@@ -2132,17 +2149,30 @@ def parse_renewal_email(msg_text, subject=''):
     Format: fields and values are space-separated in sequence (no colons).
     e.g. 'שם מלא ארנה אדם מספר ת.ז 056062608 אימייל ...'
     """
-    # Known field tokens in priority order — longer/multi-word first
+    # Known field tokens. Order doesn't matter — the splitter sorts longest-first so
+    # that e.g. 'כתובת חונך' wins over 'כתובת' and 'ת.ז המצהיר' over 'ת.ז'.
     FIELDS = [
         'שם מלא', 'מספר ת.ז', 'birth_date', 'אימייל', 'טלפון',
         'coverage_option', 'מספר תשלומים', 'מספר פוליסה',
         'אמצעי גביה', 'מספר כרטיס', 'תוקף כרטיס',
         'ת.ז בעל הכרטיס', 'שם בעל הכרטיס', 'card_holder_name', 'הכרטיס על שם המבוטח',
         'מקצועות נוספים', 'הערות',
+        # Join / underwriting forms
+        'כתובת חונך', 'ת.ז חונך', 'שם החונך', 'כתובת', 'עיר',
+        'תאריך לידה', 'מגדר', 'מצב משפחתי', 'מספר ילדים', 'מקצוע',
+        'תאריך תחילת ביטוח', 'מקצועות', 'מוסד / ארגון',
+        'עוסק כחברה', 'שם החברה', 'חבר בארגון מקצועי', 'שם הארגון',
+        'חבר בקופת חולים', 'שם קופת חולים', 'שכיר', 'שם המעסיק',
+        'מבוטח ב-5 שנים האחרונות', 'חברת ביטוח קודמת', 'ביטוח בוטל בעבר',
+        'תביעות ב-5 שנים האחרונות', 'תנאים מיוחדים / החרגות',
+        'תביעות עתידיות ידועות', 'פירוט היסטוריה', 'מעורב בהונאה',
+        'פגיעה בפרטיות', 'הטרדה', 'נמנע מעיסוק במקצוע', 'פירוט האיסור',
+        'שם המצהיר', 'ת.ז המצהיר', 'תאריך הצהרה', 'הסכמה לשיווק',
     ]
 
-    # Build regex that splits on any known field name
-    escaped = [re.escape(f) for f in FIELDS]
+    # Build regex that splits on any known field name — longest first so a longer
+    # field name is never swallowed by a shorter one that prefixes it.
+    escaped = [re.escape(f) for f in sorted(FIELDS, key=len, reverse=True)]
     splitter = '(' + '|'.join(escaped) + ')'
     parts = re.split(splitter, msg_text)
 
@@ -2179,6 +2209,9 @@ def parse_renewal_email(msg_text, subject=''):
         'card_expiry': result.get('תוקף כרטיס', ''),
         'card_holder_id': result.get('ת.ז בעל הכרטיס', ''),
         'coverage_option': result.get('coverage_option', ''),
+        # Every field the form sent, kept verbatim so the UI can show the full
+        # submission as a readable table instead of losing it.
+        'all_fields': {k: v for k, v in result.items() if v},
     }
 
 def get_email_body(msg):
@@ -2241,6 +2274,7 @@ def process_renewal_data(data, message_id='', subject='', received_at=''):
     card_number    = str(data.get('card_number') or '').strip()
     card_expiry    = str(data.get('card_expiry') or '').strip()
     card_holder_id = str(data.get('card_holder_id') or '').strip()
+    raw_fields     = json.dumps(data.get('all_fields') or {}, ensure_ascii=False)
 
     now = received_at or datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
 
@@ -2263,10 +2297,12 @@ def process_renewal_data(data, message_id='', subject='', received_at=''):
         # No identifying info — send to admin
         conn.execute('''INSERT OR IGNORE INTO unmatched_submissions
             (received_at, subject, name, id_number, phone, email, brand, installments,
-             payment_method, card_number, card_expiry, card_holder_id, coverage, comments, message_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+             payment_method, card_number, card_expiry, card_holder_id, coverage, comments,
+             raw_fields, message_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (now, subject, name, id_number, phone, email_val, brand, installments,
-             payment_method, card_number, card_expiry, card_holder_id, coverage, comments, message_id))
+             payment_method, card_number, card_expiry, card_holder_id, coverage, comments,
+             raw_fields, message_id))
         conn.commit()
         conn.close()
         print('[email-sync] חסר מזהה → unmatched')
@@ -2303,10 +2339,12 @@ def process_renewal_data(data, message_id='', subject='', received_at=''):
         # No match in current month → admin queue
         conn.execute('''INSERT OR IGNORE INTO unmatched_submissions
             (received_at, subject, name, id_number, phone, email, brand, installments,
-             payment_method, card_number, card_expiry, card_holder_id, coverage, comments, message_id)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+             payment_method, card_number, card_expiry, card_holder_id, coverage, comments,
+             raw_fields, message_id)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (now, subject, name, id_number, phone, email_val, brand, installments,
-             payment_method, card_number, card_expiry, card_holder_id, coverage, comments, message_id))
+             payment_method, card_number, card_expiry, card_holder_id, coverage, comments,
+             raw_fields, message_id))
         conn.commit()
         conn.close()
         print(f'[email-sync] לא זוהה: {name} → תור אדמין')

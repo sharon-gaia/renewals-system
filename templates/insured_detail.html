@@ -211,6 +211,18 @@
             </form>
           </div>
           {% if f.handled_by %}<div class="small text-muted mb-2">טופל ע"י {{ f.handled_by }}{% if f.handled_at %} · {{ f.handled_at }}{% endif %}</div>{% endif %}
+          {% set parsed = f.raw_fields | form_fields %}
+          {% if parsed %}
+          {# Full submission as a two-column field/value grid — easy to read off while typing #}
+          <div class="row g-0 small border rounded overflow-hidden">
+            {% for k, v in parsed %}
+            <div class="col-md-6 d-flex border-bottom">
+              <div class="bg-light text-muted px-2 py-1 fw-semibold text-nowrap" style="min-width:150px">{{ k }}</div>
+              <div class="px-2 py-1 flex-grow-1" style="word-break:break-word">{{ v }}</div>
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
           <div class="row g-2 small">
             {% if f.name %}<div class="col-md-4"><strong>שם בטופס:</strong> {{ f.name }}</div>{% endif %}
             {% if f.id_number %}<div class="col-md-4"><strong>ת.ז:</strong> {{ f.id_number }}</div>{% endif %}
@@ -221,6 +233,7 @@
             {% if f.coverage %}<div class="col-md-4"><strong>כיסוי:</strong> {{ f.coverage }}</div>{% endif %}
             {% if f.card_number %}<div class="col-md-4"><strong>כרטיס:</strong> {{ f.card_number }} {{ f.card_expiry or '' }}</div>{% endif %}
           </div>
+          {% endif %}
           {% if f.comments %}
           <div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">{{ f.comments }}</div>
           {% endif %}
