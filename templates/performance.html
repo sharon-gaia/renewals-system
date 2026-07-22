@@ -11,9 +11,8 @@
 
 <div class="alert alert-info small">
   הביצועים מיוחסים לפי <strong>מי שעדכן את הסטטוס</strong> של הלקוח בחודש הפעיל.
-  <strong>חידושים (אישי)</strong> = חידושים שהנציג סגר בעצמו;
-  <strong>חידושים דיגיטליים</strong> = חידושים שהגיעו מטופס באתר ורק אושרו — מוצגים בנפרד כדי שלא ינפחו את הביצועים האישיים.
-  <strong>אחוז חידוש</strong> מחושב לפי החידושים האישיים מתוך הלקוחות שטופלו.
+  הספירה היא <strong>לפי ת.ז</strong> — לקוח נספר פעם אחת בלבד, גם אם גם דיברו איתו וגם חידש.
+  <strong>חידושים</strong> כוללים גם חידושים שהגיעו דיגיטלית מטופס באתר.
   {% if show_role %}כמנהל-על מוצגת כאן פעילות כל המשתמשים — נציגים, מנהלים ומנהלי-על.{% endif %}
 </div>
 
@@ -27,8 +26,7 @@
           <th>שיחות</th>
           <th>לקוחות שטופלו</th>
           <th>העברות לאדמין</th>
-          <th>חידושים (אישי)</th>
-          <th>חידושים דיגיטליים</th>
+          <th>חידושים</th>
           <th>אחוז חידוש</th>
         </tr>
       </thead>
@@ -43,7 +41,6 @@
           <td>{{ r.touched }}</td>
           <td>{{ r.escalations }}</td>
           <td class="text-success fw-bold">{{ r.renewals }}</td>
-          <td class="text-muted">{{ r.digital }}</td>
           <td>
             <div class="d-flex align-items-center gap-2" style="min-width:120px">
               <div class="progress flex-grow-1" style="height:8px">
@@ -54,7 +51,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="{{ 8 if show_role else 7 }}" class="text-center text-muted py-4">
+        <tr><td colspan="{{ 7 if show_role else 6 }}" class="text-center text-muted py-4">
           אין נציגים להצגה. {% if session.role == 'superadmin' %}הגדר נציגים ושייך אותם למנהל במסך הניהול.{% else %}לא שויכו אליך נציגים עדיין.{% endif %}
         </td></tr>
         {% endfor %}

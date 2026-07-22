@@ -1672,17 +1672,18 @@ def performance():
         nm = a['display_name']
         if not nm:
             continue
-        # Attribution is by who set the status (handled_by) — the signal the team
-        # actually uses. Renewals that arrived through the website form are counted
-        # separately as "digital" so confirming them doesn't inflate personal results.
+        # Attribution is by who set the status (handled_by). Counts are per PERSON —
+        # DISTINCT by ת.ז — so the same client never counts twice, and a client who
+        # both changed status and renewed still counts as one. Digital renewals count
+        # as ordinary personal renewals.
+        key = "COALESCE(NULLIF(ltrim(COALESCE(id_number,''),'0'),''), 'r'||id)"
         q = conn.execute(
             "SELECT "
             "SUM((CASE WHEN call_by_1=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_2=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_3=? THEN 1 ELSE 0 END)) AS calls, "
-            "SUM(CASE WHEN handled_by=? THEN 1 ELSE 0 END) AS touched, "
-            "SUM(CASE WHEN handled_by=? AND status=? AND COALESCE(form_received_at,'')='' THEN 1 ELSE 0 END) AS renewals, "
-            "SUM(CASE WHEN handled_by=? AND status=? AND COALESCE(form_received_at,'')<>'' THEN 1 ELSE 0 END) AS digital "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? THEN {key} END) AS touched, "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS renewals "
             "FROM customers WHERE month_id=?",
-            [nm, nm, nm, nm, nm, 'חודש', nm, 'חודש', mid]
+            [nm, nm, nm, nm, nm, 'חודש', mid]
         ).fetchone()
         # Escalations raised by this person (customer card or customer file), which are
         # the queue-* items — not the website-form queue they merely handled.
@@ -1690,11 +1691,10 @@ def performance():
             "SELECT COUNT(*) FROM unmatched_submissions WHERE handled_by=? "
             "AND (message_id LIKE 'queue-cid-%' OR message_id LIKE 'queue-iid-%')", (nm,)
         ).fetchone()[0]
-        calls, touched = q['calls'] or 0, q['touched'] or 0
-        renewals, digital = q['renewals'] or 0, q['digital'] or 0
+        calls, touched, renewals = q['calls'] or 0, q['touched'] or 0, q['renewals'] or 0
         rows.append({'name': nm, 'role': role_labels.get(a['role'], a['role']),
                      'calls': calls, 'touched': touched, 'renewals': renewals,
-                     'digital': digital, 'escalations': escalations,
+                     'escalations': escalations,
                      'rate': round(renewals / touched * 100, 1) if touched else 0})
     rows.sort(key=lambda r: (r['renewals'], r['calls']), reverse=True)
     conn.close()
