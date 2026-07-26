@@ -233,6 +233,19 @@ def can_access_brand(brand):
     ab = allowed_brands()
     return ab is None or (brand in ab)
 
+
+def _name_search(col, search, like):
+    """SQL condition + params for an order-independent name search: the whole string
+    as a substring, OR every word appearing in the name in any order — so 'כהן עדן'
+    also finds 'עדן כהן'. Returns (sql_fragment, params)."""
+    words = [w for w in search.split() if w]
+    clauses = [f'{col} LIKE ?']
+    params = [like]
+    if len(words) > 1:
+        clauses.append('(' + ' AND '.join(f'{col} LIKE ?' for _ in words) + ')')
+        params.extend(f'%{w}%' for w in words)
+    return '(' + ' OR '.join(clauses) + ')', params
+
 def compute_active_status(period_end):
     """Active if today is on/before the policy end date; inactive once it has passed."""
     end = parse_dmy(period_end)
@@ -869,9 +882,10 @@ def customers():
         query += " AND status=?"
         params.append(status_filter)
     if search:
-        query += " AND (name LIKE ? OR phone LIKE ? OR policy_number LIKE ?)"
         like = f'%{search}%'
-        params += [like, like, like]
+        name_cond, name_params = _name_search('name', search, like)
+        query += " AND (" + name_cond + " OR phone LIKE ? OR policy_number LIKE ?)"
+        params += name_params + [like, like]
 
     query += " ORDER BY name"
 
@@ -894,18 +908,19 @@ def search_customers():
         # Normalised phone match too, so 050-123 finds 0501234567 etc.
         digits = re.sub(r'\D', '', search)
         phone_like = f'%{digits}%' if digits else like
+        name_cond, name_params = _name_search('c.name', search, like)
         bc, bp = brand_clause('c.brand')
         rows = conn.execute(
             """SELECT c.*, m.name AS month_name
                FROM customers c
                LEFT JOIN months m ON m.id = c.month_id
-               WHERE (c.name LIKE ?
+               WHERE (""" + name_cond + """
                   OR c.phone LIKE ?
                   OR replace(replace(c.phone,'-',''),' ','') LIKE ?
                   OR c.policy_number LIKE ?
                   OR ltrim(c.id_number,'0') LIKE ?)""" + bc + """
                ORDER BY m.id DESC, c.name""",
-            [like, like, phone_like, like, like] + bp
+            name_params + [like, phone_like, like, like] + bp
         ).fetchall()
         conn.close()
     return render_template('search_results.html', customers=rows, search=search)
@@ -1382,11 +1397,12 @@ def policy_records():
     bc, bp = brand_clause()  # managers see only their agencies; super-admins see all
     if q:
         like = f'%{q}%'
+        name_cond, name_params = _name_search('name', q, like)
         rows = conn.execute(
-            '''SELECT * FROM insureds
-               WHERE (name LIKE ? OR id_number LIKE ? OR policy_number LIKE ?
-                  OR phone LIKE ? OR email LIKE ?)''' + bc + ' ORDER BY name',
-            [like, like, like, like, like] + bp
+            'SELECT * FROM insureds WHERE (' + name_cond +
+            ' OR id_number LIKE ? OR policy_number LIKE ? OR phone LIKE ? OR email LIKE ?)'
+            + bc + ' ORDER BY name',
+            name_params + [like, like, like, like] + bp
         ).fetchall()
     else:
         rows = conn.execute('SELECT * FROM insureds WHERE 1=1' + bc + ' ORDER BY name LIMIT 500', bp).fetchall()
