@@ -2999,8 +2999,11 @@ def form_submit():
 
 
 @app.route('/db-status')
+@login_required
+@superadmin_required
 def db_status():
-    """Diagnostic endpoint — shows DB health"""
+    """Diagnostic endpoint — shows DB health (super-admin only; was public and leaked
+    the schema + user count)."""
     try:
         conn = get_db()
         tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
