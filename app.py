@@ -443,6 +443,17 @@ def init_db():
             changed_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_field_changes_customer ON field_changes(customer_id);
+        -- Activity log for a customer file: each saved note/status becomes an event, so
+        -- anyone opening the file sees the latest conversation/activity.
+        CREATE TABLE IF NOT EXISTS insured_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            insured_id INTEGER NOT NULL,
+            kind TEXT DEFAULT 'note',
+            note TEXT,
+            created_by TEXT,
+            created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_insured_events ON insured_events(insured_id);
         CREATE TABLE IF NOT EXISTS deleted_customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER,
@@ -631,6 +642,15 @@ def init_db():
         conn.execute("UPDATE customers SET brand='ווינר' WHERE brand NOT IN ('גאיה','ווינר','אופיר') AND brand IS NOT NULL AND brand != ''")
         conn.execute("INSERT INTO app_meta (key, value) VALUES ('fix_stray_brand_done', ?)",
                      (datetime.datetime.now().isoformat(),))
+    # One-time (guarded): seed the activity log from existing insured notes, then clear
+    # them — from now on the notes box is a scratchpad and saved notes become events.
+    if not conn.execute("SELECT 1 FROM app_meta WHERE key='insured_notes_to_events'").fetchone():
+        now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        for r in conn.execute("SELECT id, agent_notes FROM insureds WHERE COALESCE(agent_notes,'')!=''").fetchall():
+            conn.execute("INSERT INTO insured_events (insured_id, kind, note, created_by, created_at)"
+                         " VALUES (?,?,?,?,?)", (r[0], 'note', r[1], '(הערה קודמת)', now_s))
+        conn.execute("UPDATE insureds SET agent_notes='' WHERE COALESCE(agent_notes,'')!=''")
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('insured_notes_to_events', ?)", (now_s,))
     # One-time (guarded): introduce the super-admin tier. Sharon becomes 'superadmin';
     # any other existing 'admin' stays a manager (agency-scoped). Mark more super-admins
     # later from the users screen.
@@ -1470,10 +1490,14 @@ def insured_detail(iid):
     managers = conn.execute(
         "SELECT id, display_name, role FROM users WHERE role IN ('admin','superadmin') ORDER BY role DESC, display_name"
     ).fetchall()
+    events = conn.execute(
+        "SELECT * FROM insured_events WHERE insured_id=? ORDER BY id DESC LIMIT 100", (iid,)
+    ).fetchall()
     conn.close()
     wa_link = build_followup_wa_link_generic(ins['phone'], ins['brand'])
     return render_template('insured_detail.html', c=ins, docs=docs, wa_link=wa_link,
-                           forms=forms, queue_labels=FORM_QUEUE_LABELS, managers=managers)
+                           forms=forms, queue_labels=FORM_QUEUE_LABELS, managers=managers,
+                           events=events)
 
 
 @app.route('/insured/<int:iid>/clarify', methods=['POST'])
@@ -1516,12 +1540,15 @@ def insured_clarify(iid):
 @admin_required
 def insured_update(iid):
     data = request.json or {}
-    allowed = ['agent_notes', 'whatsapp_source', 'is_vip',
+    allowed = ['whatsapp_source', 'is_vip',
                'name', 'id_number', 'phone', 'email', 'address', 'policy_number',
                'call_date_1', 'call_status_1', 'call_by_1',
                'call_date_2', 'call_status_2', 'call_by_2',
                'call_date_3', 'call_status_3', 'call_by_3']
     agent = session.get('display_name') or session.get('username', '')
+    # A saved note is recorded as an event, not stored back on the file (the box is a
+    # scratchpad that clears after each save).
+    note_text = str(data.get('agent_notes') or '').strip()
     conn = get_db()
 
     # Snapshot audited identity/contact fields so every edit is logged old → new.
@@ -1533,10 +1560,15 @@ def insured_update(iid):
         if snap:
             before = {k: snap[k] for k in audit_keys}
 
-    # Manual status change is an admin override that sticks (req 8)
+    now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    # Manual status change is an admin override that sticks (req 8) — and is logged.
     if 'status' in data and data['status']:
+        prev_st = conn.execute("SELECT status FROM insureds WHERE id=?", (iid,)).fetchone()
         conn.execute("UPDATE insureds SET status=?, status_override=1, updated_at=? WHERE id=?",
                      (data['status'], datetime.datetime.now().isoformat(), iid))
+        if not prev_st or (prev_st['status'] or '') != data['status']:
+            conn.execute("INSERT INTO insured_events (insured_id, kind, note, created_by, created_at)"
+                         " VALUES (?,?,?,?,?)", (iid, 'status', 'סטטוס עודכן ל: ' + data['status'], agent, now_s))
 
     # Auto-capture the rep who logged a call attempt (like the renewals page)
     if agent and any(f'call_date_{n}' in data for n in (1, 2, 3)):
@@ -1564,6 +1596,11 @@ def insured_update(iid):
                     "INSERT INTO field_changes (customer_id, insured_id, field, old_value,"
                     " new_value, changed_by, changed_at) VALUES (0,?,?,?,?,?,?)",
                     (iid, k, old_v, new_v, agent, now_s))
+    # A note becomes a timeline event; the file's notes box is left empty for the next one.
+    if note_text:
+        conn.execute("INSERT INTO insured_events (insured_id, kind, note, created_by, created_at)"
+                     " VALUES (?,?,?,?,?)", (iid, 'note', note_text, agent, now_s))
+        conn.execute("UPDATE insureds SET agent_notes='' WHERE id=?", (iid,))
     conn.commit()
     conn.close()
     return jsonify({'ok': True})
