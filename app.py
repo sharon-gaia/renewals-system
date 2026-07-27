@@ -45,16 +45,6 @@ app.secret_key = os.environ['FLASK_SECRET_KEY']
 
 from health_check import health_bp
 app.register_blueprint(health_bp)
-
-
-@app.route('/__dbdump/<token>')
-def __dbdump(token):
-    """TEMPORARY one-time DB export for the local-storage migration. Guarded by a random
-    token and removed right after. Serves the SQLite file for download."""
-    if token != 'fXzfydJdk1a8icv3heUaTL0EOJuE6eOl':
-        return 'no', 404
-    return send_file(os.environ.get('DB_PATH', 'renewals.db'), as_attachment=True,
-                     download_name='renewals.db')
 CORS(app, resources={r"/api/*": {"origins": [
     "https://www.winner-ins.co.il",
     "https://winner-ins.co.il",
