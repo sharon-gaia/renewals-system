@@ -5,7 +5,7 @@
 <div class="d-flex flex-column flex-md-row justify-content-md-between align-items-start align-items-md-center mb-3 gap-2">
   <h5 class="mb-0"><i class="bi bi-people-fill text-primary me-2"></i>לקוחות — {{ month['name'] }}</h5>
   <div class="d-flex flex-wrap align-items-center gap-2">
-    {% if brand_filter or status_filter or search %}
+    {% if brand_filter or status_filter or search or midwife_filter %}
     <span class="text-muted small">מסונן</span>
     {% endif %}
     <span class="badge bg-secondary fs-6">{{ customers|length }} רשומות</span>
@@ -44,6 +44,12 @@
         {% endif %}{% endfor %}
       </optgroup>
     </select>
+  </div>
+  <div class="col-6 col-md-2 d-flex align-items-center">
+    <div class="form-check">
+      <input class="form-check-input" type="checkbox" name="mw" value="1" id="mw-filter" {% if midwife_filter %}checked{% endif %}>
+      <label class="form-check-label small" for="mw-filter"><i class="bi bi-heart-pulse text-danger me-1"></i>מיילדות בלבד</label>
+    </div>
   </div>
   <div class="col-6 col-md-2">
     <button type="submit" class="btn btn-primary w-100"><i class="bi bi-search me-1"></i>סנן</button>

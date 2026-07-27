@@ -55,6 +55,32 @@
     </div>
   </div>
 
+  <!-- מילוי לקוחות מהמייל (סריקה אחורה) — כלי תפעולי, מנהל-על בלבד -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-dark text-white fw-bold">
+        <i class="bi bi-cloud-download me-2"></i>מילוי לקוחות מהמייל (סריקה אחורה)
+      </div>
+      <div class="card-body">
+        <p class="small text-muted mb-3">
+          סורק אחורה את קבצי ה-PDF של הראל מהמייל ומחלץ נתוני לקוחות + ביטולים אל "לקוחות קבוצת אופיר".
+          נתונים בלבד (ללא שמירת PDF), רץ ברקע.
+        </p>
+        {% if backfill and backfill.running %}
+        <span class="badge bg-warning text-dark"><span class="spinner-border spinner-border-sm me-1"></span>סריקה רצה ({{ backfill.days }} ימים, מ-{{ backfill.started }})</span>
+        <div class="small text-muted mt-2">רענן את הדף לעדכון</div>
+        {% else %}
+        <div class="d-flex flex-wrap gap-2">
+          <form method="POST" action="/admin/backfill" class="d-inline"><input type="hidden" name="days" value="30"><button class="btn btn-outline-primary btn-sm">חודש</button></form>
+          <form method="POST" action="/admin/backfill" class="d-inline"><input type="hidden" name="days" value="90"><button class="btn btn-outline-primary btn-sm">3 חודשים</button></form>
+          <form method="POST" action="/admin/backfill" class="d-inline"><input type="hidden" name="days" value="365"><button class="btn btn-primary btn-sm" onclick="return confirm('לסרוק שנה שלמה אחורה? זה ירוץ ברקע ויכול לקחת זמן.')">שנה שלמה</button></form>
+        </div>
+        {% if backfill and backfill.done %}<div class="small text-success mt-2">✓ סריקה קודמת: {{ backfill.done }} מסמכים</div>{% endif %}
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
   <!-- היסטוריית חודשים -->
   <div class="col-md-6">
     <div class="card border-0 shadow-sm">

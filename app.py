@@ -185,6 +185,20 @@ def normalize_id_number(s):
         return s.zfill(9)
     return s
 
+def is_israeli_id(s):
+    """Validate an Israeli national-ID check digit (זהות). Used to tell the real
+    insured ת.ז apart from Harel's internal 'מס' מזהה', which shares the same PDF row
+    but does not satisfy the ID checksum."""
+    d = re.sub(r'\D', '', str(s or ''))
+    if not d or len(d) > 9:
+        return False
+    d = d.zfill(9)
+    total = 0
+    for i, ch in enumerate(d):
+        v = int(ch) * (1 if i % 2 == 0 else 2)
+        total += v if v < 10 else v - 9
+    return total % 10 == 0
+
 def parse_dmy(s):
     """Parse a DD/MM/YYYY date string (as extracted from Harel PDFs) to a date. None on failure."""
     s = str(s or '').strip()
@@ -948,6 +962,7 @@ def customers():
 
     brand_filter = request.args.get('brand', '')
     status_filter = request.args.get('status', '')
+    midwife_filter = request.args.get('mw', '') == '1'
     search = request.args.get('q', '').strip()
 
     query = "SELECT * FROM customers WHERE month_id=?"
@@ -962,6 +977,9 @@ def customers():
         # Each agency is its own brand now — Ofir is no longer merged into Winner.
         query += " AND brand=?"
         params.append(brand_filter)
+    if midwife_filter:
+        # מיילדות marker — Winner only in practice, but filter is agency-agnostic.
+        query += " AND is_midwife=1"
     if status_filter == '__empty__':
         query += " AND (status IS NULL OR status='')"
     elif status_filter:
@@ -979,7 +997,8 @@ def customers():
     rows = conn.execute(query, params).fetchall()
     conn.close()
     return render_template('customers.html', customers=rows, month=month,
-                           brand_filter=brand_filter, status_filter=status_filter, search=search,
+                           brand_filter=brand_filter, status_filter=status_filter,
+                           midwife_filter=midwife_filter, search=search,
                            statuses=STATUSES)
 
 @app.route('/search')
@@ -1835,7 +1854,8 @@ def admin():
     conn.close()
     return render_template('admin.html', users=users, months=months,
                            email_sync_enabled=EMAIL_CONFIG['enabled'],
-                           agencies=BRANDS, user_brands=ub_map, managers=managers)
+                           agencies=BRANDS, user_brands=ub_map, managers=managers,
+                           backfill=_backfill_state)
 
 
 @app.route('/admin/users/<int:uid>/manager', methods=['POST'])
@@ -1975,10 +1995,8 @@ def sample_format():
     """A blank Gaia/Winner import template with the expected column headers, plus one
     example row, so a new file can be pasted into the right shape."""
     from io import BytesIO
-    headers = ['פוליסה', 'שם', 'ת.ז', 'טלפון', 'מותג', 'סטטוס', 'פרמיה', 'וואטסאפ',
-               'הערות שרון', 'בקשות משרון', 'תאריך התקשרות', 'הערות חידושים', 'מתעניין', 'מיילדות']
-    example = ['881400123456', 'ישראל ישראלי', '012345678', '0501234567', 'ווינר', '', '1200',
-               '', '', '', '', '', '', 'V']
+    headers = ['פוליסה', 'שם', 'ת.ז', 'טלפון', 'מותג', 'סטטוס', 'פרמיה', 'מיילדות']
+    example = ['881400123456', 'ישראל ישראלי', '012345678', '0501234567', 'ווינר', '', '1200', 'V']
     wb = NewWorkbook()
     ws = wb.active
     ws.title = 'חידושים'
@@ -2743,11 +2761,20 @@ def parse_harel_policy_pdf(source):
                 result['phone_home'] = phones[1]
 
         if i + 1 < len(lines) and 'ת.ז. מבוטח' in l:
-            ids = re.findall(r'\d{7,9}', lines[i + 1])
-            if ids:
-                result['insured_id'] = ids[0]
-            if len(ids) > 1:
-                result['spouse_id'] = ids[1]
+            # The data row carries several numbers — ת.ז. מבוטח, optionally ת.ז. בן/בת זוג,
+            # and Harel's internal מס' מזהה. The internal id does NOT satisfy the Israeli ID
+            # check digit, so we identify the real insured ת.ז by its checksum. When a spouse
+            # id is also present (both valid), the insured is the rightmost column, i.e. the
+            # last number on the (LTR-extracted) line.
+            nums = re.findall(r'\d{5,9}', lines[i + 1])
+            valid = [n for n in nums if is_israeli_id(n)]
+            if valid:
+                result['insured_id'] = valid[-1]
+                if len(valid) > 1:
+                    result['spouse_id'] = valid[0]
+            elif nums:
+                # No number passes the checksum (rare OCR/typo case) — best-effort last number.
+                result['insured_id'] = nums[-1]
 
         if i + 1 < len(lines) and 'דמי ביטוח' in l and 'אשראי' in l:
             nums = re.findall(r'-?\d+\.\d{2}', lines[i + 1])
@@ -2952,14 +2979,14 @@ _backfill_state = {'running': False, 'done': 0, 'started': None, 'days': 0}
 
 @app.route('/admin/backfill', methods=['POST'])
 @login_required
-@admin_required
+@superadmin_required
 def admin_backfill():
     """One-time backfill: scan up to a year of Harel PDFs, extract customer data +
     cancellations into the master. Data-only (keep_pdf=False) to stay within storage.
-    Runs in the background; safe to leave and check back."""
+    Runs in the background; safe to leave and check back. Superadmin-only operational tool."""
     if _backfill_state['running']:
         flash('סריקה כבר רצה ברקע — המתן לסיומה', 'warning')
-        return redirect(url_for('policy_records'))
+        return redirect(url_for('admin'))
     try:
         days = int(request.form.get('days', '30'))
     except ValueError:
@@ -2983,7 +3010,7 @@ def admin_backfill():
 
     threading.Thread(target=_run, args=(days,), daemon=True).start()
     flash(f'סריקה אחורה של {days} ימים הופעלה ברקע — זה עשוי לקחת זמן. רענן את הדף מדי פעם.', 'info')
-    return redirect(url_for('policy_records'))
+    return redirect(url_for('admin'))
 
 
 @app.route('/submit', methods=['POST'])
