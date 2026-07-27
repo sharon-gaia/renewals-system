@@ -827,11 +827,22 @@ def index():
                 'pct': round(rnw / t * 100, 1) if t else 0,
             }
         # Per-agency views for the top-of-dashboard toggle (client-side switch).
+        # Gaia+Winner are the active book; Ofir is planning-only, so its data is masked.
         present = [b for b in ('גאיה', 'ווינר', 'אופיר') if any(r['brand'] == b for r in rows)]
-        views = {'הכל': _funnel(rows)}
+        active = [b for b in ('גאיה', 'ווינר') if b in present]
+        GW = 'גאיה + ווינר'
+        views = {}
+        view_labels = []
+        if len(active) > 1:
+            views[GW] = _funnel([r for r in rows if r['brand'] in active])
+            view_labels.append(GW)
         for b in present:
             views[b] = _funnel([r for r in rows if r['brand'] == b])
-        view_labels = (['הכל'] + present) if len(present) > 1 else present or ['הכל']
+            view_labels.append(b)
+        if not view_labels:  # no active month data at all
+            views[GW] = _funnel(rows)
+            view_labels = [GW]
+        masked_views = ['אופיר']  # planning-only — show the layout, hide the numbers
         # Ofir renewals split by ענף (sector): total vs renewed (חודש) per category → %.
         ofir_rows = [r for r in rows if r['brand'] == 'אופיר']
         ofir_by_category = []
@@ -845,11 +856,12 @@ def index():
         # 'pending' badge = items a rep escalated to the admin queue (mark_clarify).
         unmatched = conn.execute("SELECT COUNT(*) FROM unmatched_submissions WHERE status='pending'").fetchone()[0]
         conn.close()
-        stats = dict(views['הכל'], ofir=len(ofir_rows),
-                     ofir_renewed=sum(1 for r in ofir_rows if r['status'] == 'חודש'),
+        # Initial (server-rendered) numbers reflect the default view = first tab.
+        stats = dict(views[view_labels[0]], ofir=len(ofir_rows),
                      ofir_by_category=ofir_by_category, unmatched=unmatched)
     return render_template('dashboard.html', month=month, stats=stats,
                            views=views, view_labels=view_labels,
+                           masked_views=(masked_views if month else []),
                            views_json=json.dumps(views, ensure_ascii=False))
 
 @app.route('/customers')

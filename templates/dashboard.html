@@ -163,40 +163,17 @@
 </div>
 
 {% if stats.ofir %}
-<!-- אופיר — לפי ענף -->
+<!-- אופיר — בתכנון, הנתונים מוסתרים כרגע (העיצוב נשמר) -->
 <div class="row g-3 mb-4">
   <div class="col-12">
     <div class="card border-0 shadow-sm">
       <div class="card-header bg-ofir fw-bold d-flex justify-content-between align-items-center">
         <span><img src="{{ url_for('static', filename='ofir-logo.png') }}" alt="אופיר" style="height:26px;vertical-align:middle" class="ms-2">אופיר</span>
-        <span class="small">
-          סה"כ {{ stats.ofir }} · חידשו {{ stats.ofir_renewed }}
-          · אחוז חידוש {{ (100 * stats.ofir_renewed / stats.ofir) | round(1) }}%
-        </span>
+        <span class="badge bg-light text-dark">בתכנון</span>
       </div>
-      <div class="card-body p-0">
-        <table class="table table-sm align-middle mb-0 text-center">
-          <thead class="table-light">
-            <tr><th class="text-end ps-3">ענף</th><th>סה"כ</th><th>חידשו</th><th>אחוז חידוש</th></tr>
-          </thead>
-          <tbody>
-            {% for c in stats.ofir_by_category %}
-            <tr>
-              <td class="text-end ps-3 fw-semibold">{{ c.category }}</td>
-              <td>{{ c.total }}</td>
-              <td class="text-success">{{ c.renewed }}</td>
-              <td>
-                <div class="d-flex align-items-center gap-2" style="min-width:120px">
-                  <div class="progress flex-grow-1" style="height:8px">
-                    <div class="progress-bar bg-success" style="width: {{ c.pct }}%"></div>
-                  </div>
-                  <span class="small fw-semibold">{{ c.pct }}%</span>
-                </div>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      <div class="card-body text-center text-muted py-4">
+        <i class="bi bi-cone-striped fs-3 d-block mb-2"></i>
+        אופיר בתכנון — הנתונים יוצגו כאן כשהסוכנות תעלה לעבודה שוטפת.
       </div>
     </div>
   </div>
@@ -216,33 +193,35 @@
 <script>
 (function () {
   const VIEWS = {{ views_json|safe }};
+  const MASKED = {{ masked_views|tojson }};   // planning-only agencies — numbers hidden
+  const BRANDS = ['גאיה', 'ווינר', 'אופיר'];
   const toggle = document.getElementById('view-toggle');
   const nameEl = document.getElementById('view-name');
   function applyLinks(view) {
     document.querySelectorAll('.stat-link').forEach(a => {
       const st = a.dataset.status;
       const p = [];
-      if (view && view !== 'הכל') p.push('brand=' + encodeURIComponent(view));
+      if (BRANDS.indexOf(view) !== -1) p.push('brand=' + encodeURIComponent(view));
       if (st) p.push('status=' + encodeURIComponent(st));
       a.href = '/customers' + (p.length ? '?' + p.join('&') : '');
     });
   }
   function apply(view) {
+    const masked = MASKED.indexOf(view) !== -1;
     const s = VIEWS[view];
-    if (s) {
-      document.querySelectorAll('[data-stat]').forEach(el => {
-        const k = el.dataset.stat;
-        if (s[k] !== undefined) el.textContent = s[k];
-      });
-      const bar = document.getElementById('pct-bar');
-      if (bar) bar.style.width = s.pct + '%';
-      if (nameEl) nameEl.textContent = view === 'הכל' ? '' : '· ' + view;
-    }
+    document.querySelectorAll('[data-stat]').forEach(el => {
+      const k = el.dataset.stat;
+      if (masked) el.textContent = '—';
+      else if (s && s[k] !== undefined) el.textContent = s[k];
+    });
+    const bar = document.getElementById('pct-bar');
+    if (bar) bar.style.width = (masked || !s) ? '0%' : s.pct + '%';
+    if (nameEl) nameEl.textContent = masked ? '· ' + view + ' (בתכנון)' : '· ' + view;
     applyLinks(view);
   }
-  // Initial links follow the default selected agency (first toggle button, else 'הכל').
+  // Initial state follows the default selected agency (first toggle button).
   const active = toggle ? toggle.querySelector('button.btn-primary') : null;
-  applyLinks(active ? active.dataset.view : 'הכל');
+  if (active) apply(active.dataset.view); else applyLinks('');
   if (toggle) {
     toggle.querySelectorAll('button').forEach(btn => {
       btn.addEventListener('click', () => {
