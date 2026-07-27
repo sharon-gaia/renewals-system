@@ -30,7 +30,9 @@
 
         <!-- פרטי לקוח -->
         <div class="col-md-3">
-          <div class="fw-bold fs-6">{{ c.name }}</div>
+          <div class="fw-bold fs-6">
+            <a href="/customer/{{ c.id }}" class="text-decoration-none">{{ c.name }} <i class="bi bi-box-arrow-up-left small text-muted"></i></a>
+          </div>
           <div class="text-muted small mb-1">
             <span class="badge {{ 'bg-info' if c.brand == 'גאיה' else 'bg-purple' }}">{{ c.brand }}</span>
           </div>
