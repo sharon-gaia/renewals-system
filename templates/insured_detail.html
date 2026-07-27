@@ -336,6 +336,7 @@ document.querySelectorAll('.inline-edit .ie-input').forEach(function (inp) {
 
 document.getElementById('save-btn').addEventListener('click', () => {
   const statusEl = document.getElementById('det-status');  // managers only
+  const hadNote = !!document.getElementById('det-agent-notes').value.trim();
   post({
     status: statusEl ? statusEl.value : undefined,
     agent_notes: document.getElementById('det-agent-notes').value,
@@ -348,7 +349,8 @@ document.getElementById('save-btn').addEventListener('click', () => {
   }, () => {
     const msg = document.getElementById('save-msg');
     msg.classList.remove('d-none');
-    setTimeout(() => msg.classList.add('d-none'), 2000);
+    if (hadNote) { setTimeout(() => window.location.reload(), 500); }
+    else { setTimeout(() => msg.classList.add('d-none'), 2000); }
   });
 });
 

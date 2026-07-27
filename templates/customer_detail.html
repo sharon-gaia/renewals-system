@@ -265,7 +265,8 @@
     <div class="card border-0 shadow-sm mb-3">
       <div class="card-header bg-light fw-bold">הערות נציג</div>
       <div class="card-body">
-        <textarea id="det-agent-notes" class="form-control" rows="3" placeholder="הוסף הערה...">{{ c.agent_notes or '' }}</textarea>
+        <textarea id="det-agent-notes" class="form-control" rows="3"
+                  placeholder="רשום הערה/עדכון שיחה — יישמר ביומן האירועים לאחר שמירה...">{{ c.agent_notes or '' }}</textarea>
         <div class="mt-2 d-flex flex-wrap align-items-center gap-2">
           <select id="clarify-target" class="form-select form-select-sm" style="width:auto;max-width:180px">
             <option value="">— כל המנהלים —</option>
@@ -281,6 +282,24 @@
           <span class="badge bg-warning text-dark ms-2"><i class="bi bi-clock-history me-1"></i>הועבר לאדמין</span>
           {% endif %}
         </div>
+        {% if events %}
+        <div class="mt-3">
+          <div class="fw-semibold text-muted small mb-2"><i class="bi bi-clock-history me-1"></i>יומן אירועים</div>
+          <div class="border rounded" style="max-height:260px; overflow-y:auto;">
+            {% for e in events %}
+            <div class="d-flex gap-2 px-2 py-2 {% if not loop.last %}border-bottom{% endif %} {% if loop.first %}bg-light{% endif %}">
+              <i class="bi {{ 'bi-arrow-repeat text-primary' if e.kind == 'status' else 'bi-chat-left-text text-secondary' }} mt-1"></i>
+              <div class="flex-grow-1">
+                <div style="white-space:pre-wrap; word-break:break-word">{{ e.note }}</div>
+                <div class="text-muted" style="font-size:0.75rem">
+                  {{ e.created_by or '—' }} · {{ e.created_at }}{% if loop.first %} · <span class="text-success">אחרון</span>{% endif %}
+                </div>
+              </div>
+            </div>
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
       </div>
     </div>
 
@@ -320,6 +339,7 @@ document.getElementById('save-btn').addEventListener('click', () => {
   data.sharon_notes = document.getElementById('det-sharon-notes').value;
   {% endif %}
 
+  const hadNote = !!data.agent_notes.trim();
   fetch('/customer/{{ c.id }}/update', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
@@ -327,7 +347,9 @@ document.getElementById('save-btn').addEventListener('click', () => {
   }).then(() => {
     const msg = document.getElementById('save-msg');
     msg.classList.remove('d-none');
-    setTimeout(() => msg.classList.add('d-none'), 2000);
+    // Reload so a saved note drops into the event log and the box clears.
+    if (hadNote) { setTimeout(() => window.location.reload(), 500); }
+    else { setTimeout(() => msg.classList.add('d-none'), 2000); }
   });
 });
 

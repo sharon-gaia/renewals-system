@@ -234,6 +234,25 @@ def can_access_brand(brand):
     return ab is None or (brand in ab)
 
 
+def event_key(id_number, fallback):
+    """Key for the unified activity log: normalised ת.ז, or a per-record fallback."""
+    return (str(id_number or '').lstrip('0')) or fallback
+
+
+def log_event(conn, idkey, note, who, kind='note'):
+    if not (note or '').strip():
+        return
+    conn.execute(
+        "INSERT INTO client_events (idkey, kind, note, created_by, created_at) VALUES (?,?,?,?,?)",
+        (idkey, kind, note.strip(), who, datetime.datetime.now().strftime('%Y-%m-%d %H:%M')))
+
+
+def get_events(conn, idkey, limit=100):
+    return conn.execute(
+        "SELECT * FROM client_events WHERE idkey=? ORDER BY id DESC LIMIT ?", (idkey, limit)
+    ).fetchall()
+
+
 def _name_search(col, search, like):
     """SQL condition + params for an order-independent name search: the whole string
     as a substring, OR every word appearing in the name in any order — so 'כהן עדן'
@@ -454,6 +473,17 @@ def init_db():
             created_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_insured_events ON insured_events(insured_id);
+        -- Unified activity log per client (keyed by normalised ת.ז), so the same
+        -- timeline shows on both the renewals card and the master file.
+        CREATE TABLE IF NOT EXISTS client_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            idkey TEXT NOT NULL,
+            kind TEXT DEFAULT 'note',
+            note TEXT,
+            created_by TEXT,
+            created_at TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_events ON client_events(idkey);
         CREATE TABLE IF NOT EXISTS deleted_customers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER,
@@ -642,6 +672,17 @@ def init_db():
         conn.execute("UPDATE customers SET brand='ווינר' WHERE brand NOT IN ('גאיה','ווינר','אופיר') AND brand IS NOT NULL AND brand != ''")
         conn.execute("INSERT INTO app_meta (key, value) VALUES ('fix_stray_brand_done', ?)",
                      (datetime.datetime.now().isoformat(),))
+    # One-time (guarded): fold the per-file insured_events into the unified client_events,
+    # keyed by the insured's normalised ת.ז (fallback: ins-<id> when there is no ת.ז).
+    if not conn.execute("SELECT 1 FROM app_meta WHERE key='events_unified'").fetchone():
+        for e in conn.execute(
+            "SELECT ev.kind, ev.note, ev.created_by, ev.created_at, ins.id_number, ins.id AS iid "
+            "FROM insured_events ev LEFT JOIN insureds ins ON ins.id=ev.insured_id").fetchall():
+            key = (e['id_number'] or '').lstrip('0') or ('ins-%s' % e['iid'])
+            conn.execute("INSERT INTO client_events (idkey, kind, note, created_by, created_at)"
+                         " VALUES (?,?,?,?,?)", (key, e['kind'], e['note'], e['created_by'], e['created_at']))
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('events_unified', ?)",
+                     (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),))
     # One-time (guarded): seed the activity log from existing insured notes, then clear
     # them — from now on the notes box is a scratchpad and saved notes become events.
     if not conn.execute("SELECT 1 FROM app_meta WHERE key='insured_notes_to_events'").fetchone():
@@ -971,6 +1012,7 @@ def customer_detail(cid):
     changes = conn.execute(
         "SELECT * FROM field_changes WHERE customer_id=? ORDER BY id DESC LIMIT 50", (cid,)
     ).fetchall()
+    events = get_events(conn, event_key(customer['id_number'] if customer else '', 'cust-%d' % cid)) if customer else []
     conn.close()
     if not customer:
         flash('לקוח לא נמצא', 'danger')
@@ -982,7 +1024,7 @@ def customer_detail(cid):
     return render_template('customer_detail.html', c=customer, month=month,
                            statuses=STATUSES, status_options=status_options_for(customer['brand']),
                            managers=managers, changes=changes, audit_labels=AUDIT_LABELS,
-                           wa_link=wa_link)
+                           events=events, wa_link=wa_link)
 
 
 def build_followup_wa_link(customer):
@@ -1012,12 +1054,15 @@ def update_customer(cid):
         _c.close()
         if not _row or not can_access_brand(_row['brand']):
             return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
-    allowed = ['status', 'agent_notes', 'contact_date', 'interested_in_products',
+    allowed = ['status', 'contact_date', 'interested_in_products',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
                 'whatsapp_source', 'brand', 'phone', 'email', 'address', 'name', 'id_number',
                 'call_date_1', 'call_status_1', 'call_by_1',
                 'call_date_2', 'call_status_2', 'call_by_2',
                 'call_date_3', 'call_status_3', 'call_by_3']
+    # הערות נציג is an activity log, not a stored field: a saved note becomes an event
+    # and the box clears. (Sharon's private notes stay a normal field.)
+    note_text = str(data.get('agent_notes') or '').strip()
     # Agents cannot update sharon fields or brand (manager/super-admin only)
     if session.get('role') not in ('superadmin', 'admin'):
         for f in ['sharon_notes', 'requests_to_sharon', 'brand']:
@@ -1051,24 +1096,23 @@ def update_customer(cid):
         if snap:
             before = {k: snap[k] for k in audit_keys}
 
+    crow = conn.execute("SELECT status, id_number FROM customers WHERE id=?", (cid,)).fetchone()
+    idkey = event_key(crow['id_number'] if crow else '', 'cust-%d' % cid)
+    status_changed = False
     sets = ', '.join(f"{k}=?" for k in data if k in allowed)
     vals = [data[k] for k in data if k in allowed]
-    if not sets:
-        conn.close()
-        return jsonify({'ok': False})
-    # Track who changed the status — only when it actually changes. Saving a note (the
-    # form posts the status too) must not reassign the customer to whoever pressed save,
-    # which would both inflate their count and steal credit from the real handler.
-    if 'status' in data:
-        cur = conn.execute("SELECT status FROM customers WHERE id=?", (cid,)).fetchone()
-        if not cur or (cur['status'] or '') != (data.get('status') or ''):
+    if sets:
+        # Track who changed the status — only when it actually changes. Saving a note (the
+        # form posts the status too) must not reassign the customer to whoever pressed save.
+        if 'status' in data and (not crow or (crow['status'] or '') != (data.get('status') or '')):
+            status_changed = True
             sets += ', status_changed_at=?'
             vals.append(datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))
             if agent:
                 sets += ', handled_by=?'
                 vals.append(agent)
-    vals.append(cid)
-    conn.execute(f"UPDATE customers SET {sets} WHERE id=?", vals)
+        vals.append(cid)
+        conn.execute(f"UPDATE customers SET {sets} WHERE id=?", vals)
     # Write the audit trail for any audited field that actually changed.
     if before:
         now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -1079,6 +1123,12 @@ def update_customer(cid):
                 conn.execute(
                     "INSERT INTO field_changes (customer_id, field, old_value, new_value, changed_by, changed_at)"
                     " VALUES (?,?,?,?,?,?)", (cid, k, old_v, new_v, agent, now_s))
+    # Activity log: status change + the rep's note become timeline events; the note box clears.
+    if status_changed:
+        log_event(conn, idkey, 'סטטוס עודכן ל: ' + (data.get('status') or '(ריק)'), agent, kind='status')
+    if note_text:
+        log_event(conn, idkey, note_text, agent)
+        conn.execute("UPDATE customers SET agent_notes='' WHERE id=?", (cid,))
     conn.commit()
     conn.close()
     return jsonify({'ok': True})
@@ -1490,9 +1540,7 @@ def insured_detail(iid):
     managers = conn.execute(
         "SELECT id, display_name, role FROM users WHERE role IN ('admin','superadmin') ORDER BY role DESC, display_name"
     ).fetchall()
-    events = conn.execute(
-        "SELECT * FROM insured_events WHERE insured_id=? ORDER BY id DESC LIMIT 100", (iid,)
-    ).fetchall()
+    events = get_events(conn, event_key(ins['id_number'], 'ins-%d' % iid))
     conn.close()
     wa_link = build_followup_wa_link_generic(ins['phone'], ins['brand'])
     return render_template('insured_detail.html', c=ins, docs=docs, wa_link=wa_link,
@@ -1550,6 +1598,8 @@ def insured_update(iid):
     # scratchpad that clears after each save).
     note_text = str(data.get('agent_notes') or '').strip()
     conn = get_db()
+    _ins = conn.execute("SELECT id_number FROM insureds WHERE id=?", (iid,)).fetchone()
+    idkey = event_key(_ins['id_number'] if _ins else '', 'ins-%d' % iid)
 
     # Snapshot audited identity/contact fields so every edit is logged old → new.
     audit_keys = [k for k in data if k in AUDITED_FIELDS and k in allowed]
@@ -1567,8 +1617,7 @@ def insured_update(iid):
         conn.execute("UPDATE insureds SET status=?, status_override=1, updated_at=? WHERE id=?",
                      (data['status'], datetime.datetime.now().isoformat(), iid))
         if not prev_st or (prev_st['status'] or '') != data['status']:
-            conn.execute("INSERT INTO insured_events (insured_id, kind, note, created_by, created_at)"
-                         " VALUES (?,?,?,?,?)", (iid, 'status', 'סטטוס עודכן ל: ' + data['status'], agent, now_s))
+            log_event(conn, idkey, 'סטטוס עודכן ל: ' + data['status'], agent, kind='status')
 
     # Auto-capture the rep who logged a call attempt (like the renewals page)
     if agent and any(f'call_date_{n}' in data for n in (1, 2, 3)):
@@ -1598,8 +1647,7 @@ def insured_update(iid):
                     (iid, k, old_v, new_v, agent, now_s))
     # A note becomes a timeline event; the file's notes box is left empty for the next one.
     if note_text:
-        conn.execute("INSERT INTO insured_events (insured_id, kind, note, created_by, created_at)"
-                     " VALUES (?,?,?,?,?)", (iid, 'note', note_text, agent, now_s))
+        log_event(conn, idkey, note_text, agent)
         conn.execute("UPDATE insureds SET agent_notes='' WHERE id=?", (iid,))
     conn.commit()
     conn.close()
