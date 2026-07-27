@@ -378,12 +378,14 @@ def promote_customers_to_insureds(conn, month_id, brands=None):
                    whatsapp_source=COALESCE(whatsapp_source, ?),
                    agent_notes=COALESCE(NULLIF(agent_notes,''), ?),
                    is_vip=MAX(COALESCE(is_vip,0), ?),
+                   is_midwife=MAX(COALESCE(is_midwife,0), ?),
                    handled_by=COALESCE(NULLIF(handled_by,''), ?),
                    policy_number=COALESCE(NULLIF(policy_number,''), ?),
                    status=?, updated_at=?
                    WHERE id=?""",
                 (cst['name'], cst['phone'], cst['brand'], cst['whatsapp_source'],
-                 cst['agent_notes'], cst['is_vip'] or 0, cst['handled_by'], cst['policy_number'],
+                 cst['agent_notes'], cst['is_vip'] or 0, cst['is_midwife'] or 0,
+                 cst['handled_by'], cst['policy_number'],
                  status, now, existing['id'])
             )
             if not insured_has_calls:
@@ -399,13 +401,13 @@ def promote_customers_to_insureds(conn, month_id, brands=None):
             wa_source = cst['whatsapp_source'] or ('ווינר' if cst['brand'] in ('ווינר', 'אופיר') else None)
             conn.execute(
                 """INSERT INTO insureds
-                   (id_number, name, phone, brand, whatsapp_source, agent_notes, is_vip, handled_by,
+                   (id_number, name, phone, brand, whatsapp_source, agent_notes, is_vip, is_midwife, handled_by,
                     policy_number, status,
                     call_date_1, call_status_1, call_by_1, call_date_2, call_status_2, call_by_2,
                     call_date_3, call_status_3, call_by_3, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (idn, cst['name'], cst['phone'], cst['brand'], wa_source, cst['agent_notes'],
-                 cst['is_vip'] or 0, cst['handled_by'], cst['policy_number'], status,
+                 cst['is_vip'] or 0, cst['is_midwife'] or 0, cst['handled_by'], cst['policy_number'], status,
                  cst['call_date_1'], cst['call_status_1'], cst['call_by_1'],
                  cst['call_date_2'], cst['call_status_2'], cst['call_by_2'],
                  cst['call_date_3'], cst['call_status_3'], cst['call_by_3'], now, now)
@@ -627,9 +629,12 @@ def init_db():
     existing = [r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()]
     for col, typ in [('form_card_number','TEXT'), ('form_card_expiry','TEXT'),
                      ('form_id_card_holder','TEXT'), ('handled_by','TEXT'), ('email','TEXT'),
-                     ('address','TEXT'), ('status_changed_at','TEXT')]:
+                     ('address','TEXT'), ('status_changed_at','TEXT'),
+                     ('is_midwife','INTEGER')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
+    if 'is_midwife' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
+        conn.execute("ALTER TABLE insureds ADD COLUMN is_midwife INTEGER")
     # Extra elementary/car fields (mainly from the Ofir/Meir book). All optional — shown
     # in the UI only when populated. Added to both customers and the insureds master.
     for tbl in ('customers', 'insureds'):
@@ -1055,7 +1060,7 @@ def update_customer(cid):
         if not _row or not can_access_brand(_row['brand']):
             return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
     allowed = ['status', 'contact_date', 'interested_in_products',
-                'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip',
+                'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip', 'is_midwife',
                 'whatsapp_source', 'brand', 'phone', 'email', 'address', 'name', 'id_number',
                 'call_date_1', 'call_status_1', 'call_by_1',
                 'call_date_2', 'call_status_2', 'call_by_2',
@@ -1588,7 +1593,7 @@ def insured_clarify(iid):
 @admin_required
 def insured_update(iid):
     data = request.json or {}
-    allowed = ['whatsapp_source', 'is_vip',
+    allowed = ['whatsapp_source', 'is_vip', 'is_midwife',
                'name', 'id_number', 'phone', 'email', 'address', 'policy_number',
                'call_date_1', 'call_status_1', 'call_by_1',
                'call_date_2', 'call_status_2', 'call_by_2',
@@ -1906,6 +1911,10 @@ def import_excel():
             month_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         else:
             month_id = month['id']
+            # Reloading with a new cycle name renames the active month, so the dashboard
+            # header reflects the current cycle (e.g. יולי → אוגוסט at month-end).
+            if month_name and month_name != month['name']:
+                conn.execute("UPDATE months SET name=? WHERE id=?", (month_name, month_id))
         # Re-load = archive this agency's current renewals into "all customers", then swap
         # in the fresh file. Only this source's brands are promoted/cleared.
         promoted = promote_customers_to_insureds(conn, month_id, brands=source_brands)
@@ -1929,6 +1938,31 @@ def import_excel():
         flash(f'שגיאה בייבוא: {e}', 'danger')
 
     return redirect(url_for('admin'))
+
+
+@app.route('/admin/sample-format')
+@login_required
+@superadmin_required
+def sample_format():
+    """A blank Gaia/Winner import template with the expected column headers, plus one
+    example row, so a new file can be pasted into the right shape."""
+    from io import BytesIO
+    headers = ['פוליסה', 'שם', 'ת.ז', 'טלפון', 'מותג', 'סטטוס', 'פרמיה', 'וואטסאפ',
+               'הערות שרון', 'בקשות משרון', 'תאריך התקשרות', 'הערות חידושים', 'מתעניין', 'מיילדות']
+    example = ['881400123456', 'ישראל ישראלי', '012345678', '0501234567', 'ווינר', '', '1200',
+               '', '', '', '', '', '', 'V']
+    wb = NewWorkbook()
+    ws = wb.active
+    ws.title = 'חידושים'
+    ws.append(headers)
+    ws.append(example)
+    for i, h in enumerate(headers, 1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = max(12, len(h) + 4)
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name='פורמט_טעינת_חידושים.xlsx',
+                     mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
 # Map raw sheet statuses to the system's canonical status values.
@@ -1984,12 +2018,15 @@ def _import_gaia_winner(conn, ws, month_id):
         if not name or name == 'None':
             continue
         row_brand = col('מותג', row)
+        # 'מיילדות' column: any mark (V / ✓ / כן / 1) flags a midwife (Winner only).
+        mw = col('מיילדות', row).strip().lower()
+        is_midwife = 1 if (mw and mw not in ('0', 'לא', 'no', 'false', 'none', '-', '—')) else 0
         conn.execute("""
             INSERT INTO customers
             (month_id, policy_number, name, id_number, phone, brand, status,
              premium_last_year, whatsapp_sent_date, sharon_notes, requests_to_sharon,
-             contact_date, agent_notes, interested_in_products, whatsapp_source)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             contact_date, agent_notes, interested_in_products, whatsapp_source, is_midwife)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             month_id, policy, name,
             normalize_id_number(col('ת.ז', row)), col('טלפון', row), row_brand,
@@ -1997,7 +2034,8 @@ def _import_gaia_winner(conn, ws, month_id):
             col('פרמיה', row), col('וואטסאפ', row), col('הערות שרון', row),
             col('בקשות משרון', row), col('תאריך התקשרות', row),
             col('הערות חידושים', row), col('מתעניין', row),
-            'ווינר' if row_brand == 'אופיר' else None
+            'ווינר' if row_brand == 'אופיר' else None,
+            is_midwife
         ))
         count += 1
     return count

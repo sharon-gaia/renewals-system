@@ -19,6 +19,13 @@
             title="{% if c.is_vip %}לקוח VIP — לחץ להסרה{% else %}סמן כ-VIP{% endif %}">
       <i class="bi bi-star{% if c.is_vip %}-fill{% endif %}"></i>{% if c.is_vip %} VIP{% endif %}
     </button>
+    {% if c.brand == 'ווינר' %}
+    <button id="midwife-btn" onclick="toggleMidwife()"
+            class="btn btn-sm {% if c.is_midwife %}btn-info{% else %}btn-outline-secondary{% endif %}"
+            title="{% if c.is_midwife %}מיילדת — לחץ להסרה{% else %}סמן כמיילדת{% endif %}">
+      <i class="bi bi-heart-pulse{% if c.is_midwife %}-fill{% endif %}"></i>{% if c.is_midwife %} מיילדות{% endif %}
+    </button>
+    {% endif %}
     {% if c.brand in ('ווינר', 'אופיר') %}
     <div class="btn-group btn-group-sm" role="group" title="איזה וואטסאפ הלקוח רגיל לקבל ממנו">
       <button type="button" onclick="setWhatsappSource('ווינר')"
@@ -302,6 +309,10 @@ function post(data, then) {
 function toggleVip() {
   const btn = document.getElementById('vip-btn');
   post({is_vip: btn.classList.contains('btn-warning') ? 0 : 1}, () => location.reload());
+}
+function toggleMidwife() {
+  const btn = document.getElementById('midwife-btn');
+  post({is_midwife: btn.classList.contains('btn-info') ? 0 : 1}, () => location.reload());
 }
 function setWhatsappSource(src) { post({whatsapp_source: src}, () => location.reload()); }
 

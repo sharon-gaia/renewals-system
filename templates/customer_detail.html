@@ -11,6 +11,14 @@
       <i class="bi bi-star{% if c.is_vip %}-fill{% endif %}"></i>
       {% if c.is_vip %} VIP{% endif %}
     </button>
+    {% if c.brand == 'ווינר' %}
+    <button id="midwife-btn" onclick="toggleMidwife()"
+            class="btn btn-sm {% if c.is_midwife %}btn-info{% else %}btn-outline-secondary{% endif %}"
+            title="{% if c.is_midwife %}מיילדת — לחץ להסרה{% else %}סמן כמיילדת{% endif %}">
+      <i class="bi bi-heart-pulse{% if c.is_midwife %}-fill{% endif %}"></i>
+      {% if c.is_midwife %} מיילדות{% endif %}
+    </button>
+    {% endif %}
     {% if c.brand in ('ווינר', 'אופיר') %}
     <div class="btn-group btn-group-sm" role="group" title="איזה וואטסאפ הלקוח רגיל לקבל ממנו הודעות">
       <button type="button" onclick="setWhatsappSource('ווינר')"
@@ -461,6 +469,15 @@ function toggleVip() {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({is_vip: isVip})
+  }).then(() => window.location.reload());
+}
+function toggleMidwife() {
+  const btn = document.getElementById('midwife-btn');
+  const on = btn.classList.contains('btn-info') ? 0 : 1;
+  fetch('/customer/{{ c.id }}/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({is_midwife: on})
   }).then(() => window.location.reload());
 }
 
