@@ -42,9 +42,9 @@
 </div>
 
 <div class="row g-3">
-  <!-- פרטי לקוח -->
+  <!-- פרטי לקוח (צד ימין — אינפורמטיבי) -->
   <div class="col-md-4">
-    <div class="card border-0 shadow-sm h-100">
+    <div class="card border-0 shadow-sm mb-3">
       <div class="card-header bg-light fw-bold">פרטים</div>
       <div class="card-body">
         <table class="table table-sm table-borderless mb-0">
@@ -148,9 +148,31 @@
         {% endif %}
       </div>
     </div>
+
+    {% if events %}
+    <!-- יומן אירועים — אינטראקציה עם הלקוח, צמוד לפרטים המרכזיים -->
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-light fw-bold"><i class="bi bi-clock-history me-1"></i>יומן אירועים</div>
+      <div class="card-body p-0">
+        <div style="max-height:360px; overflow-y:auto;">
+          {% for e in events %}
+          <div class="d-flex gap-2 px-3 py-2 {% if not loop.last %}border-bottom{% endif %} {% if loop.first %}bg-light{% endif %}">
+            <i class="bi {{ 'bi-arrow-repeat text-primary' if e.kind == 'status' else 'bi-chat-left-text text-secondary' }} mt-1"></i>
+            <div class="flex-grow-1">
+              <div style="white-space:pre-wrap; word-break:break-word">{{ e.note }}</div>
+              <div class="text-muted" style="font-size:0.75rem">
+                {{ e.created_by or '—' }} · {{ e.created_at }}{% if loop.first %} · <span class="text-success">אחרון</span>{% endif %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+    {% endif %}
   </div>
 
-  <!-- עדכון סטטוס -->
+  <!-- עדכון סטטוס (צד שמאל — תפעולי) -->
   <div class="col-md-8">
     {% if c.status == 'טופס התקבל' %}
     <!-- פרטי טופס שהתקבל — יושב מעל אזור הסטטוס, ממלא את החלק השמאלי-עליון -->
@@ -280,24 +302,6 @@
           <span class="badge bg-warning text-dark ms-2"><i class="bi bi-clock-history me-1"></i>הועבר לאדמין</span>
           {% endif %}
         </div>
-        {% if events %}
-        <div class="mt-3">
-          <div class="fw-semibold text-muted small mb-2"><i class="bi bi-clock-history me-1"></i>יומן אירועים</div>
-          <div class="border rounded" style="max-height:260px; overflow-y:auto;">
-            {% for e in events %}
-            <div class="d-flex gap-2 px-2 py-2 {% if not loop.last %}border-bottom{% endif %} {% if loop.first %}bg-light{% endif %}">
-              <i class="bi {{ 'bi-arrow-repeat text-primary' if e.kind == 'status' else 'bi-chat-left-text text-secondary' }} mt-1"></i>
-              <div class="flex-grow-1">
-                <div style="white-space:pre-wrap; word-break:break-word">{{ e.note }}</div>
-                <div class="text-muted" style="font-size:0.75rem">
-                  {{ e.created_by or '—' }} · {{ e.created_at }}{% if loop.first %} · <span class="text-success">אחרון</span>{% endif %}
-                </div>
-              </div>
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-        {% endif %}
       </div>
     </div>
 
