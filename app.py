@@ -1487,23 +1487,43 @@ def policy_records():
     """All customers (master) — one row per insured (by ID), built from the Harel
     policy PDFs. Best-effort extraction — some fields may need correction."""
     q = request.args.get('q', '').strip()
+    view = request.args.get('view', '').strip()   # agency filter (גאיה + ווינר / גאיה / ווינר / אופיר)
+    st = request.args.get('st', '').strip()        # status filter (פעיל / לא פעיל / בוטל)
     conn = get_db()
     recompute_insured_statuses(conn)  # keep פעיל/לא פעיל current on view
     bc, bp = brand_clause()  # managers see only their agencies; super-admins see all
+
+    where = ' FROM insureds WHERE 1=1' + bc
+    params = list(bp)
+    if view == 'גאיה + ווינר':
+        where += " AND brand IN ('גאיה','ווינר')"
+    elif view in ('גאיה', 'ווינר', 'אופיר'):
+        where += " AND brand=?"
+        params.append(view)
+    if st in ('פעיל', 'לא פעיל', 'בוטל'):
+        where += " AND status=?"
+        params.append(st)
     if q:
         like = f'%{q}%'
         name_cond, name_params = _name_search('name', q, like)
-        rows = conn.execute(
-            'SELECT * FROM insureds WHERE (' + name_cond +
-            ' OR id_number LIKE ? OR policy_number LIKE ? OR phone LIKE ? OR email LIKE ?)'
-            + bc + ' ORDER BY name',
-            name_params + [like, like, like, like] + bp
-        ).fetchall()
-    else:
-        rows = conn.execute('SELECT * FROM insureds WHERE 1=1' + bc + ' ORDER BY name LIMIT 500', bp).fetchall()
-    total = conn.execute('SELECT COUNT(*) FROM insureds WHERE 1=1' + bc, bp).fetchone()[0]
+        where += ' AND (' + name_cond + ' OR id_number LIKE ? OR policy_number LIKE ? OR phone LIKE ? OR email LIKE ?)'
+        params += name_params + [like, like, like, like]
+
+    rows = conn.execute('SELECT *' + where + ' ORDER BY name LIMIT 500', params).fetchall()
+    total = conn.execute('SELECT COUNT(*)' + where, params).fetchone()[0]
+
+    # Which agency tabs to show (only ones the user may access) + status tallies.
+    ab = allowed_brands()
+    accessible = ['גאיה', 'ווינר', 'אופיר'] if ab is None else [b for b in ('גאיה', 'ווינר', 'אופיר') if b in ab]
+    view_options = ([] if len([b for b in ('גאיה', 'ווינר') if b in accessible]) < 2 else ['גאיה + ווינר']) + accessible
+    scnt = {r['status'] or '—': r['n'] for r in conn.execute(
+        'SELECT status, COUNT(*) n FROM insureds' + ' WHERE 1=1' + bc +
+        (" AND brand IN ('גאיה','ווינר')" if view == 'גאיה + ווינר'
+         else (" AND brand='%s'" % view if view in ('גאיה', 'ווינר', 'אופיר') else '')) +
+        ' GROUP BY status', bp)}
     conn.close()
     return render_template('policy_records.html', items=rows, q=q, total=total,
+                           view=view, st=st, view_options=view_options, status_counts=scnt,
                            backfill=_backfill_state)
 
 def build_followup_wa_link_generic(phone, brand):
