@@ -150,10 +150,11 @@
     </div>
   </div>
 
-  {% if c.status == 'טופס התקבל' %}
-  <!-- פרטי טופס שהתקבל -->
-  <div class="col-12">
-    <div class="card border-0 shadow-sm border-start border-info border-4">
+  <!-- עדכון סטטוס -->
+  <div class="col-md-8">
+    {% if c.status == 'טופס התקבל' %}
+    <!-- פרטי טופס שהתקבל — יושב מעל אזור הסטטוס, ממלא את החלק השמאלי-עליון -->
+    <div class="card border-0 shadow-sm border-start border-info border-4 mb-3">
       <div class="card-header fw-bold" style="background:#cff4fc;">
         <i class="bi bi-envelope-check-fill text-info me-2"></i>
         טופס חידוש התקבל — {{ c.form_received_at or '' }}
@@ -201,11 +202,8 @@
         </div>
       </div>
     </div>
-  </div>
-  {% endif %}
+    {% endif %}
 
-  <!-- עדכון סטטוס -->
-  <div class="col-md-8">
     <div class="card border-0 shadow-sm mb-3">
       <div class="card-header bg-light fw-bold">סטטוס וטיפול</div>
       <div class="card-body">
