@@ -133,6 +133,38 @@
     </div>
   </div>
 
+  <!-- העשרת מיילים מ-SITE123 -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-dark text-white fw-bold">
+        <i class="bi bi-envelope-at me-2"></i>העשרת מיילים מ-SITE123
+      </div>
+      <div class="card-body">
+        <p class="small text-muted mb-3">
+          סורק את טפסי SITE123 מה-Gmail (שנה אחורה) ומעדכן מייל/טלפון של לקוחות לפי ת"ז —
+          הנתונים מהלקוח דורסים את הקיים. קריאה-בלבד מהמייל.
+        </p>
+        {% if site123 and site123.running %}
+        <span class="badge bg-warning text-dark"><span class="spinner-border spinner-border-sm me-1"></span>סריקה רצה (מ-{{ site123.started }})</span>
+        <div class="small text-muted mt-2">רענן את הדף לעדכון</div>
+        {% else %}
+        <form method="POST" action="/admin/backfill-site123"
+              onsubmit="return confirm('לסרוק את מיילי SITE123 שנה אחורה? רץ ברקע ומעדכן מיילים/טלפונים לפי ת\"ז.')">
+          <input type="hidden" name="days" value="400">
+          <button class="btn btn-primary btn-sm"><i class="bi bi-search me-1"></i>סרוק והעשר מיילים</button>
+        </form>
+        {% if site123 and site123.report %}
+        {% set r = site123.report %}
+        <div class="small mt-2">
+          {% if r.error %}<span class="text-danger">שגיאה: {{ r.error }}</span>
+          {% else %}<span class="text-success">✓ נסרקו {{ r.scanned }} · פוענחו {{ r.parsed_ok }} · לקוחות {{ r.unique }} · התאמות {{ r.matched }} · מיילים {{ r.emails_updated }} · טלפונים {{ r.phones_updated }}</span>{% endif %}
+        </div>
+        {% endif %}
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
   <!-- היסטוריית חודשים -->
   <div class="col-md-6">
     <div class="card border-0 shadow-sm">

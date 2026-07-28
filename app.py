@@ -2087,7 +2087,8 @@ def admin():
     return render_template('admin.html', users=users, months=months,
                            email_sync_enabled=EMAIL_CONFIG['enabled'],
                            agencies=BRANDS, user_brands=ub_map, managers=managers,
-                           backfill=_backfill_state, pending_imports=pending_imports)
+                           backfill=_backfill_state, pending_imports=pending_imports,
+                           site123=_site123_state)
 
 
 @app.route('/admin/users/<int:uid>/manager', methods=['POST'])
@@ -2834,6 +2835,131 @@ def campaign():
     conn.close()
     return render_template('campaign.html', counts=counts, month_name=month_name,
                            in_hours=within_business_hours())
+
+
+# ── SITE123 email enrichment: recover customer-submitted email/phone from Gmail ──
+_site123_state = {'running': False, 'done': None, 'report': None, 'started': None}
+_SITE123_EXCLUDE = ('gaia-ins.co.il', 'winner-ins.co.il', 'site123.com', 'do-not-reply')
+
+def parse_site123_email(text):
+    """Extract the customer-submitted fields from a SITE123 website-form email body."""
+    cem = ''
+    for l in text.split('\n'):
+        if 'דואר' in l or 'אלקטרוני' in l or 'מייל' in l:
+            m = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', l)
+            if m and not any(x in m.group(0) for x in _SITE123_EXCLUDE):
+                cem = m.group(0); break
+    if not cem:
+        for m in re.finditer(r'[\w.+-]+@[\w-]+\.[\w.]+', text):
+            if not any(x in m.group(0) for x in _SITE123_EXCLUDE):
+                cem = m.group(0); break
+    mid = re.search(r'ת\.?ז[^\d]{0,15}(\d{5,9})', text)
+    mph = re.search(r'טלפון[^\d]{0,15}(0\d[\d\- ]{6,})', text)
+    mnm = re.search(r'שם מלא\s*:?\s*(.+?)\s*(?:דואר|אלקטרוני|מייל|מספר|טלפון|ת\.?ז|:|$)', text)
+    return {'email': cem,
+            'id': (mid.group(1).zfill(9) if mid else ''),
+            'phone': (re.sub(r'\D', '', mph.group(1)) if mph else ''),
+            'name': (mnm.group(1).strip() if mnm else '')}
+
+def _site123_body(msg):
+    import html as _html
+    txt = ''
+    for p in msg.walk():
+        ct = p.get_content_type()
+        if ct in ('text/plain', 'text/html'):
+            try:
+                payload = p.get_payload(decode=True).decode(p.get_content_charset() or 'utf-8', 'replace')
+            except Exception:
+                continue
+            if ct == 'text/html':
+                payload = re.sub(r'<[^>]+>', ' ', payload)
+            txt += '\n' + _html.unescape(payload)
+    return txt
+
+def backfill_site123(days_back=400, limit=None):
+    """Scan Gmail for SITE123 form emails and enrich insureds/customers by ת"ז. The
+    customer-submitted contact details are authoritative: email is filled/overridden, and
+    phone is overridden on a mismatch. Read-only on Gmail; writes only to the DB."""
+    from email.utils import parsedate_to_datetime
+    import imaplib, email as _email, datetime as _dt
+    cfg = EMAIL_CONFIG
+    rep = {'scanned': 0, 'parsed_ok': 0, 'unique': 0, 'matched': 0,
+           'emails_updated': 0, 'phones_updated': 0, 'unmatched': 0}
+    if not cfg['username'] or not cfg['password']:
+        return rep
+    mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+    mail.login(cfg['username'], cfg['password'])
+    mail.select('"[Gmail]/All Mail"', readonly=True)
+    since = (_dt.datetime.now() - _dt.timedelta(days=days_back)).strftime('%d-%b-%Y')
+    typ, data = mail.search(None, f'(FROM "site123.com" SINCE {since})')
+    ids = data[0].split() if data and data[0] else []
+    if limit:
+        ids = ids[-limit:]
+    latest = {}
+    for num in ids:
+        rep['scanned'] += 1
+        try:
+            typ, d = mail.fetch(num, '(RFC822)')
+            msg = _email.message_from_bytes(d[0][1])
+            p = parse_site123_email(_site123_body(msg))
+        except Exception:
+            continue
+        if not (p['id'] and is_israeli_id(p['id']) and p['email'] and '@' in p['email']):
+            continue
+        rep['parsed_ok'] += 1
+        try:
+            dt = parsedate_to_datetime(msg.get('Date'))
+        except Exception:
+            dt = None
+        k = p['id']
+        if k not in latest or (dt and latest[k][0] and dt > latest[k][0]):
+            latest[k] = (dt, p['email'], p['phone'], p['name'])
+    mail.logout()
+    rep['unique'] = len(latest)
+    conn = get_db()
+    def norm(s):
+        return re.sub(r'\D', '', str(s or ''))
+    for idn, (dt, em, ph_, nm) in latest.items():
+        z = idn.lstrip('0')
+        matched = em_upd = ph_upd = False
+        for tbl in ('insureds', 'customers'):
+            for r in conn.execute(f"SELECT id, email, phone FROM {tbl} WHERE ltrim(COALESCE(id_number,''),'0')=?", (z,)).fetchall():
+                matched = True
+                sets, vals = [], []
+                if em and (r['email'] or '').strip().lower() != em.lower():
+                    sets.append('email=?'); vals.append(em); em_upd = True
+                if ph_ and norm(r['phone'])[-9:] != norm(ph_)[-9:]:
+                    sets.append('phone=?'); vals.append(ph_); ph_upd = True
+                if sets:
+                    vals.append(r['id'])
+                    conn.execute(f"UPDATE {tbl} SET {','.join(sets)} WHERE id=?", vals)
+        rep['matched' if matched else 'unmatched'] += 1
+        rep['emails_updated'] += 1 if em_upd else 0
+        rep['phones_updated'] += 1 if ph_upd else 0
+    conn.commit()
+    conn.close()
+    return rep
+
+def _run_site123_backfill(days_back):
+    _site123_state.update(running=True, started=datetime.datetime.now().strftime('%H:%M'), report=None)
+    try:
+        _site123_state['report'] = backfill_site123(days_back)
+    except Exception as e:
+        _site123_state['report'] = {'error': str(e)}
+    finally:
+        _site123_state.update(running=False, done=datetime.datetime.now().strftime('%H:%M'))
+
+@app.route('/admin/backfill-site123', methods=['POST'])
+@login_required
+@superadmin_required
+def admin_backfill_site123():
+    if _site123_state['running']:
+        flash('סריקת SITE123 כבר רצה', 'warning')
+        return redirect(url_for('admin'))
+    days = int(request.form.get('days', 400))
+    threading.Thread(target=_run_site123_backfill, args=(days,), daemon=True).start()
+    flash('סריקת SITE123 החלה ברקע — רענן לעדכון', 'info')
+    return redirect(url_for('admin'))
 
 
 @app.route('/api/renewal', methods=['POST'])
