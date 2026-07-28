@@ -2757,25 +2757,42 @@ def render_renewal_email(cust, month_name):
             f'{CAMPAIGN_CROSS_SELL}</div>')
 
 def send_campaign_email(to_email, subject, html_body):
-    """Send one email from the office Gmail (SPF/DKIM handled by Google Workspace)."""
-    import smtplib, ssl
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText
+    """Send one renewal email. Prefers Resend (HTTPS API — works on Railway, which blocks
+    outbound SMTP); falls back to Gmail SMTP (works when run locally). Never raises."""
     user, pw = EMAIL_CONFIG['username'], EMAIL_CONFIG['password']
-    if not user or not pw:
+    key = os.environ.get('RESEND_API_KEY', '')
+    try:
+        if key:
+            import requests
+            frm = os.environ.get('RESEND_FROM', user)  # a verified-domain address once set up
+            r = requests.post('https://api.resend.com/emails',
+                headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
+                json={'from': frm, 'to': [to_email], 'subject': subject, 'html': html_body},
+                timeout=20)
+            if r.status_code >= 300:
+                print(f'[campaign] resend error {r.status_code}: {r.text[:200]}')
+            return r.status_code < 300
+        # Fallback: Gmail SMTP (blocked on Railway; fine when the sender runs on the laptop).
+        import smtplib, ssl
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        if not user or not pw:
+            return False
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = user
+        msg['To'] = to_email
+        msg.attach(MIMEText(re.sub('<[^>]+>', '', html_body).strip(), 'plain', 'utf-8'))
+        msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP('smtp.gmail.com', 587, timeout=25) as s:
+            s.starttls(context=ctx)
+            s.login(user, pw)
+            s.sendmail(user, [to_email], msg.as_string())
+        return True
+    except Exception as e:
+        print(f'[campaign] email send failed: {e}')
         return False
-    msg = MIMEMultipart('alternative')
-    msg['Subject'] = subject
-    msg['From'] = user
-    msg['To'] = to_email
-    msg.attach(MIMEText(re.sub('<[^>]+>', '', html_body).strip(), 'plain', 'utf-8'))
-    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP('smtp.gmail.com', 587, timeout=25) as s:
-        s.starttls(context=ctx)
-        s.login(user, pw)
-        s.sendmail(user, [to_email], msg.as_string())
-    return True
 
 def within_business_hours(now=None):
     """True only Sun–Thu 08:00–16:00 (no Fri/Sat sends)."""
