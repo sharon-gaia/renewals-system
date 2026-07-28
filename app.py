@@ -819,6 +819,12 @@ def init_db():
             conn.execute(f"ALTER TABLE {tbl} ADD COLUMN alt_phone TEXT")
         if 'import_source' not in cols:
             conn.execute(f"ALTER TABLE {tbl} ADD COLUMN import_source TEXT")
+    # Renewal-campaign tracking (email touch date + do-not-contact opt-out).
+    _ccols = [r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()]
+    if 'email_sent_date' not in _ccols:
+        conn.execute("ALTER TABLE customers ADD COLUMN email_sent_date TEXT")
+    if 'do_not_contact' not in _ccols:
+        conn.execute("ALTER TABLE customers ADD COLUMN do_not_contact INTEGER DEFAULT 0")
     conn.commit()
 
     # Default admin
@@ -2623,6 +2629,211 @@ def export_wasender():
     filename = f"wasender_{mode_label}_{month['name'].replace(' ','_')}_{today}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+# ── Renewal campaign: eligibility, pricing, email rendering + sending, logging ──
+GAIA_RENEW = 'https://www.gaia-ins.co.il/renew'
+WINNER_RENEW = 'https://www.winner-ins.co.il/renew'
+MIDWIFE_RENEW = 'https://www.winner-ins.co.il/renew/midwife'
+HEB_MONTHS = ['', 'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי',
+              'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר']
+
+# Statuses that mean "no need to send anymore": renewed / not-renewing / handled manually.
+CAMPAIGN_STOP_STATUSES = {
+    'חודש', 'טופס התקבל', 'הלקוח אישר', 'ביקשו לחדש לבד',
+    'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'פרוייקט הסתיים',
+    'דורש בירור', 'ממתין לאישור מיילדות', 'המשך טיפול בוואטסאפ', 'ממתין לחידוש',
+}
+
+CAMPAIGN_CROSS_SELL = """
+  <hr style="border:none;border-top:1px solid #eee;margin:22px 0">
+  <p>אגב, יש לי עוד משהו קטן שכדאי שתכירו.<br>
+  מי שמכיר אותי יודע שהייתי מטפל בעצמי — עד שהידיים שלי פשוט הפסיקו לעבוד. באותו רגע גיליתי כמה אני חשוף כלכלית, ומשם נולד <strong>"חוסן למחר"</strong> — כיסוי ייעודי שבנינו עם הראל בדיוק בשביל מטפלים כמוכם.</p>
+  <p><strong>מה מיוחד בו:</strong></p>
+  <ul>
+    <li>במקרה של אובדן כושר עבודה למקצוע שלכם (לא עיסוק כללי), אחרי חצי שנה מקבלים פיצוי חד-פעמי</li>
+    <li>בלי צורך להוכיח כמה הרווחתם — קובעים מראש את סכום הביטוח</li>
+    <li>נמכר כתוספת לביטוח חיים</li>
+    <li>החל מ-9 ₪ לחודש בלבד לכיסוי חוסן למחר</li>
+  </ul>
+  <p>זה נספח קטן, אבל יכול לעשות הבדל גדול ביום שהכי תצטרכו אותו. אם תרצו לצרף אותו לחידוש — רק תגידו לנו ונחבר אתכם למנהל התחום.</p>
+  <p>המשך יום נפלא,</p>
+  <p style="color:#555">--<br>שרון דר<br>מנהל מכירות אחריות מקצועית<br>קבוצת אופיר — אופיר, גאיה, ווינר<br>טלפון 073-3915555</p>"""
+
+def _premium_num(v):
+    d = re.sub(r'[^\d.]', '', str(v or ''))
+    return float(d) if d else 0
+
+def renewal_amount(is_midwife, premium):
+    """Tier price for the email. None → generic 'like last year' (empty/0, or a premium
+    more than 100 above the tier, which is a manual-review exception)."""
+    p = _premium_num(premium)
+    tier = (1600 if 1500 <= p <= 1700 else 1200) if is_midwife else 750
+    if p <= 0 or p > tier + 100:
+        return None
+    return tier
+
+def renewal_link(brand, is_midwife):
+    if is_midwife:
+        return MIDWIFE_RENEW, 'חידוש מיילדות'
+    if brand == 'גאיה':
+        return GAIA_RENEW, 'חידוש גאיה'
+    return WINNER_RENEW, 'חידוש ווינר'
+
+def _campaign_email_for(conn, cust, _ins_email=None):
+    """Resolve a customer's email — renewal files carry no email, so fall back to the
+    insureds master by ת"ז."""
+    ce = str(cust['email'] or '').strip() if 'email' in cust.keys() else ''
+    if ce and '@' in ce:
+        return ce
+    idn = re.sub(r'\D', '', str(cust['id_number'] or '')).lstrip('0')
+    if not idn:
+        return ''
+    if _ins_email is not None:
+        return _ins_email.get(idn, '')
+    r = conn.execute("SELECT email FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                     "AND COALESCE(email,'') LIKE '%@%' LIMIT 1", (idn,)).fetchone()
+    return (r['email'].strip() if r and r['email'] else '')
+
+def campaign_eligibility(conn, month_id):
+    """Bucket the active month's customers. Auto-send targets Gaia/Winner, non-midwife,
+    non-VIP, no stop-status. Midwives wait for manual approval; VIPs/stop-statuses excluded."""
+    ins_email = {re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0'): (r['email'] or '').strip()
+                 for r in conn.execute("SELECT id_number, email FROM insureds")}
+    rows = conn.execute("SELECT * FROM customers WHERE month_id=?", (month_id,)).fetchall()
+    b = {'email': [], 'whatsapp': [], 'midwife_pending': [], 'vip': [],
+         'status_excluded': [], 'no_contact': [], 'ofir': []}
+    for r in rows:
+        if r['brand'] not in ('גאיה', 'ווינר'):
+            b['ofir'].append(r); continue
+        if r['is_midwife']:
+            b['midwife_pending'].append(r); continue
+        if r['is_vip']:
+            b['vip'].append(r); continue
+        if (r['status'] or '') in CAMPAIGN_STOP_STATUSES or \
+           ('do_not_contact' in r.keys() and r['do_not_contact']):
+            b['status_excluded'].append(r); continue
+        phone = re.sub(r'\D', '', str(r['phone'] or ''))
+        email = _campaign_email_for(conn, r, ins_email)
+        touched = False
+        if email and '@' in email:
+            b['email'].append((r, email)); touched = True
+        if phone:
+            b['whatsapp'].append(r); touched = True
+        if not touched:
+            b['no_contact'].append(r)
+    return b
+
+def _price_line(is_midwife, premium):
+    amt = renewal_amount(is_midwife, premium)
+    if amt is None:
+        return 'המחיר נשאר כמו שנה שעברה.'
+    return f'המחיר לשנה הקרובה: <strong>{amt:,} ₪</strong> — ללא שינוי מהשנה שעברה.'
+
+def render_renewal_email(cust, month_name):
+    import html as _html
+    link, label = renewal_link(cust['brand'], cust['is_midwife'])
+    name = _html.escape(str(cust['name'] or ''))
+    return (f'<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.7;color:#222;'
+            f'max-width:640px;direction:rtl;text-align:right">'
+            f'<p>שלום, {name}</p>'
+            f'<p>הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.</p>'
+            f'<p>{_price_line(cust["is_midwife"], cust["premium_last_year"])}</p>'
+            f'<p>לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו), יש להיכנס לקישור:</p>'
+            f'<p><a href="{link}" style="background:#0d6efd;color:#fff;padding:10px 22px;'
+            f'border-radius:6px;text-decoration:none;display:inline-block">{label}</a></p>'
+            f'{CAMPAIGN_CROSS_SELL}</div>')
+
+def send_campaign_email(to_email, subject, html_body):
+    """Send one email from the office Gmail (SPF/DKIM handled by Google Workspace)."""
+    import smtplib, ssl
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    user, pw = EMAIL_CONFIG['username'], EMAIL_CONFIG['password']
+    if not user or not pw:
+        return False
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = user
+    msg['To'] = to_email
+    msg.attach(MIMEText(re.sub('<[^>]+>', '', html_body).strip(), 'plain', 'utf-8'))
+    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP('smtp.gmail.com', 587, timeout=25) as s:
+        s.starttls(context=ctx)
+        s.login(user, pw)
+        s.sendmail(user, [to_email], msg.as_string())
+    return True
+
+def within_business_hours(now=None):
+    """True only Sun–Thu 08:00–16:00 (no Fri/Sat sends)."""
+    now = now or datetime.datetime.now()
+    if now.weekday() in (4, 5):  # Fri=4, Sat=5
+        return False
+    return 8 <= now.hour < 16
+
+def _run_email_blast(app_ctx_month_id, month_name, recipients, who):
+    """Background email send: one-by-one with a short delay, each logged to the timeline."""
+    sent = 0
+    for cust, email in recipients:
+        try:
+            html_body = render_renewal_email(cust, month_name)
+            if send_campaign_email(email, 'חידוש הפוליסה המקצועית שלך', html_body):
+                conn = get_db()
+                conn.execute("UPDATE customers SET email_sent_date=? WHERE id=?",
+                             (datetime.date.today().isoformat(), cust['id']))
+                idkey = event_key(cust['id_number'], 'cust-%d' % cust['id'])
+                log_event(conn, idkey, f'נשלח מייל חידוש ל-{email}', who, kind='email_sent')
+                conn.commit(); conn.close()
+                sent += 1
+            time.sleep(0.7)
+        except Exception as e:
+            print(f'[campaign] email failed for {email}: {e}')
+    print(f'[campaign] email blast done — {sent}/{len(recipients)} sent')
+
+@app.route('/admin/campaign', methods=['GET', 'POST'])
+@login_required
+@superadmin_required
+def campaign():
+    month = active_month()
+    if not month:
+        flash('אין חודש פעיל', 'danger')
+        return redirect(url_for('admin'))
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    month_name = HEB_MONTHS[datetime.datetime.now().month]
+    if request.method == 'POST':
+        action = request.form.get('action')
+        who = session.get('display_name') or session.get('username', '')
+        if action == 'test':
+            # render for the first eligible recipient (or a sample) and send to the office inbox
+            sample = buckets['email'][0][0] if buckets['email'] else None
+            demo = sample or {'name': 'בדיקה', 'brand': 'גאיה', 'is_midwife': 0,
+                              'premium_last_year': 750, 'id_number': '', 'email': ''}
+            body = render_renewal_email(demo, month_name)
+            ok = send_campaign_email(EMAIL_CONFIG['username'], 'בדיקה — מייל חידוש', body)
+            conn.close()
+            flash('נשלחה בדיקה לתיבת המשרד' if ok else 'שליחת הבדיקה נכשלה', 'success' if ok else 'danger')
+            return redirect(url_for('campaign'))
+        if action == 'email_send':
+            # already-sent-today are skipped (multi-touch safety)
+            today = datetime.date.today().isoformat()
+            recips = [(c, e) for (c, e) in buckets['email']
+                      if (c['email_sent_date'] or '') != today]
+            conn.close()
+            if not within_business_hours() and request.form.get('force') != '1':
+                flash('מחוץ לשעות הפעילות (א׳–ה׳ 8:00–16:00). לשליחה בכל זאת סמן "כפה".', 'warning')
+                return redirect(url_for('campaign'))
+            threading.Thread(target=_run_email_blast,
+                             args=(month['id'], month_name, recips, who), daemon=True).start()
+            flash(f'השליחה החלה ברקע — {len(recips)} מיילים. כל שליחה מתועדת ביומן.', 'info')
+            return redirect(url_for('campaign'))
+        conn.close()
+        return redirect(url_for('campaign'))
+    counts = {k: len(v) for k, v in buckets.items()}
+    conn.close()
+    return render_template('campaign.html', counts=counts, month_name=month_name,
+                           in_hours=within_business_hours())
 
 
 @app.route('/api/renewal', methods=['POST'])
