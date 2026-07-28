@@ -1,0 +1,45 @@
+{% extends 'base.html' %}
+{% block title %} — הגדרת אימות דו-שלבי{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-7">
+    <div class="card border-0 shadow-sm mt-3">
+      <div class="card-header bg-primary text-white fw-bold"><i class="bi bi-shield-lock me-2"></i>אימות דו-שלבי (2FA)</div>
+      <div class="card-body">
+        <p>סטטוס נוכחי:
+          {% if current == 'app' %}<span class="badge bg-success">מופעל — אפליקציה</span>
+          {% elif current == 'email' %}<span class="badge bg-success">מופעל — מייל</span>
+          {% else %}<span class="badge bg-secondary">כבוי</span>{% endif %}
+          <span class="text-muted small ms-2">אימות מחדש נדרש כל 6 שעות.</span>
+        </p>
+        <hr>
+        <h6 class="fw-bold"><i class="bi bi-phone me-1"></i>אפליקציה (מומלץ)</h6>
+        <p class="small text-muted mb-2">סרוק את ה-QR עם Google Authenticator (או Microsoft Authenticator / Authy), ואז הזן קוד לאישור.</p>
+        <div class="text-center mb-2"><img src="{{ qr }}" alt="QR" style="width:180px;height:180px"></div>
+        <div class="small text-muted text-center mb-3">מפתח ידני: <code>{{ secret }}</code></div>
+        <form method="POST" class="d-flex gap-2 justify-content-center">
+          <input type="hidden" name="method" value="app">
+          <input type="text" name="code" inputmode="numeric" maxlength="6" class="form-control" style="max-width:150px" placeholder="קוד מהאפליקציה" required>
+          <button class="btn btn-success">הפעל אפליקציה</button>
+        </form>
+        <hr>
+        <h6 class="fw-bold"><i class="bi bi-envelope me-1"></i>קוד למייל</h6>
+        <p class="small text-muted mb-2">
+          {% if has_email %}קוד יישלח למייל שלך בכל כניסה.{% else %}<span class="text-danger">לא הוגדר מייל — הוסף מייל במסך הניהול קודם.</span>{% endif %}
+        </p>
+        <form method="POST">
+          <input type="hidden" name="method" value="email">
+          <button class="btn btn-outline-primary" {% if not has_email %}disabled{% endif %}>הפעל אימות במייל</button>
+        </form>
+        {% if current != 'none' %}
+        <hr>
+        <form method="POST" onsubmit="return confirm('לכבות אימות דו-שלבי?')">
+          <input type="hidden" name="method" value="disable">
+          <button class="btn btn-outline-danger btn-sm">כבה 2FA</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

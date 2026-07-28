@@ -91,10 +91,11 @@
             {% if c.form_card_number %}
             <div class="col-12">
               <div class="text-muted" style="font-size:0.75rem;">כרטיס אשראי</div>
-              <div class="small fw-bold">
+              <div class="small fw-bold card-mask" data-type="customer" data-id="{{ c.id }}">
                 <i class="bi bi-credit-card me-1"></i>
-                {{ c.form_card_number }} | תוקף: {{ c.form_card_expiry }}
+                <span class="card-val">{{ c.form_card_number | mask_card }}</span> | תוקף: {{ c.form_card_expiry }}
                 {% if c.form_id_card_holder %} | ת.ז בעל הכרטיס: {{ c.form_id_card_holder }}{% endif %}
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="revealCard(this)" title="הצג אשראי מלא"><i class="bi bi-eye"></i></button>
               </div>
             </div>
             {% endif %}

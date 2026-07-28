@@ -22,6 +22,8 @@ from email.header import decode_header
 import threading
 import time
 import re
+import secrets
+import pyotp
 import pdfplumber
 from bidi.algorithm import get_display
 from dotenv import load_dotenv
@@ -42,6 +44,13 @@ EMAIL_CONFIG = {
 
 app = Flask(__name__)
 app.secret_key = os.environ['FLASK_SECRET_KEY']
+# Session-cookie hardening. Secure defaults on (Railway serves HTTPS); set COOKIE_INSECURE=1
+# for local http development so the login cookie still works there.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=(os.environ.get('COOKIE_INSECURE') != '1'),
+)
 
 from health_check import health_bp
 app.register_blueprint(health_bp)
@@ -72,6 +81,15 @@ def format_date(value):
                 result += ' ' + parts[1][:5]
             return result
     return s
+
+@app.template_filter('mask_card')
+def mask_card(value):
+    """Show only the last 4 digits of a card number (•••• 1234). Full number is revealed
+    on demand via /reveal-card, which logs who revealed it."""
+    d = re.sub(r'\D', '', str(value or ''))
+    if not d:
+        return ''
+    return '•••• ' + d[-4:] if len(d) >= 4 else '••••'
 
 STATUSES = ['', 'טופס התקבל', 'חודש', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
@@ -452,11 +470,29 @@ def promote_customers_to_insureds(conn, month_id, brands=None):
 # ── DB helpers ──────────────────────────────────────────────
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    # WAL + a busy timeout let the web requests and the background email scan write
+    # concurrently without hitting 'database is locked'.
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass
     return conn
 
 def init_db():
+    # One pre-migration safety backup per day, on the volume — a rollback point taken
+    # BEFORE any schema change runs. Cheap insurance; never overwrites an existing one.
+    try:
+        _bdir = os.path.dirname(DB_PATH) or '.'
+        _bpath = os.path.join(_bdir, 'renewals_backup_%s.db' % datetime.date.today().isoformat())
+        if os.path.exists(DB_PATH) and not os.path.exists(_bpath):
+            import shutil as _sh
+            _sh.copy2(DB_PATH, _bpath)
+            print('[init] pre-migration backup -> %s' % _bpath)
+    except Exception as _e:
+        print('[init] backup failed: %s' % _e)
     conn = get_db()
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS users (
@@ -772,6 +808,36 @@ def init_db():
     if short_ids:
         conn.commit()
 
+    # Add email + 2FA columns to users if missing (email code / TOTP app).
+    existing_user_cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+    for _col, _ddl in (('email', 'TEXT'), ('totp_secret', 'TEXT'), ('twofa_method', "TEXT DEFAULT 'none'")):
+        if _col not in existing_user_cols:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {_col} {_ddl}")
+    conn.commit()
+
+    # Two-phase month load: staged uploads awaiting an explicit commit ("שינוי חידוש לחודש חדש").
+    conn.execute("""CREATE TABLE IF NOT EXISTS pending_imports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source TEXT, month_name TEXT, filename TEXT,
+        file_blob BLOB, report_json TEXT,
+        uploaded_at TEXT, uploaded_by TEXT,
+        status TEXT DEFAULT 'pending'
+    )""")
+    # 'טלפון אחר' (phone from the renewal file when it differs) + import provenance.
+    for tbl in ('customers', 'insureds'):
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({tbl})").fetchall()]
+        if 'alt_phone' not in cols:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN alt_phone TEXT")
+        if 'import_source' not in cols:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN import_source TEXT")
+    # Renewal-campaign tracking (email touch date + do-not-contact opt-out).
+    _ccols = [r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()]
+    if 'email_sent_date' not in _ccols:
+        conn.execute("ALTER TABLE customers ADD COLUMN email_sent_date TEXT")
+    if 'do_not_contact' not in _ccols:
+        conn.execute("ALTER TABLE customers ADD COLUMN do_not_contact INTEGER DEFAULT 0")
+    conn.commit()
+
     # Default admin
     if not conn.execute("SELECT id FROM users WHERE username='sharon'").fetchone():
         conn.execute(
@@ -863,15 +929,12 @@ def login():
         user = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
         conn.close()
         if user and check_password_hash(user['password_hash'], password):
-            session['user_id'] = user['id']
-            session['username'] = user['username']
-            session['display_name'] = user['display_name']
-            session['role'] = user['role']
-            if user['role'] != 'superadmin':
-                conn = get_db()
-                brows = conn.execute("SELECT brand FROM user_brands WHERE user_id=?", (user['id'],)).fetchall()
-                conn.close()
-                session['brands'] = [b['brand'] for b in brows]
+            if (user['twofa_method'] or 'none') != 'none':
+                # Password OK, but 2FA is enabled — hold login until a code is verified.
+                session.clear()
+                session['pre2fa_uid'] = user['id']
+                return redirect(url_for('twofa_verify'))
+            _finish_login(user)
             return redirect(url_for('index'))
         flash('שם משתמש או סיסמה שגויים', 'danger')
     return render_template('login.html')
@@ -880,6 +943,149 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for('login'))
+
+# ── Two-factor authentication (TOTP app / email code · re-verify every 6h) ──
+TWOFA_TTL = 6 * 3600  # seconds between required re-verifications
+
+def _finish_login(user_row):
+    """Complete a login once password (and any 2FA) passed."""
+    session['user_id'] = user_row['id']
+    session['username'] = user_row['username']
+    session['display_name'] = user_row['display_name']
+    session['role'] = user_row['role']
+    session['verified_at'] = time.time()
+    if user_row['role'] != 'superadmin':
+        conn = get_db()
+        brows = conn.execute("SELECT brand FROM user_brands WHERE user_id=?", (user_row['id'],)).fetchall()
+        conn.close()
+        session['brands'] = [b['brand'] for b in brows]
+
+def _send_email_code(to_email, code):
+    """Send a one-time login code via Resend. No-op (False) if unconfigured."""
+    key = os.environ.get('RESEND_API_KEY', '')
+    if not key or not to_email:
+        return False
+    try:
+        import requests
+        r = requests.post('https://api.resend.com/emails',
+            headers={'Authorization': f'Bearer {key}', 'Content-Type': 'application/json'},
+            json={'from': os.environ.get('RESEND_FROM', 'onboarding@resend.dev'),
+                  'to': [to_email], 'subject': 'קוד אימות — מערכת חידושים',
+                  'text': f'קוד האימות שלך: {code}\nהקוד תקף ל-10 דקות.'}, timeout=10)
+        return r.status_code < 300
+    except Exception as e:
+        print(f'[2fa] email send failed: {e}')
+        return False
+
+@app.route('/2fa/verify', methods=['GET', 'POST'])
+def twofa_verify():
+    """Verify a 2FA code — used both at first login (pre2fa_uid) and for the 6-hour re-auth."""
+    uid = session.get('pre2fa_uid') or session.get('user_id')
+    if not uid:
+        return redirect(url_for('login'))
+    conn = get_db()
+    u = conn.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    conn.close()
+    if not u:
+        session.clear()
+        return redirect(url_for('login'))
+    method = u['twofa_method'] or 'none'
+    if method == 'none':
+        if session.pop('pre2fa_uid', None):
+            _finish_login(u)
+        return redirect(url_for('index'))
+    if request.method == 'GET' and method == 'email':
+        code = f'{secrets.randbelow(1000000):06d}'
+        session['email_code'] = generate_password_hash(code)
+        session['email_code_exp'] = time.time() + 600
+        if not _send_email_code(u['email'], code):
+            flash('שליחת קוד למייל נכשלה — ודא ש-RESEND_API_KEY מוגדר ושיש מייל לנציג', 'warning')
+    if request.method == 'POST':
+        entered = re.sub(r'\D', '', request.form.get('code', ''))
+        ok = False
+        if method == 'app' and u['totp_secret']:
+            ok = pyotp.TOTP(u['totp_secret']).verify(entered, valid_window=1)
+        elif method == 'email':
+            h, exp = session.get('email_code'), session.get('email_code_exp', 0)
+            ok = bool(h and entered and time.time() < exp and check_password_hash(h, entered))
+        if ok:
+            session.pop('email_code', None)
+            session.pop('email_code_exp', None)
+            if session.pop('pre2fa_uid', None):
+                _finish_login(u)
+            else:
+                session['verified_at'] = time.time()
+            return redirect(url_for('index'))
+        flash('קוד שגוי או שפג תוקפו', 'danger')
+    return render_template('twofa_verify.html', method=method, email=(u['email'] or ''))
+
+@app.route('/2fa/setup', methods=['GET', 'POST'])
+@login_required
+def twofa_setup():
+    """Let a user enable/disable 2FA for their own account (TOTP app or email code)."""
+    conn = get_db()
+    u = conn.execute("SELECT * FROM users WHERE id=?", (session['user_id'],)).fetchone()
+    if request.method == 'POST':
+        method = request.form.get('method')
+        if method == 'app':
+            secret = session.get('setup_secret')
+            code = re.sub(r'\D', '', request.form.get('code', ''))
+            if secret and pyotp.TOTP(secret).verify(code, valid_window=1):
+                conn.execute("UPDATE users SET totp_secret=?, twofa_method='app' WHERE id=?", (secret, u['id']))
+                conn.commit(); conn.close()
+                session.pop('setup_secret', None)
+                session['verified_at'] = time.time()
+                flash('אימות דו-שלבי (אפליקציה) הופעל ✓', 'success')
+                return redirect(url_for('index'))
+            conn.close()
+            flash('קוד שגוי — סרוק שוב ונסה', 'danger')
+            return redirect(url_for('twofa_setup'))
+        if method == 'email':
+            if not u['email']:
+                conn.close()
+                flash('אין מייל מוגדר לנציג — הוסף מייל במסך הניהול קודם', 'warning')
+                return redirect(url_for('twofa_setup'))
+            conn.execute("UPDATE users SET twofa_method='email' WHERE id=?", (u['id'],))
+            conn.commit(); conn.close()
+            session['verified_at'] = time.time()
+            flash('אימות דו-שלבי (מייל) הופעל ✓', 'success')
+            return redirect(url_for('index'))
+        if method == 'disable':
+            conn.execute("UPDATE users SET twofa_method='none', totp_secret=NULL WHERE id=?", (u['id'],))
+            conn.commit(); conn.close()
+            flash('אימות דו-שלבי כובה', 'info')
+            return redirect(url_for('twofa_setup'))
+        conn.close()
+        return redirect(url_for('twofa_setup'))
+    conn.close()
+    # GET — mint a candidate secret + QR for the app method
+    secret = pyotp.random_base32()
+    session['setup_secret'] = secret
+    uri = pyotp.totp.TOTP(secret).provisioning_uri(name=u['username'], issuer_name='חידושים')
+    import io as _io, base64, qrcode
+    buf = _io.BytesIO(); qrcode.make(uri).save(buf, format='PNG')
+    qr = 'data:image/png;base64,' + base64.b64encode(buf.getvalue()).decode()
+    return render_template('twofa_setup.html', current=(u['twofa_method'] or 'none'),
+                           secret=secret, qr=qr, has_email=bool(u['email']))
+
+@app.before_request
+def _enforce_2fa():
+    """Hold mid-login users at the verify page, and force re-verify every 6h for users
+    who enabled 2FA. Users without 2FA are unaffected."""
+    ep = request.endpoint or ''
+    if session.get('pre2fa_uid'):
+        if ep not in ('twofa_verify', 'login', 'logout', 'static'):
+            return redirect(url_for('twofa_verify'))
+        return
+    uid = session.get('user_id')
+    if not uid or ep in ('twofa_verify', 'twofa_setup', 'login', 'logout', 'static') or ep.startswith('health'):
+        return
+    conn = get_db()
+    row = conn.execute("SELECT twofa_method FROM users WHERE id=?", (uid,)).fetchone()
+    conn.close()
+    if row and (row['twofa_method'] or 'none') != 'none' and \
+            time.time() - session.get('verified_at', 0) > TWOFA_TTL:
+        return redirect(url_for('twofa_verify'))
 
 @app.route('/')
 @login_required
@@ -1812,6 +2018,35 @@ def download_policy_document(doc_id):
     return send_file(doc['filepath'], as_attachment=True, download_name=safe_name)
 
 
+@app.route('/reveal-card', methods=['POST'])
+@login_required
+def reveal_card():
+    """Return the full credit-card number for a submission/customer, and LOG who revealed
+    it (card numbers are masked to last-4 everywhere by default)."""
+    data = request.get_json(silent=True) or {}
+    typ, rid = data.get('type'), data.get('id')
+    conn = get_db()
+    if typ == 'submission':
+        row = conn.execute("SELECT name, id_number, card_number, card_expiry, card_holder_id "
+                           "FROM unmatched_submissions WHERE id=?", (rid,)).fetchone()
+    elif typ == 'customer':
+        row = conn.execute("SELECT name, id_number, form_card_number AS card_number, "
+                           "form_card_expiry AS card_expiry, form_id_card_holder AS card_holder_id "
+                           "FROM customers WHERE id=?", (rid,)).fetchone()
+    else:
+        row = None
+    if not row or not row['card_number']:
+        conn.close()
+        return jsonify({'ok': False}), 404
+    who = session.get('display_name') or session.get('username', '')
+    idkey = event_key(row['id_number'] or '', f'{typ}-{rid}')
+    log_event(conn, idkey, f'חשף מספר אשראי מלא של {row["name"] or ""}'.strip(), who, kind='card_reveal')
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'card_number': row['card_number'],
+                    'card_expiry': row['card_expiry'] or '', 'card_holder_id': row['card_holder_id'] or ''})
+
+
 @app.route('/queue')
 @login_required
 def queue():
@@ -1843,7 +2078,7 @@ def queue():
 @superadmin_required
 def admin():
     conn = get_db()
-    users = conn.execute("SELECT id, username, display_name, role, manager_id FROM users ORDER BY role, display_name").fetchall()
+    users = conn.execute("SELECT id, username, display_name, role, manager_id, email FROM users ORDER BY role, display_name").fetchall()
     months = conn.execute("SELECT * FROM months ORDER BY id DESC").fetchall()
     ub_map = {}
     for r in conn.execute("SELECT user_id, brand FROM user_brands").fetchall():
@@ -1851,11 +2086,20 @@ def admin():
     managers = conn.execute(
         "SELECT id, display_name, role FROM users WHERE role IN ('admin','superadmin') ORDER BY role DESC, display_name"
     ).fetchall()
+    pending_imports = []
+    for row in conn.execute("SELECT * FROM pending_imports WHERE status='pending' ORDER BY id DESC").fetchall():
+        d = dict(row)
+        try:
+            d['report'] = json.loads(row['report_json'] or '{}')
+        except Exception:
+            d['report'] = {}
+        pending_imports.append(d)
     conn.close()
     return render_template('admin.html', users=users, months=months,
                            email_sync_enabled=EMAIL_CONFIG['enabled'],
                            agencies=BRANDS, user_brands=ub_map, managers=managers,
-                           backfill=_backfill_state)
+                           backfill=_backfill_state, pending_imports=pending_imports,
+                           site123=_site123_state)
 
 
 @app.route('/admin/users/<int:uid>/manager', methods=['POST'])
@@ -1873,6 +2117,20 @@ def set_user_manager(uid):
     conn.commit()
     conn.close()
     flash('המנהל האחראי עודכן', 'success')
+    return redirect(url_for('admin'))
+
+
+@app.route('/admin/users/<int:uid>/email', methods=['POST'])
+@login_required
+@superadmin_required
+def set_user_email(uid):
+    """Set/update a user's (rep's) email — used for email-based 2FA codes and notifications."""
+    email = request.form.get('email', '').strip()
+    conn = get_db()
+    conn.execute("UPDATE users SET email=? WHERE id=?", (email, uid))
+    conn.commit()
+    conn.close()
+    flash('המייל עודכן', 'success')
     return redirect(url_for('admin'))
 
 
@@ -1930,61 +2188,172 @@ def performance():
     conn.close()
     return render_template('performance.html', rows=rows, month=month, show_role=is_super)
 
+def _extract_renewal_rows(ws, source):
+    """Light extraction (id/name/phone) from a renewal sheet — for the pre-load VALIDATION
+    only (does not insert). Mirrors the header detection of the real importers."""
+    all_rows = list(ws.iter_rows(values_only=True))
+    if source == 'ofir':
+        hdr_i = next((i for i, r in enumerate(all_rows[:12])
+                      if r and any('מבוטח' in str(c or '') for c in r)), 4)
+        headers = [str(c).strip() if c else '' for c in all_rows[hdr_i]]
+        def cidx(name):
+            return next((i for i, h in enumerate(headers) if h == name or name in h), None)
+        id_i, nm_i, ph_i = cidx('זהות'), cidx('מבוטח'), cidx('טלפון')
+    else:
+        hdr_i = next((i for i, r in enumerate(all_rows) if r and 'פוליסה' in str(r[0])), 2)
+        headers = [str(c).strip() if c else '' for c in all_rows[hdr_i]]
+        def cidx(name):
+            return next((i for i, h in enumerate(headers) if name in h), None)
+        id_i, nm_i, ph_i = cidx('ת.ז'), cidx('שם'), cidx('טלפון')
+    out = []
+    for r in all_rows[hdr_i + 1:]:
+        if not r:
+            continue
+        def g(i):
+            return r[i] if (i is not None and len(r) > i) else None
+        idn = normalize_id_number(g(id_i))
+        if not idn or len(idn) < 5:
+            continue
+        out.append({'id': idn, 'name': str(g(nm_i) or '').strip(),
+                    'phone': re.sub(r'\D', '', str(g(ph_i) or ''))})
+    return out
+
+
+def _tok_name(n):
+    n = re.sub(r'["\'׳״]', '', str(n or '')); n = re.sub(r'[-]', ' ', n)
+    return frozenset(t for t in n.split() if len(t) >= 2)
+
+
+def _validate_renewal_file(conn, rows):
+    """Compare renewal rows against the insureds master (by ת"ז). Categorises renewal vs
+    new, counts phone conflicts, and flags likely duplicates (a 'new' row whose NAME matches
+    an existing insured under a different id — the wrong-id case)."""
+    def z(s):
+        return re.sub(r'\D', '', str(s or '')).lstrip('0')
+    ins, ins_by_name = {}, {}
+    for r in conn.execute("SELECT id_number, name, phone FROM insureds"):
+        k = z(r['id_number'])
+        ins[k] = {'name': r['name'], 'phone': re.sub(r'\D', '', str(r['phone'] or ''))}
+        ins_by_name.setdefault(_tok_name(r['name']), []).append(k)
+    file_ids = {z(row['id']) for row in rows if z(row['id'])}
+    renewals = new = phone_conflict = 0
+    dupes = []
+    for row in rows:
+        k = z(row['id'])
+        if not k:
+            continue
+        if k in ins:
+            renewals += 1
+            fp, ip = row['phone'], ins[k]['phone']
+            if fp and ip and fp[-9:] != ip[-9:]:
+                phone_conflict += 1
+        else:
+            new += 1
+            for c in ins_by_name.get(_tok_name(row['name']), []):
+                if c in file_ids:
+                    continue
+                pm = bool(row['phone'] and ins[c]['phone'] and ins[c]['phone'][-9:] == row['phone'][-9:])
+                dupes.append({'name': row['name'], 'file_id': row['id'], 'master_id': c, 'phone_match': pm})
+                break
+    return {'total': len(rows), 'renewals': renewals, 'new': new,
+            'phone_conflicts': phone_conflict, 'potential_dupes': dupes}
+
+
+def _apply_import(conn, wb, source, month_name):
+    """Apply a renewal file to the active month: promote the current customers of this
+    source's brands into the master, then swap in the fresh rows. (Shared by commit.)"""
+    ws = wb.active
+    source_brands = ['אופיר'] if source == 'ofir' else ['גאיה', 'ווינר']
+    month = conn.execute("SELECT * FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.execute("UPDATE months SET is_active=0")
+        conn.execute("INSERT INTO months (name, created_at, is_active) VALUES (?,?,1)",
+                     (month_name, datetime.datetime.now().isoformat()))
+        month_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    else:
+        month_id = month['id']
+        if month_name and month_name != month['name']:
+            conn.execute("UPDATE months SET name=? WHERE id=?", (month_name, month_id))
+    promoted = promote_customers_to_insureds(conn, month_id, brands=source_brands)
+    conn.execute(
+        f"DELETE FROM customers WHERE month_id=? AND brand IN ({','.join('?' * len(source_brands))})",
+        [month_id] + source_brands)
+    count = _import_ofir(conn, ws, month_id) if source == 'ofir' else _import_gaia_winner(conn, ws, month_id)
+    conn.commit()
+    label = 'אופיר' if source == 'ofir' else 'גאיה/ווינר'
+    return count, promoted, label
+
+
 @app.route('/admin/import', methods=['POST'])
 @login_required
 @superadmin_required
 def import_excel():
+    """Phase 1 — STAGE a renewal file: parse + validate against the master, store it as a
+    pending import. Nothing is applied until the 'שינוי חידוש לחודש חדש' (commit) button."""
     f = request.files.get('file')
     month_name = request.form.get('month_name', '').strip()
     if not f or not month_name:
         flash('חסר קובץ או שם חודש', 'danger')
         return redirect(url_for('admin'))
-
-    # Which agency/format is being loaded. Each source is imported independently and only
-    # replaces its own rows in the single active month — other agencies stay untouched.
     source = request.form.get('source', 'gaia_winner')
-    source_brands = ['אופיר'] if source == 'ofir' else ['גאיה', 'ווינר']
-
     try:
-        wb = load_workbook(f, data_only=True)
-        ws = wb.active
-
+        blob = f.read()
+        wb = load_workbook(io.BytesIO(blob), data_only=True)
+        rows = _extract_renewal_rows(wb.active, source)
         conn = get_db()
-        # One persistent active month accumulates all agencies. Create it on first load.
-        month = conn.execute("SELECT * FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
-        if not month:
-            conn.execute("UPDATE months SET is_active=0")
-            conn.execute("INSERT INTO months (name, created_at, is_active) VALUES (?,?,1)",
-                         (month_name, datetime.datetime.now().isoformat()))
-            month_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        else:
-            month_id = month['id']
-            # Reloading with a new cycle name renames the active month, so the dashboard
-            # header reflects the current cycle (e.g. יולי → אוגוסט at month-end).
-            if month_name and month_name != month['name']:
-                conn.execute("UPDATE months SET name=? WHERE id=?", (month_name, month_id))
-        # Re-load = archive this agency's current renewals into "all customers", then swap
-        # in the fresh file. Only this source's brands are promoted/cleared.
-        promoted = promote_customers_to_insureds(conn, month_id, brands=source_brands)
-        conn.execute(
-            f"DELETE FROM customers WHERE month_id=? AND brand IN ({','.join('?' * len(source_brands))})",
-            [month_id] + source_brands)
-
-        if source == 'ofir':
-            count = _import_ofir(conn, ws, month_id)
-        else:
-            count = _import_gaia_winner(conn, ws, month_id)
-
+        report = _validate_renewal_file(conn, rows)
+        conn.execute("""INSERT INTO pending_imports
+            (source, month_name, filename, file_blob, report_json, uploaded_at, uploaded_by, status)
+            VALUES (?,?,?,?,?,?,?, 'pending')""",
+            (source, month_name, f.filename, blob, json.dumps(report, ensure_ascii=False),
+             datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+             session.get('display_name') or session.get('username', '')))
         conn.commit()
         conn.close()
-        label = 'אופיר' if source == 'ofir' else 'גאיה/ווינר'
-        msg = f'נטענו {count} חידושים ({label})'
+        flash(f"הקובץ נטען לבדיקה: {report['renewals']} חידושים · {report['new']} חדשים · "
+              f"{report['phone_conflicts']} התנגשויות טלפון · {len(report['potential_dupes'])} כפילויות אפשריות. "
+              f"בדוק ולחץ 'שינוי חידוש לחודש חדש'.", 'info')
+    except Exception as e:
+        flash(f'שגיאה בבדיקת הקובץ: {e}', 'danger')
+    return redirect(url_for('admin'))
+
+
+@app.route('/admin/import/commit/<int:pid>', methods=['POST'])
+@login_required
+@superadmin_required
+def import_commit(pid):
+    """Phase 2 — apply a validated pending import ('שינוי חידוש לחודש חדש')."""
+    conn = get_db()
+    p = conn.execute("SELECT * FROM pending_imports WHERE id=? AND status='pending'", (pid,)).fetchone()
+    if not p:
+        conn.close()
+        flash('לא נמצאה טעינה ממתינה', 'danger')
+        return redirect(url_for('admin'))
+    try:
+        wb = load_workbook(io.BytesIO(p['file_blob']), data_only=True)
+        count, promoted, label = _apply_import(conn, wb, p['source'], p['month_name'])
+        conn.execute("UPDATE pending_imports SET status='committed' WHERE id=?", (pid,))
+        conn.commit()
+        conn.close()
+        msg = f'בוצע: נטענו {count} חידושים ({label})'
         if promoted:
-            msg += f' · {promoted} לקוחות קודמים של {label} עברו ל"כל הלקוחות"'
+            msg += f' · {promoted} לקוחות קודמים עברו ל"כל הלקוחות"'
         flash(msg, 'success')
     except Exception as e:
-        flash(f'שגיאה בייבוא: {e}', 'danger')
+        conn.close()
+        flash(f'שגיאה בביצוע: {e}', 'danger')
+    return redirect(url_for('admin'))
 
+
+@app.route('/admin/import/cancel/<int:pid>', methods=['POST'])
+@login_required
+@superadmin_required
+def import_cancel(pid):
+    conn = get_db()
+    conn.execute("UPDATE pending_imports SET status='cancelled' WHERE id=? AND status='pending'", (pid,))
+    conn.commit()
+    conn.close()
+    flash('הטעינה הממתינה בוטלה', 'info')
     return redirect(url_for('admin'))
 
 
@@ -2145,11 +2514,12 @@ def add_user():
     display_name = request.form['display_name'].strip()
     password = request.form['password']
     role = request.form.get('role', 'agent')
+    email = request.form.get('email', '').strip()
     brands = [b for b in request.form.getlist('brands') if b in BRANDS]
     try:
         conn = get_db()
-        conn.execute("INSERT INTO users (username, password_hash, display_name, role) VALUES (?,?,?,?)",
-                     (username, generate_password_hash(password), display_name, role))
+        conn.execute("INSERT INTO users (username, password_hash, display_name, role, email) VALUES (?,?,?,?,?)",
+                     (username, generate_password_hash(password), display_name, role, email))
         uid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         # Super-admins implicitly see everything; managers and agents are agency-scoped.
         if role != 'superadmin':
@@ -2271,6 +2641,408 @@ def export_wasender():
     filename = f"wasender_{mode_label}_{month['name'].replace(' ','_')}_{today}.xlsx"
     return send_file(output, as_attachment=True, download_name=filename,
                      mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+
+# ── Renewal campaign: eligibility, pricing, email rendering + sending, logging ──
+GAIA_RENEW = 'https://www.gaia-ins.co.il/renew'
+WINNER_RENEW = 'https://www.winner-ins.co.il/renew'
+MIDWIFE_RENEW = 'https://www.winner-ins.co.il/renew/midwife'
+HEB_MONTHS = ['', 'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי',
+              'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר']
+
+# Statuses that mean "no need to send anymore": renewed / not-renewing / handled manually.
+CAMPAIGN_STOP_STATUSES = {
+    'חודש', 'טופס התקבל', 'הלקוח אישר', 'ביקשו לחדש לבד',
+    'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'פרוייקט הסתיים',
+    'דורש בירור', 'ממתין לאישור מיילדות', 'המשך טיפול בוואטסאפ', 'ממתין לחידוש',
+}
+
+CAMPAIGN_CROSS_SELL = """
+  <hr style="border:none;border-top:1px solid #eee;margin:22px 0">
+  <p>אגב, יש לי עוד משהו קטן שכדאי שתכירו.<br>
+  מי שמכיר אותי יודע שהייתי מטפל בעצמי — עד שהידיים שלי פשוט הפסיקו לעבוד. באותו רגע גיליתי כמה אני חשוף כלכלית, ומשם נולד <strong>"חוסן למחר"</strong> — כיסוי ייעודי שבנינו עם הראל בדיוק בשביל מטפלים כמוכם.</p>
+  <p><strong>מה מיוחד בו:</strong></p>
+  <ul>
+    <li>במקרה של אובדן כושר עבודה למקצוע שלכם (לא עיסוק כללי), אחרי חצי שנה מקבלים פיצוי חד-פעמי</li>
+    <li>בלי צורך להוכיח כמה הרווחתם — קובעים מראש את סכום הביטוח</li>
+    <li>נמכר כתוספת לביטוח חיים</li>
+    <li>החל מ-9 ₪ לחודש בלבד לכיסוי חוסן למחר</li>
+  </ul>
+  <p>זה נספח קטן, אבל יכול לעשות הבדל גדול ביום שהכי תצטרכו אותו. אם תרצו לצרף אותו לחידוש — רק תגידו לנו ונחבר אתכם למנהל התחום.</p>
+  <p>המשך יום נפלא,</p>
+  <p style="color:#555">--<br>שרון דר<br>מנהל מכירות אחריות מקצועית<br>קבוצת אופיר — אופיר, גאיה, ווינר<br>טלפון 073-3915555</p>"""
+
+def _premium_num(v):
+    d = re.sub(r'[^\d.]', '', str(v or ''))
+    return float(d) if d else 0
+
+def renewal_amount(is_midwife, premium):
+    """Tier price for the email. None → generic 'like last year' (empty/0, or a premium
+    more than 100 above the tier, which is a manual-review exception)."""
+    p = _premium_num(premium)
+    tier = (1600 if 1500 <= p <= 1700 else 1200) if is_midwife else 750
+    if p <= 0 or p > tier + 100:
+        return None
+    return tier
+
+def renewal_link(brand, is_midwife):
+    if is_midwife:
+        return MIDWIFE_RENEW, 'חידוש מיילדות'
+    if brand == 'גאיה':
+        return GAIA_RENEW, 'חידוש גאיה'
+    return WINNER_RENEW, 'חידוש ווינר'
+
+def _campaign_email_for(conn, cust, _ins_email=None):
+    """Resolve a customer's email — renewal files carry no email, so fall back to the
+    insureds master by ת"ז."""
+    ce = str(cust['email'] or '').strip() if 'email' in cust.keys() else ''
+    if ce and '@' in ce:
+        return ce
+    idn = re.sub(r'\D', '', str(cust['id_number'] or '')).lstrip('0')
+    if not idn:
+        return ''
+    if _ins_email is not None:
+        return _ins_email.get(idn, '')
+    r = conn.execute("SELECT email FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                     "AND COALESCE(email,'') LIKE '%@%' LIMIT 1", (idn,)).fetchone()
+    return (r['email'].strip() if r and r['email'] else '')
+
+def campaign_eligibility(conn, month_id):
+    """Bucket the active month's customers. Auto-send targets Gaia/Winner, non-midwife,
+    non-VIP, no stop-status. Midwives wait for manual approval; VIPs/stop-statuses excluded."""
+    ins_email = {re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0'): (r['email'] or '').strip()
+                 for r in conn.execute("SELECT id_number, email FROM insureds")}
+    rows = conn.execute("SELECT * FROM customers WHERE month_id=?", (month_id,)).fetchall()
+    b = {'email': [], 'whatsapp': [], 'midwife_pending': [], 'vip': [],
+         'status_excluded': [], 'no_contact': [], 'ofir': []}
+    for r in rows:
+        if r['brand'] not in ('גאיה', 'ווינר'):
+            b['ofir'].append(r); continue
+        if r['is_midwife']:
+            b['midwife_pending'].append(r); continue
+        if r['is_vip']:
+            b['vip'].append(r); continue
+        if (r['status'] or '') in CAMPAIGN_STOP_STATUSES or \
+           ('do_not_contact' in r.keys() and r['do_not_contact']):
+            b['status_excluded'].append(r); continue
+        phone = re.sub(r'\D', '', str(r['phone'] or ''))
+        email = _campaign_email_for(conn, r, ins_email)
+        touched = False
+        if email and '@' in email:
+            b['email'].append((r, email)); touched = True
+        if phone:
+            b['whatsapp'].append(r); touched = True
+        if not touched:
+            b['no_contact'].append(r)
+    return b
+
+def _price_line(is_midwife, premium):
+    amt = renewal_amount(is_midwife, premium)
+    if amt is None:
+        return 'המחיר נשאר כמו שנה שעברה.'
+    return f'המחיר לשנה הקרובה: <strong>{amt:,} ₪</strong> — ללא שינוי מהשנה שעברה.'
+
+def render_renewal_email(cust, month_name):
+    import html as _html
+    link, label = renewal_link(cust['brand'], cust['is_midwife'])
+    name = _html.escape(str(cust['name'] or ''))
+    return (f'<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.7;color:#222;'
+            f'max-width:640px;direction:rtl;text-align:right">'
+            f'<p>שלום, {name}</p>'
+            f'<p>הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.</p>'
+            f'<p>{_price_line(cust["is_midwife"], cust["premium_last_year"])}</p>'
+            f'<p>לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו), יש להיכנס לקישור:</p>'
+            f'<p><a href="{link}" style="background:#0d6efd;color:#fff;padding:10px 22px;'
+            f'border-radius:6px;text-decoration:none;display:inline-block">{label}</a></p>'
+            f'{CAMPAIGN_CROSS_SELL}</div>')
+
+def send_campaign_email(to_email, subject, html_body):
+    """Send one email from the office Gmail (SPF/DKIM handled by Google Workspace)."""
+    import smtplib, ssl
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    user, pw = EMAIL_CONFIG['username'], EMAIL_CONFIG['password']
+    if not user or not pw:
+        return False
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = user
+    msg['To'] = to_email
+    msg.attach(MIMEText(re.sub('<[^>]+>', '', html_body).strip(), 'plain', 'utf-8'))
+    msg.attach(MIMEText(html_body, 'html', 'utf-8'))
+    ctx = ssl.create_default_context()
+    with smtplib.SMTP('smtp.gmail.com', 587, timeout=25) as s:
+        s.starttls(context=ctx)
+        s.login(user, pw)
+        s.sendmail(user, [to_email], msg.as_string())
+    return True
+
+def within_business_hours(now=None):
+    """True only Sun–Thu 08:00–16:00 (no Fri/Sat sends)."""
+    now = now or datetime.datetime.now()
+    if now.weekday() in (4, 5):  # Fri=4, Sat=5
+        return False
+    return 8 <= now.hour < 16
+
+def render_renewal_whatsapp(cust, month_name):
+    """Plain-text renewal message for WhatsApp (concise — link + price + signature)."""
+    link, _ = renewal_link(cust['brand'], cust['is_midwife'])
+    amt = renewal_amount(cust['is_midwife'], cust['premium_last_year'])
+    price = (f"המחיר לשנה הקרובה: {amt:,} ₪ — ללא שינוי מהשנה שעברה."
+             if amt is not None else "המחיר נשאר כמו שנה שעברה.")
+    return (f"שלום, {cust['name']}\n"
+            f"הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.\n"
+            f"{price}\n\n"
+            f"לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו):\n{link}\n\n"
+            f"—\nשרון דר, מנהל מכירות אחריות מקצועית\nקבוצת אופיר — אופיר, גאיה, ווינר\n073-3915555")
+
+def _wa_api_authed():
+    tok = os.environ.get('WA_API_TOKEN', '')
+    return bool(tok) and request.headers.get('X-WA-Token') == tok
+
+@app.route('/api/wa/queue')
+def wa_queue():
+    """Per-brand WhatsApp send list for the local sender tool (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', '')
+    if brand not in ('גאיה', 'ווינר'):
+        return jsonify({'error': 'bad brand'}), 400
+    month = active_month()
+    if not month:
+        return jsonify({'brand': brand, 'count': 0, 'items': []})
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    month_name = HEB_MONTHS[datetime.datetime.now().month]
+    today = datetime.date.today().isoformat()
+    items = []
+    for r in buckets['whatsapp']:
+        if r['brand'] != brand or (r['whatsapp_sent_date'] or '') == today:
+            continue
+        phone = re.sub(r'\D', '', str(r['phone'] or ''))
+        if phone.startswith('0'):
+            phone = '972' + phone[1:]
+        elif not phone.startswith('972'):
+            phone = '972' + phone
+        items.append({'id': r['id'], 'name': r['name'], 'phone': phone,
+                      'message': render_renewal_whatsapp(r, month_name)})
+    conn.close()
+    return jsonify({'brand': brand, 'count': len(items), 'items': items})
+
+@app.route('/api/wa/sent', methods=['POST'])
+def wa_sent():
+    """Mark a WhatsApp message as sent + log it to the client timeline (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    cid = data.get('id')
+    conn = get_db()
+    r = conn.execute("SELECT id_number FROM customers WHERE id=?", (cid,)).fetchone()
+    if r:
+        conn.execute("UPDATE customers SET whatsapp_sent_date=? WHERE id=?",
+                     (datetime.date.today().isoformat(), cid))
+        idkey = event_key(r['id_number'], 'cust-%d' % cid)
+        log_event(conn, idkey, f"נשלחה הודעת וואטסאפ ({data.get('brand', '')})",
+                  'וואטסאפ אוטומטי', kind='whatsapp_sent')
+        conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/backup-db')
+def backup_db():
+    """Download the live DB for an off-site backup (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    return send_file(DB_PATH, as_attachment=True,
+                     download_name='renewals_backup_%s.db' % datetime.date.today().isoformat())
+
+def _run_email_blast(app_ctx_month_id, month_name, recipients, who):
+    """Background email send: one-by-one with a short delay, each logged to the timeline."""
+    sent = 0
+    for cust, email in recipients:
+        try:
+            html_body = render_renewal_email(cust, month_name)
+            if send_campaign_email(email, 'חידוש הפוליסה המקצועית שלך', html_body):
+                conn = get_db()
+                conn.execute("UPDATE customers SET email_sent_date=? WHERE id=?",
+                             (datetime.date.today().isoformat(), cust['id']))
+                idkey = event_key(cust['id_number'], 'cust-%d' % cust['id'])
+                log_event(conn, idkey, f'נשלח מייל חידוש ל-{email}', who, kind='email_sent')
+                conn.commit(); conn.close()
+                sent += 1
+            time.sleep(0.7)
+        except Exception as e:
+            print(f'[campaign] email failed for {email}: {e}')
+    print(f'[campaign] email blast done — {sent}/{len(recipients)} sent')
+
+@app.route('/admin/campaign', methods=['GET', 'POST'])
+@login_required
+@superadmin_required
+def campaign():
+    month = active_month()
+    if not month:
+        flash('אין חודש פעיל', 'danger')
+        return redirect(url_for('admin'))
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    month_name = HEB_MONTHS[datetime.datetime.now().month]
+    if request.method == 'POST':
+        action = request.form.get('action')
+        who = session.get('display_name') or session.get('username', '')
+        if action == 'test':
+            # render for the first eligible recipient (or a sample) and send to the office inbox
+            sample = buckets['email'][0][0] if buckets['email'] else None
+            demo = sample or {'name': 'בדיקה', 'brand': 'גאיה', 'is_midwife': 0,
+                              'premium_last_year': 750, 'id_number': '', 'email': ''}
+            body = render_renewal_email(demo, month_name)
+            ok = send_campaign_email(EMAIL_CONFIG['username'], 'בדיקה — מייל חידוש', body)
+            conn.close()
+            flash('נשלחה בדיקה לתיבת המשרד' if ok else 'שליחת הבדיקה נכשלה', 'success' if ok else 'danger')
+            return redirect(url_for('campaign'))
+        if action == 'email_send':
+            # already-sent-today are skipped (multi-touch safety)
+            today = datetime.date.today().isoformat()
+            recips = [(c, e) for (c, e) in buckets['email']
+                      if (c['email_sent_date'] or '') != today]
+            conn.close()
+            if not within_business_hours() and request.form.get('force') != '1':
+                flash('מחוץ לשעות הפעילות (א׳–ה׳ 8:00–16:00). לשליחה בכל זאת סמן "כפה".', 'warning')
+                return redirect(url_for('campaign'))
+            threading.Thread(target=_run_email_blast,
+                             args=(month['id'], month_name, recips, who), daemon=True).start()
+            flash(f'השליחה החלה ברקע — {len(recips)} מיילים. כל שליחה מתועדת ביומן.', 'info')
+            return redirect(url_for('campaign'))
+        conn.close()
+        return redirect(url_for('campaign'))
+    counts = {k: len(v) for k, v in buckets.items()}
+    conn.close()
+    return render_template('campaign.html', counts=counts, month_name=month_name,
+                           in_hours=within_business_hours())
+
+
+# ── SITE123 email enrichment: recover customer-submitted email/phone from Gmail ──
+_site123_state = {'running': False, 'done': None, 'report': None, 'started': None}
+_SITE123_EXCLUDE = ('gaia-ins.co.il', 'winner-ins.co.il', 'site123.com', 'do-not-reply')
+
+def parse_site123_email(text):
+    """Extract the customer-submitted fields from a SITE123 website-form email body."""
+    cem = ''
+    for l in text.split('\n'):
+        if 'דואר' in l or 'אלקטרוני' in l or 'מייל' in l:
+            m = re.search(r'[\w.+-]+@[\w-]+\.[\w.]+', l)
+            if m and not any(x in m.group(0) for x in _SITE123_EXCLUDE):
+                cem = m.group(0); break
+    if not cem:
+        for m in re.finditer(r'[\w.+-]+@[\w-]+\.[\w.]+', text):
+            if not any(x in m.group(0) for x in _SITE123_EXCLUDE):
+                cem = m.group(0); break
+    mid = re.search(r'ת\.?ז[^\d]{0,15}(\d{5,9})', text)
+    mph = re.search(r'טלפון[^\d]{0,15}(0\d[\d\- ]{6,})', text)
+    mnm = re.search(r'שם מלא\s*:?\s*(.+?)\s*(?:דואר|אלקטרוני|מייל|מספר|טלפון|ת\.?ז|:|$)', text)
+    return {'email': cem,
+            'id': (mid.group(1).zfill(9) if mid else ''),
+            'phone': (re.sub(r'\D', '', mph.group(1)) if mph else ''),
+            'name': (mnm.group(1).strip() if mnm else '')}
+
+def _site123_body(msg):
+    import html as _html
+    txt = ''
+    for p in msg.walk():
+        ct = p.get_content_type()
+        if ct in ('text/plain', 'text/html'):
+            try:
+                payload = p.get_payload(decode=True).decode(p.get_content_charset() or 'utf-8', 'replace')
+            except Exception:
+                continue
+            if ct == 'text/html':
+                payload = re.sub(r'<[^>]+>', ' ', payload)
+            txt += '\n' + _html.unescape(payload)
+    return txt
+
+def backfill_site123(days_back=400, limit=None):
+    """Scan Gmail for SITE123 form emails and enrich insureds/customers by ת"ז. The
+    customer-submitted contact details are authoritative: email is filled/overridden, and
+    phone is overridden on a mismatch. Read-only on Gmail; writes only to the DB."""
+    from email.utils import parsedate_to_datetime
+    import imaplib, email as _email, datetime as _dt
+    cfg = EMAIL_CONFIG
+    rep = {'scanned': 0, 'parsed_ok': 0, 'unique': 0, 'matched': 0,
+           'emails_updated': 0, 'phones_updated': 0, 'unmatched': 0}
+    if not cfg['username'] or not cfg['password']:
+        return rep
+    mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+    mail.login(cfg['username'], cfg['password'])
+    mail.select('"[Gmail]/All Mail"', readonly=True)
+    since = (_dt.datetime.now() - _dt.timedelta(days=days_back)).strftime('%d-%b-%Y')
+    typ, data = mail.search(None, f'(FROM "site123.com" SINCE {since})')
+    ids = data[0].split() if data and data[0] else []
+    if limit:
+        ids = ids[-limit:]
+    latest = {}
+    for num in ids:
+        rep['scanned'] += 1
+        try:
+            typ, d = mail.fetch(num, '(RFC822)')
+            msg = _email.message_from_bytes(d[0][1])
+            p = parse_site123_email(_site123_body(msg))
+        except Exception:
+            continue
+        if not (p['id'] and is_israeli_id(p['id']) and p['email'] and '@' in p['email']):
+            continue
+        rep['parsed_ok'] += 1
+        try:
+            dt = parsedate_to_datetime(msg.get('Date'))
+        except Exception:
+            dt = None
+        k = p['id']
+        if k not in latest or (dt and latest[k][0] and dt > latest[k][0]):
+            latest[k] = (dt, p['email'], p['phone'], p['name'])
+    mail.logout()
+    rep['unique'] = len(latest)
+    conn = get_db()
+    def norm(s):
+        return re.sub(r'\D', '', str(s or ''))
+    for idn, (dt, em, ph_, nm) in latest.items():
+        z = idn.lstrip('0')
+        matched = em_upd = ph_upd = False
+        for tbl in ('insureds', 'customers'):
+            for r in conn.execute(f"SELECT id, email, phone FROM {tbl} WHERE ltrim(COALESCE(id_number,''),'0')=?", (z,)).fetchall():
+                matched = True
+                sets, vals = [], []
+                if em and (r['email'] or '').strip().lower() != em.lower():
+                    sets.append('email=?'); vals.append(em); em_upd = True
+                if ph_ and norm(r['phone'])[-9:] != norm(ph_)[-9:]:
+                    sets.append('phone=?'); vals.append(ph_); ph_upd = True
+                if sets:
+                    vals.append(r['id'])
+                    conn.execute(f"UPDATE {tbl} SET {','.join(sets)} WHERE id=?", vals)
+        rep['matched' if matched else 'unmatched'] += 1
+        rep['emails_updated'] += 1 if em_upd else 0
+        rep['phones_updated'] += 1 if ph_upd else 0
+    conn.commit()
+    conn.close()
+    return rep
+
+def _run_site123_backfill(days_back):
+    _site123_state.update(running=True, started=datetime.datetime.now().strftime('%H:%M'), report=None)
+    try:
+        _site123_state['report'] = backfill_site123(days_back)
+    except Exception as e:
+        _site123_state['report'] = {'error': str(e)}
+    finally:
+        _site123_state.update(running=False, done=datetime.datetime.now().strftime('%H:%M'))
+
+@app.route('/admin/backfill-site123', methods=['POST'])
+@login_required
+@superadmin_required
+def admin_backfill_site123():
+    if _site123_state['running']:
+        flash('סריקת SITE123 כבר רצה', 'warning')
+        return redirect(url_for('admin'))
+    days = int(request.form.get('days', 400))
+    threading.Thread(target=_run_site123_backfill, args=(days,), daemon=True).start()
+    flash('סריקת SITE123 החלה ברקע — רענן לעדכון', 'info')
+    return redirect(url_for('admin'))
 
 
 @app.route('/api/renewal', methods=['POST'])

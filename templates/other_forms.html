@@ -111,7 +111,9 @@
                 <div class="col-md-3"><strong>מותג:</strong> {{ item.full.brand or '—' }}</div>
                 <div class="col-md-3"><strong>תשלומים:</strong> {{ item.full.installments or '—' }}</div>
                 <div class="col-md-3"><strong>אמצעי גבייה:</strong> {{ item.full.payment_method or '—' }}</div>
-                <div class="col-md-3"><strong>כרטיס:</strong> {{ item.full.card_number or '—' }} {{ item.full.card_expiry or '' }}</div>
+                <div class="col-md-3 card-mask" data-type="submission" data-id="{{ item.full.id }}"><strong>כרטיס:</strong>
+                  <span class="card-val">{{ item.full.card_number | mask_card or '—' }}</span> {{ item.full.card_expiry or '' }}
+                  {% if item.full.card_number %}<button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="revealCard(this)" title="הצג אשראי מלא"><i class="bi bi-eye"></i></button>{% endif %}</div>
               </div>
               {% if item.full.comments %}
               <div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">{{ item.full.comments }}</div>

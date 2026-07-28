@@ -1,0 +1,27 @@
+{% extends 'base.html' %}
+{% block title %} — אימות דו-שלבי{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-md-5">
+    <div class="card border-0 shadow-sm mt-4">
+      <div class="card-header bg-primary text-white fw-bold"><i class="bi bi-shield-lock me-2"></i>אימות דו-שלבי</div>
+      <div class="card-body">
+        {% if method == 'app' %}
+        <p class="text-muted small">הזן את הקוד בן 6 הספרות מאפליקציית האימות (Google Authenticator / דומה).</p>
+        {% else %}
+        <p class="text-muted small">שלחנו קוד בן 6 ספרות למייל <strong>{{ email }}</strong>. הזן אותו כאן (תקף 10 דקות).</p>
+        {% endif %}
+        <form method="POST">
+          <input type="text" name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+                 class="form-control form-control-lg text-center mb-3" placeholder="______" required autofocus>
+          <button type="submit" class="btn btn-primary w-100">אמת</button>
+        </form>
+        {% if method == 'email' %}
+        <a href="{{ url_for('twofa_verify') }}" class="btn btn-link btn-sm mt-2">שלח קוד חדש</a>
+        {% endif %}
+        <a href="{{ url_for('logout') }}" class="btn btn-link btn-sm mt-2 text-secondary">התנתק</a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

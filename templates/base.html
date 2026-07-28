@@ -43,6 +43,7 @@
         <li class="nav-item"><a class="nav-link" href="/admin/performance"><i class="bi bi-graph-up-arrow me-1"></i>ביצועי נציגים</a></li>
         {% endif %}
         {% if session.role == 'superadmin' %}
+        <li class="nav-item"><a class="nav-link" href="/admin/campaign"><i class="bi bi-megaphone me-1"></i>קמפיין</a></li>
         <li class="nav-item"><a class="nav-link" href="/admin"><i class="bi bi-gear me-1"></i>ניהול</a></li>
         {% endif %}
       </ul>
@@ -51,7 +52,8 @@
         {% if session.role == 'superadmin' %}<span class="badge bg-danger me-1">מנהל על</span>
         {% elif session.role == 'admin' %}<span class="badge bg-warning text-dark me-1">מנהל</span>{% endif %}
       </span>
-      <a class="btn btn-outline-light btn-sm ms-3" href="/logout">יציאה</a>
+      <a class="btn btn-outline-light btn-sm ms-2" href="/2fa/setup" title="אימות דו-שלבי (2FA)"><i class="bi bi-shield-lock"></i></a>
+      <a class="btn btn-outline-light btn-sm ms-2" href="/logout">יציאה</a>
     </div>
   </div>
 </nav>
@@ -95,6 +97,22 @@
       });
     });
   })();
+
+  // Reveal a masked credit-card number on demand — logs who revealed it (audit).
+  function revealCard(btn) {
+    if (!confirm('האם להציג את כל האשראי? הפעולה תתועד ביומן האירועים.')) return;
+    var wrap = btn.closest('.card-mask');
+    if (!wrap) return;
+    fetch('/reveal-card', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: wrap.dataset.type, id: wrap.dataset.id })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      if (d && d.ok) {
+        wrap.querySelector('.card-val').textContent = d.card_number;
+        btn.remove();
+      } else { alert('שגיאה בהצגת האשראי'); }
+    }).catch(function () { alert('שגיאה בהצגת האשראי'); });
+  }
 </script>
 {% block scripts %}{% endblock %}
 </body>
