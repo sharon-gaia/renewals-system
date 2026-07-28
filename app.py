@@ -2773,6 +2773,70 @@ def within_business_hours(now=None):
         return False
     return 8 <= now.hour < 16
 
+def render_renewal_whatsapp(cust, month_name):
+    """Plain-text renewal message for WhatsApp (concise — link + price + signature)."""
+    link, _ = renewal_link(cust['brand'], cust['is_midwife'])
+    amt = renewal_amount(cust['is_midwife'], cust['premium_last_year'])
+    price = (f"המחיר לשנה הקרובה: {amt:,} ₪ — ללא שינוי מהשנה שעברה."
+             if amt is not None else "המחיר נשאר כמו שנה שעברה.")
+    return (f"שלום, {cust['name']}\n"
+            f"הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.\n"
+            f"{price}\n\n"
+            f"לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו):\n{link}\n\n"
+            f"—\nשרון דר, מנהל מכירות אחריות מקצועית\nקבוצת אופיר — אופיר, גאיה, ווינר\n073-3915555")
+
+def _wa_api_authed():
+    tok = os.environ.get('WA_API_TOKEN', '')
+    return bool(tok) and request.headers.get('X-WA-Token') == tok
+
+@app.route('/api/wa/queue')
+def wa_queue():
+    """Per-brand WhatsApp send list for the local sender tool (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', '')
+    if brand not in ('גאיה', 'ווינר'):
+        return jsonify({'error': 'bad brand'}), 400
+    month = active_month()
+    if not month:
+        return jsonify({'brand': brand, 'count': 0, 'items': []})
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    month_name = HEB_MONTHS[datetime.datetime.now().month]
+    today = datetime.date.today().isoformat()
+    items = []
+    for r in buckets['whatsapp']:
+        if r['brand'] != brand or (r['whatsapp_sent_date'] or '') == today:
+            continue
+        phone = re.sub(r'\D', '', str(r['phone'] or ''))
+        if phone.startswith('0'):
+            phone = '972' + phone[1:]
+        elif not phone.startswith('972'):
+            phone = '972' + phone
+        items.append({'id': r['id'], 'name': r['name'], 'phone': phone,
+                      'message': render_renewal_whatsapp(r, month_name)})
+    conn.close()
+    return jsonify({'brand': brand, 'count': len(items), 'items': items})
+
+@app.route('/api/wa/sent', methods=['POST'])
+def wa_sent():
+    """Mark a WhatsApp message as sent + log it to the client timeline (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    cid = data.get('id')
+    conn = get_db()
+    r = conn.execute("SELECT id_number FROM customers WHERE id=?", (cid,)).fetchone()
+    if r:
+        conn.execute("UPDATE customers SET whatsapp_sent_date=? WHERE id=?",
+                     (datetime.date.today().isoformat(), cid))
+        idkey = event_key(r['id_number'], 'cust-%d' % cid)
+        log_event(conn, idkey, f"נשלחה הודעת וואטסאפ ({data.get('brand', '')})",
+                  'וואטסאפ אוטומטי', kind='whatsapp_sent')
+        conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
 def _run_email_blast(app_ctx_month_id, month_name, recipients, who):
     """Background email send: one-by-one with a short delay, each logged to the timeline."""
     sent = 0
