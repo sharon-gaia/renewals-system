@@ -2746,15 +2746,17 @@ def render_renewal_email(cust, month_name):
     import html as _html
     link, label = renewal_link(cust['brand'], cust['is_midwife'])
     name = _html.escape(str(cust['name'] or ''))
-    return (f'<div style="font-family:Arial,sans-serif;font-size:15px;line-height:1.7;color:#222;'
-            f'max-width:640px;direction:rtl;text-align:right">'
+    return (f'<table dir="rtl" width="100%" cellpadding="0" cellspacing="0" style="direction:rtl">'
+            f'<tr><td align="right" style="padding:0">'
+            f'<div style="display:inline-block;max-width:640px;text-align:right;direction:rtl;'
+            f'font-family:Arial,sans-serif;font-size:15px;line-height:1.7;color:#222">'
             f'<p>שלום, {name}</p>'
             f'<p>הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.</p>'
             f'<p>{_price_line(cust["is_midwife"], cust["premium_last_year"])}</p>'
             f'<p>לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו), יש להיכנס לקישור:</p>'
             f'<p><a href="{link}" style="background:#0d6efd;color:#fff;padding:10px 22px;'
             f'border-radius:6px;text-decoration:none;display:inline-block">{label}</a></p>'
-            f'{CAMPAIGN_CROSS_SELL}</div>')
+            f'{CAMPAIGN_CROSS_SELL}</div></td></tr></table>')
 
 def send_campaign_email(to_email, subject, html_body):
     """Send one renewal email. Prefers Resend (HTTPS API — works on Railway, which blocks
