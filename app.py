@@ -482,6 +482,17 @@ def get_db():
     return conn
 
 def init_db():
+    # One pre-migration safety backup per day, on the volume — a rollback point taken
+    # BEFORE any schema change runs. Cheap insurance; never overwrites an existing one.
+    try:
+        _bdir = os.path.dirname(DB_PATH) or '.'
+        _bpath = os.path.join(_bdir, 'renewals_backup_%s.db' % datetime.date.today().isoformat())
+        if os.path.exists(DB_PATH) and not os.path.exists(_bpath):
+            import shutil as _sh
+            _sh.copy2(DB_PATH, _bpath)
+            print('[init] pre-migration backup -> %s' % _bpath)
+    except Exception as _e:
+        print('[init] backup failed: %s' % _e)
     conn = get_db()
     conn.executescript('''
         CREATE TABLE IF NOT EXISTS users (
@@ -2836,6 +2847,14 @@ def wa_sent():
         conn.commit()
     conn.close()
     return jsonify({'ok': True})
+
+@app.route('/api/backup-db')
+def backup_db():
+    """Download the live DB for an off-site backup (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    return send_file(DB_PATH, as_attachment=True,
+                     download_name='renewals_backup_%s.db' % datetime.date.today().isoformat())
 
 def _run_email_blast(app_ctx_month_id, month_name, recipients, who):
     """Background email send: one-by-one with a short delay, each logged to the timeline."""
