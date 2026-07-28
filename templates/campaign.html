@@ -25,28 +25,15 @@
     <div class="card border-0 shadow-sm">
       <div class="card-header bg-light fw-bold">שליחת מיילים</div>
       <div class="card-body">
-        <p class="small text-muted mb-3">
-          נשלח מהמייל שלך דרך Gmail. כל שליחה מתועדת ביומן האירועים של הלקוח.
-          {% if in_hours %}<span class="badge bg-success">בתוך שעות הפעילות</span>
-          {% else %}<span class="badge bg-danger">מחוץ לשעות (א׳–ה׳ 8:00–16:00)</span>{% endif %}
-        </p>
-        <form method="POST" class="mb-3">
-          <input type="hidden" name="action" value="test">
-          <button class="btn btn-outline-primary w-100"><i class="bi bi-envelope-check me-1"></i>שלח בדיקה לתיבת המשרד</button>
-        </form>
-        <form method="POST" onsubmit="return confirm('לשלוח מייל חידוש ל-{{ counts.email }} לקוחות?')">
-          <input type="hidden" name="action" value="email_send">
-          {% if not in_hours %}
-          <div class="form-check mb-2">
-            <input class="form-check-input" type="checkbox" name="force" value="1" id="force">
-            <label class="form-check-label small" for="force">כפה שליחה גם מחוץ לשעות הפעילות</label>
-          </div>
-          {% endif %}
-          <button class="btn btn-success w-100"><i class="bi bi-send me-1"></i>שלח מייל ל-{{ counts.email }} לקוחות</button>
-        </form>
-        <div class="alert alert-info small mt-3 mb-0">
-          <i class="bi bi-whatsapp me-1"></i>וואטסאפ גאיה/ווינר — נשלח מהכלי המקומי (2 כפתורים). בבנייה.
+        <div class="alert alert-info small mb-3">
+          <i class="bi bi-laptop me-1"></i><strong>השליחה מהכלי המקומי:</strong> מיילים ווואטסאפ נשלחים מכלי
+          <code>wa-sender</code> שרץ על הלפטופ (Railway חוסם SMTP). מסך זה מציג את הפילוח — למי יישלח.
         </div>
+        <ul class="small text-muted mb-0">
+          <li>📧 <strong>{{ counts.email }}</strong> מיילים · 💬 <strong>{{ counts.whatsapp }}</strong> וואטסאפ</li>
+          <li>הכלי מושך את הרשימה מכאן, שולח אחד-אחד, ומסמן כל שליחה ביומן האירועים.</li>
+          <li>מומלץ: מיילים ב-2 לחודש, וואטסאפ יום אחרי · 8:00–16:00 · לא בשישי/שבת.</li>
+        </ul>
       </div>
     </div>
   </div>

@@ -2873,6 +2873,48 @@ def backup_db():
     return send_file(DB_PATH, as_attachment=True,
                      download_name='renewals_backup_%s.db' % datetime.date.today().isoformat())
 
+@app.route('/api/email/queue')
+def email_queue():
+    """Rendered renewal emails for the local sender tool (Railway blocks SMTP, so the
+    laptop does the actual sending). Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'count': 0, 'items': []})
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    month_name = HEB_MONTHS[datetime.datetime.now().month]
+    today = datetime.date.today().isoformat()
+    items = []
+    for cust, email in buckets['email']:
+        if (cust['email_sent_date'] or '') == today:
+            continue
+        items.append({'id': cust['id'], 'email': email,
+                      'subject': 'חידוש הפוליסה המקצועית שלך',
+                      'html': render_renewal_email(cust, month_name)})
+    conn.close()
+    return jsonify({'count': len(items), 'items': items})
+
+@app.route('/api/email/sent', methods=['POST'])
+def email_sent():
+    """Mark a renewal email as sent + log it (token-authed; called by the local sender)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    cid = data.get('id')
+    conn = get_db()
+    r = conn.execute("SELECT id_number FROM customers WHERE id=?", (cid,)).fetchone()
+    if r:
+        conn.execute("UPDATE customers SET email_sent_date=? WHERE id=?",
+                     (datetime.date.today().isoformat(), cid))
+        idkey = event_key(r['id_number'], 'cust-%d' % cid)
+        log_event(conn, idkey, f"נשלח מייל חידוש ל-{data.get('email', '')}",
+                  'מייל אוטומטי (לפטופ)', kind='email_sent')
+        conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
 def _run_email_blast(app_ctx_month_id, month_name, recipients, who):
     """Background email send: one-by-one with a short delay, each logged to the timeline."""
     sent = 0
