@@ -18,8 +18,9 @@
       <div class="card-body">
         <div class="alert alert-info small mb-3">
           <i class="bi bi-info-circle me-1"></i>
-          כל סוכנות נטענת בנפרד. טעינה מחדש של סוכנות מעבירה את הלקוחות הקיימים שלה
-          ל"כל הלקוחות" ומציגה את החידושים החדשים — הסוכנויות האחרות לא מושפעות.
+          <strong>טעינה בשני שלבים:</strong> ההעלאה רק <strong>בודקת</strong> את הקובץ מול הלקוחות הקיימים
+          (חידושים / חדשים / התנגשויות טלפון / כפילויות) ושומרת אותו כטיוטה. שום דבר לא משתנה עד שתלחץ
+          <strong>"שינוי חידוש לחודש חדש"</strong> על הטיוטה למטה. אפשר להעלות כמה ימים מראש.
         </div>
         <form method="POST" action="/admin/import" enctype="multipart/form-data">
           <div class="mb-3">
@@ -41,7 +42,7 @@
           </div>
           <div class="d-flex flex-wrap gap-2">
             <button type="submit" class="btn btn-primary">
-              <i class="bi bi-upload me-1"></i>טען נתונים
+              <i class="bi bi-search me-1"></i>העלה לבדיקה
             </button>
             <a href="/admin/sample-format" class="btn btn-outline-secondary">
               <i class="bi bi-file-earmark-arrow-down me-1"></i>הורד פורמט לדוגמה
@@ -54,6 +55,57 @@
       </div>
     </div>
   </div>
+
+  <!-- טעינות ממתינות לבדיקה (טיוטות שטרם בוצעו) -->
+  {% if pending_imports %}
+  <div class="col-12">
+    <div class="card border-0 shadow-sm border-start border-warning border-4">
+      <div class="card-header fw-bold" style="background:#fff3cd;">
+        <i class="bi bi-hourglass-split me-2"></i>טעינות ממתינות לבדיקה — עברו על הבדיקה ולחץ "שינוי חידוש לחודש חדש"
+      </div>
+      <div class="card-body">
+        {% for p in pending_imports %}
+        <div class="border rounded p-3 mb-2">
+          <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+            <div>
+              <div class="fw-bold">{{ p['month_name'] }} · {{ 'אופיר' if p['source']=='ofir' else 'גאיה/ווינר' }}
+                <span class="text-muted small">({{ p['filename'] }} · הועלה {{ p['uploaded_at'] }} ע"י {{ p['uploaded_by'] }})</span>
+              </div>
+              <div class="mt-2 d-flex flex-wrap gap-2">
+                <span class="badge bg-success">חידושים: {{ p['report'].get('renewals', 0) }}</span>
+                <span class="badge bg-primary">חדשים: {{ p['report'].get('new', 0) }}</span>
+                <span class="badge bg-info text-dark">התנגשות טלפון: {{ p['report'].get('phone_conflicts', 0) }}</span>
+                <span class="badge bg-danger">כפילויות אפשריות: {{ p['report'].get('potential_dupes', [])|length }}</span>
+                <span class="badge bg-secondary">סה"כ: {{ p['report'].get('total', 0) }}</span>
+              </div>
+              {% if p['report'].get('potential_dupes') %}
+              <details class="mt-2 small">
+                <summary class="text-danger">כפילויות אפשריות (שם קיים תחת ת"ז אחר)</summary>
+                <ul class="mb-0 mt-1">
+                  {% for d in p['report']['potential_dupes'] %}
+                  <li>{{ d['name'] }} — קובץ ת"ז {{ d['file_id'] }} ↔ master {{ d['master_id'] }}
+                    {% if d['phone_match'] %}<span class="text-success">(טלפון תואם ✓)</span>{% endif %}</li>
+                  {% endfor %}
+                </ul>
+              </details>
+              {% endif %}
+            </div>
+            <div class="d-flex gap-2">
+              <form method="POST" action="/admin/import/commit/{{ p['id'] }}"
+                    onsubmit="return confirm('לבצע שינוי חידוש לחודש חדש? הלקוחות הנוכחיים יעברו ל\'לקוחות קיימים\' והקובץ ייטען.')">
+                <button type="submit" class="btn btn-warning"><i class="bi bi-arrow-repeat me-1"></i>שינוי חידוש לחודש חדש</button>
+              </form>
+              <form method="POST" action="/admin/import/cancel/{{ p['id'] }}" onsubmit="return confirm('לבטל את הטיוטה?')">
+                <button type="submit" class="btn btn-outline-danger" title="בטל טיוטה"><i class="bi bi-x-lg"></i></button>
+              </form>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
 
   <!-- מילוי לקוחות מהמייל (סריקה אחורה) — כלי תפעולי, מנהל-על בלבד -->
   <div class="col-md-6">
@@ -152,13 +204,20 @@
         <div class="table-responsive mb-4">
           <table class="table table-sm align-middle">
             <thead class="table-light">
-              <tr><th>שם תצוגה</th><th>שם משתמש</th><th>תפקיד</th><th>גישת סוכנויות</th><th>מנהל אחראי</th><th>איפוס סיסמה</th><th>מחיקה</th></tr>
+              <tr><th>שם תצוגה</th><th>שם משתמש</th><th>מייל</th><th>תפקיד</th><th>גישת סוכנויות</th><th>מנהל אחראי</th><th>איפוס סיסמה</th><th>מחיקה</th></tr>
             </thead>
             <tbody>
             {% for u in users %}
             <tr>
               <td>{{ u['display_name'] }}</td>
               <td><code>{{ u['username'] }}</code></td>
+              <td>
+                <form method="POST" action="/admin/users/{{ u['id'] }}/email" class="d-flex gap-1">
+                  <input type="email" name="email" class="form-control form-control-sm" placeholder="מייל"
+                         value="{{ u['email'] or '' }}" style="width:180px">
+                  <button type="submit" class="btn btn-outline-primary btn-sm py-0">שמור</button>
+                </form>
+              </td>
               <td>
                 {% if u['role'] == 'superadmin' %}
                 <span class="badge bg-danger">מנהל על</span>
@@ -227,6 +286,9 @@
           </div>
           <div class="col-6 col-md-2">
             <input type="text" name="username" class="form-control" placeholder="שם משתמש (אנגלית)" required>
+          </div>
+          <div class="col-6 col-md-2">
+            <input type="email" name="email" class="form-control" placeholder="מייל (לקוד אימות)">
           </div>
           <div class="col-6 col-md-2">
             <input type="password" name="password" class="form-control" placeholder="סיסמה" required>

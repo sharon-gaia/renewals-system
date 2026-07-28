@@ -50,7 +50,15 @@
           </div>
           <div class="fw-bold fs-6">{{ item.name or '(ללא שם)' }}</div>
           {% if item.id_number %}<div class="small text-muted">ת.ז: {{ item.id_number }}</div>{% endif %}
-          {% if item.phone %}<div class="small"><i class="bi bi-telephone me-1"></i>{{ item.phone }}</div>{% endif %}
+          {% if item.phone %}
+          <div class="small d-flex align-items-center gap-1">
+            <a href="https://wa.me/972{{ item.phone|replace('-','')|replace(' ','')|replace('0','',1) }}" target="_blank" class="text-decoration-none">
+              <i class="bi bi-whatsapp {{ 'text-warning' if item.brand == 'ווינר' else 'text-success' }} me-1"></i>{{ item.phone }}
+            </a>
+            <a href="https://wa.me/972{{ item.phone|replace('-','')|replace(' ','')|replace('0','',1) }}" target="_blank"
+               class="btn btn-success btn-sm py-0 px-2" title="פתח וואטסאפ"><i class="bi bi-whatsapp"></i></a>
+          </div>
+          {% endif %}
           {% if item.email %}<div class="small"><i class="bi bi-envelope me-1"></i>{{ item.email }}</div>{% endif %}
           {% if item.brand %}
           <span class="badge {{ 'bg-info' if item.brand == 'גאיה' else 'bg-purple' }} mt-1">{{ item.brand }}</span>
@@ -59,7 +67,10 @@
           <div class="small mt-1">תשלומים: {{ item.installments }} | גבייה: {{ item.payment_method }}</div>
           {% endif %}
           {% if item.card_number %}
-          <div class="small fw-bold mt-1"><i class="bi bi-credit-card me-1"></i>{{ item.card_number }} | {{ item.card_expiry }}</div>
+          <div class="small fw-bold mt-1 card-mask" data-type="submission" data-id="{{ item.id }}">
+            <i class="bi bi-credit-card me-1"></i><span class="card-val">{{ item.card_number | mask_card }}</span> | {{ item.card_expiry }}
+            <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="revealCard(this)" title="הצג אשראי מלא"><i class="bi bi-eye"></i></button>
+          </div>
           {% endif %}
           {% if item.comments %}
           <div class="alert alert-warning py-1 px-2 mt-2 small">{{ item.comments }}</div>

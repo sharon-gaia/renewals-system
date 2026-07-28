@@ -257,7 +257,9 @@
             {% if f.installments %}<div class="col-md-4"><strong>תשלומים:</strong> {{ f.installments }}</div>{% endif %}
             {% if f.payment_method %}<div class="col-md-4"><strong>אמצעי גבייה:</strong> {{ f.payment_method }}</div>{% endif %}
             {% if f.coverage %}<div class="col-md-4"><strong>כיסוי:</strong> {{ f.coverage }}</div>{% endif %}
-            {% if f.card_number %}<div class="col-md-4"><strong>כרטיס:</strong> {{ f.card_number }} {{ f.card_expiry or '' }}</div>{% endif %}
+            {% if f.card_number %}<div class="col-md-4 card-mask" data-type="submission" data-id="{{ f.id }}"><strong>כרטיס:</strong>
+              <span class="card-val">{{ f.card_number | mask_card }}</span> {{ f.card_expiry or '' }}
+              <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="revealCard(this)" title="הצג אשראי מלא"><i class="bi bi-eye"></i></button></div>{% endif %}
           </div>
           {% endif %}
           {% if f.comments %}

@@ -7,3 +7,5 @@ gunicorn
 requests
 pdfplumber
 python-bidi
+pyotp
+qrcode
