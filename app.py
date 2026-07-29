@@ -2852,6 +2852,53 @@ def api_stage_import():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/fix-id', methods=['POST'])
+def api_fix_id():
+    """Token-authed correction of a wrong ת"ז in the master, keeping every linked record
+    consistent: the insureds master row, any customers rows (so a later month-commit does
+    NOT recreate the duplicate), and the client_events activity log (re-keyed so history
+    follows the person). Pass dry_run=1 to inspect without changing anything."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    old_id = normalize_id_number(data.get('old_id'))
+    new_id = normalize_id_number(data.get('new_id'))
+    name_check = (data.get('name') or '').strip()
+    dry_run = bool(data.get('dry_run'))
+    if not old_id or not new_id or old_id == new_id:
+        return jsonify({'error': 'need distinct old_id/new_id'}), 400
+    conn = get_db()
+    ins = conn.execute("SELECT id, name FROM insureds WHERE id_number=?", (old_id,)).fetchone()
+    if not ins:
+        conn.close()
+        return jsonify({'error': f'no insured with id_number {old_id}'}), 404
+    if name_check and name_check not in (ins['name'] or ''):
+        conn.close()
+        return jsonify({'error': f"name mismatch: master has '{ins['name']}', expected to contain '{name_check}'"}), 409
+    collide = conn.execute("SELECT id, name FROM insureds WHERE id_number=? AND id!=?",
+                           (new_id, ins['id'])).fetchone()
+    if collide:
+        conn.close()
+        return jsonify({'error': f"new_id {new_id} already exists on insured '{collide['name']}'"}), 409
+    old_key, new_key = event_key(old_id, ''), event_key(new_id, '')
+    cust_n = conn.execute("SELECT COUNT(*) c FROM customers WHERE id_number=?", (old_id,)).fetchone()['c']
+    evt_n = conn.execute("SELECT COUNT(*) c FROM client_events WHERE idkey=?", (old_key,)).fetchone()['c']
+    info = {'insured': ins['name'], 'old_id': old_id, 'new_id': new_id,
+            'customers_rows': cust_n, 'event_rows': evt_n, 'old_key': old_key, 'new_key': new_key}
+    if dry_run:
+        conn.close()
+        return jsonify({'dry_run': True, **info})
+    conn.execute("UPDATE insureds SET id_number=?, updated_at=? WHERE id=?",
+                 (new_id, datetime.datetime.now().isoformat(), ins['id']))
+    conn.execute("UPDATE customers SET id_number=? WHERE id_number=?", (new_id, old_id))
+    if old_key and new_key:
+        conn.execute("UPDATE client_events SET idkey=? WHERE idkey=?", (new_key, old_key))
+    log_event(conn, new_key, f"תיקון ת\"ז: {old_id} → {new_id} (טעינה חד-פעמית מהלפטופ)",
+              'system', kind='id_fix')
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, **info})
+
 @app.route('/api/wa/queue')
 def wa_queue():
     """Per-brand WhatsApp send list for the local sender tool (token-authed)."""
