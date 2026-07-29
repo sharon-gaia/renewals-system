@@ -2819,6 +2819,38 @@ def _wa_api_authed():
     tok = os.environ.get('WA_API_TOKEN', '')
     return bool(tok) and request.headers.get('X-WA-Token') == tok
 
+@app.route('/api/stage-import', methods=['POST'])
+def api_stage_import():
+    """Token-authed equivalent of the '/admin/import' STAGE step, so a renewal file already
+    on the laptop can be staged into a pending import (making the 'שינוי חידוש לחודש חדש'
+    button appear) without re-uploading through the browser. Nothing is applied — commit is
+    still a manual button click in the admin UI."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    f = request.files.get('file')
+    month_name = (request.form.get('month_name') or '').strip()
+    source = request.form.get('source', 'gaia_winner')
+    by = (request.form.get('by') or 'טעינה חד-פעמית מהלפטופ').strip()
+    if not f or not month_name:
+        return jsonify({'error': 'missing file or month_name'}), 400
+    try:
+        blob = f.read()
+        wb = load_workbook(io.BytesIO(blob), data_only=True)
+        rows = _extract_renewal_rows(wb.active, source)
+        conn = get_db()
+        report = _validate_renewal_file(conn, rows)
+        conn.execute("""INSERT INTO pending_imports
+            (source, month_name, filename, file_blob, report_json, uploaded_at, uploaded_by, status)
+            VALUES (?,?,?,?,?,?,?, 'pending')""",
+            (source, month_name, f.filename, blob, json.dumps(report, ensure_ascii=False),
+             datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), by))
+        pid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        conn.commit()
+        conn.close()
+        return jsonify({'ok': True, 'pending_id': pid, 'report': report})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/wa/queue')
 def wa_queue():
     """Per-brand WhatsApp send list for the local sender tool (token-authed)."""
