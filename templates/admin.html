@@ -72,11 +72,11 @@
                 <span class="text-muted small">({{ p['filename'] }} · הועלה {{ p['uploaded_at'] }} ע"י {{ p['uploaded_by'] }})</span>
               </div>
               <div class="mt-2 d-flex flex-wrap gap-2">
-                <span class="badge bg-success">חידושים: {{ p['report'].get('renewals', 0) }}</span>
-                <span class="badge bg-primary">חדשים: {{ p['report'].get('new', 0) }}</span>
+                <span class="badge bg-secondary">סה"כ חידושים בקובץ: {{ p['report'].get('total', 0) }}</span>
+                <span class="badge bg-success">מוכרים במערכת: {{ p['report'].get('renewals', 0) }}</span>
+                <span class="badge bg-primary">חדשים למערכת: {{ p['report'].get('new', 0) }}</span>
                 <span class="badge bg-info text-dark">התנגשות טלפון: {{ p['report'].get('phone_conflicts', 0) }}</span>
                 <span class="badge bg-danger">כפילויות אפשריות: {{ p['report'].get('potential_dupes', [])|length }}</span>
-                <span class="badge bg-secondary">סה"כ: {{ p['report'].get('total', 0) }}</span>
               </div>
               {% if p['report'].get('potential_dupes') %}
               <details class="mt-2 small">

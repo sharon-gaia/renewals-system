@@ -2310,7 +2310,8 @@ def import_excel():
              session.get('display_name') or session.get('username', '')))
         conn.commit()
         conn.close()
-        flash(f"הקובץ נטען לבדיקה: {report['renewals']} חידושים · {report['new']} חדשים · "
+        flash(f"הקובץ נטען לבדיקה: {report['total']} חידושים בקובץ · "
+              f"{report['renewals']} מוכרים במערכת · {report['new']} חדשים למערכת · "
               f"{report['phone_conflicts']} התנגשויות טלפון · {len(report['potential_dupes'])} כפילויות אפשריות. "
               f"בדוק ולחץ 'שינוי חידוש לחודש חדש'.", 'info')
     except Exception as e:
