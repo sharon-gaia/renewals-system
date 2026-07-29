@@ -165,6 +165,25 @@
     </div>
   </div>
 
+  <!-- העשרת מייל/טלפון מקובץ -->
+  <div class="col-md-6">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header bg-dark text-white fw-bold">
+        <i class="bi bi-file-earmark-arrow-up me-2"></i>העשרת מייל/טלפון מקובץ
+      </div>
+      <div class="card-body">
+        <p class="small text-muted mb-3">
+          העלה CSV/Excel (ווינר / גאיה / אופיר). המערכת מזהה אוטומטית מייל/ת"ז/טלפון, מצליבה
+          לפי ת"ז וטלפון (עם 0 בהתחלה), וממלאת מייל/טלפון <strong>חסרים</strong> לכל הלקוחות.
+        </p>
+        <form method="POST" action="/admin/enrich-contacts" enctype="multipart/form-data" class="d-flex gap-2">
+          <input type="file" name="file" class="form-control form-control-sm" accept=".csv,.xlsx,.xls" required>
+          <button class="btn btn-primary btn-sm text-nowrap"><i class="bi bi-arrow-up-circle me-1"></i>העשר</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
   <!-- היסטוריית חודשים -->
   <div class="col-md-6">
     <div class="card border-0 shadow-sm">
