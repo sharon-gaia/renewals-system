@@ -2996,6 +2996,40 @@ def api_sync_renewed_active():
     conn.close()
     return jsonify({'ok': True, 'updated': len(updated), 'names': updated, 'checked': checked})
 
+@app.route('/api/email-coverage')
+def api_email_coverage():
+    """Token-authed email-coverage diagnostic for the active month: per brand, how many
+    customers have a resolvable email at all vs the enrichment gap, and how many actually
+    land in the campaign send bucket (after midwife/VIP/stop-status exclusions)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'error': 'no active month'}), 404
+    conn = get_db()
+    ins_email = {re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0'): (r['email'] or '').strip()
+                 for r in conn.execute("SELECT id_number, email FROM insureds")}
+    stats = {}
+    for c in conn.execute("SELECT * FROM customers WHERE month_id=?", (month['id'],)).fetchall():
+        brand = c['brand']
+        d = stats.setdefault(brand, {'total': 0, 'with_email': 0, 'no_email': 0,
+                                     'midwife': 0, 'vip': 0, 'send_bucket': 0})
+        d['total'] += 1
+        email = _campaign_email_for(conn, c, ins_email)
+        has = bool(email and '@' in email)
+        d['with_email'] += 1 if has else 0
+        d['no_email'] += 0 if has else 1
+        if c['is_midwife']:
+            d['midwife'] += 1
+        if c['is_vip']:
+            d['vip'] += 1
+        excluded = (c['is_midwife'] or c['is_vip'] or (c['status'] or '') in CAMPAIGN_STOP_STATUSES
+                    or ('do_not_contact' in c.keys() and c['do_not_contact']))
+        if has and not excluded:
+            d['send_bucket'] += 1
+    conn.close()
+    return jsonify({'month': month['name'], 'brands': stats})
+
 def _month_state(conn):
     """Snapshot of months + counts, for showing the before/after of a month transition."""
     rows = conn.execute(
