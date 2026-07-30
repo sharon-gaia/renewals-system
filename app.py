@@ -2824,13 +2824,21 @@ def within_business_hours(now=None):
         return False
     return 8 <= now.hour < 16
 
+# Winner customers were historically messaged from Gaia's WhatsApp number; a trust line
+# on Winner's message reassures them it's the same team when it now comes from Winner's number.
+WINNER_WA_TRUST = ("כאן שרון מקבוצת אופיר (גאיה, ווינר ואופיר). בעבר אולי היינו בקשר גם ממספר "
+                   "אחר שלנו — זה אנחנו, אותו צוות ואותו שירות.")
+
 def render_renewal_whatsapp(cust, month_name):
-    """Plain-text renewal message for WhatsApp (concise — link + price + signature)."""
+    """Plain-text renewal message for WhatsApp (concise — link + price + signature).
+    Winner messages open with a trust line (see WINNER_WA_TRUST)."""
     link, _ = renewal_link(cust['brand'], cust['is_midwife'])
     amt = renewal_amount(cust['is_midwife'], cust['premium_last_year'])
     price = (f"המחיר לשנה הקרובה: {amt:,} ₪ — ללא שינוי מהשנה שעברה."
              if amt is not None else "המחיר נשאר כמו שנה שעברה.")
+    trust = f"{WINNER_WA_TRUST}\n" if cust['brand'] == 'ווינר' else ''
     return (f"שלום, {cust['name']}\n"
+            f"{trust}"
             f"הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.\n"
             f"{price}\n\n"
             f"לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו):\n{link}\n\n"
@@ -3222,19 +3230,22 @@ def email_queue():
     month = active_month()
     if not month:
         return jsonify({'count': 0, 'items': []})
+    brand = request.args.get('brand', '')  # '' = all; else 'גאיה'/'ווינר' for the staggered schedule
     conn = get_db()
     buckets = campaign_eligibility(conn, month['id'])
     month_name = HEB_MONTHS[datetime.datetime.now().month]
     today = datetime.date.today().isoformat()
     items = []
     for cust, email in buckets['email']:
+        if brand and cust['brand'] != brand:
+            continue
         if (cust['email_sent_date'] or '') == today:
             continue
         items.append({'id': cust['id'], 'email': email,
                       'subject': 'חידוש הפוליסה המקצועית שלך',
                       'html': render_renewal_email(cust, month_name)})
     conn.close()
-    return jsonify({'count': len(items), 'items': items})
+    return jsonify({'brand': brand, 'count': len(items), 'items': items})
 
 @app.route('/api/email/sent', methods=['POST'])
 def email_sent():
