@@ -2910,6 +2910,57 @@ def api_fix_id():
     conn.close()
     return jsonify({'ok': True, **info})
 
+def _month_state(conn):
+    """Snapshot of months + counts, for showing the before/after of a month transition."""
+    rows = conn.execute(
+        """SELECT id, name, is_active,
+                  (SELECT COUNT(*) FROM customers WHERE customers.month_id=months.id) AS customers
+           FROM months ORDER BY id DESC""").fetchall()
+    insureds = conn.execute("SELECT COUNT(*) c FROM insureds").fetchone()['c']
+    active = next((dict(r) for r in rows if r['is_active']), None)
+    return {'active_month': active['name'] if active else None,
+            'insureds_total': insureds, 'months': [dict(r) for r in rows]}
+
+@app.route('/api/commit-import', methods=['POST'])
+def api_commit_import():
+    """Token-authed equivalent of the '/admin/import/commit' button — apply a staged
+    pending import (the month transition), returning a before/after snapshot so the
+    promotion + archival can be inspected. Uses the newest pending import if no pid."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    pid = (request.get_json(silent=True) or {}).get('pid')
+    conn = get_db()
+    if pid:
+        p = conn.execute("SELECT * FROM pending_imports WHERE id=? AND status='pending'", (pid,)).fetchone()
+    else:
+        p = conn.execute("SELECT * FROM pending_imports WHERE status='pending' ORDER BY id DESC LIMIT 1").fetchone()
+    if not p:
+        conn.close()
+        return jsonify({'error': 'no pending import'}), 404
+    # Outgoing month's renewal outcome (what promotion will set: 'חודש'→פעיל, else→לא פעיל).
+    prev = conn.execute("SELECT * FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    outgoing = None
+    if prev:
+        renewed = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=? AND status='חודש'",
+                               (prev['id'],)).fetchone()['c']
+        total = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=?",
+                             (prev['id'],)).fetchone()['c']
+        outgoing = {'name': prev['name'], 'total': total, 'renewed_active': renewed,
+                    'not_renewed_inactive': total - renewed}
+    before = _month_state(conn)
+    try:
+        wb = load_workbook(io.BytesIO(p['file_blob']), data_only=True)
+        count, promoted, label = _apply_import(conn, wb, p['source'], p['month_name'])
+        conn.execute("UPDATE pending_imports SET status='committed' WHERE id=?", (p['id'],))
+        conn.commit()
+        after = _month_state(conn)
+        conn.close()
+        return jsonify({'ok': True, 'loaded': count, 'promoted': promoted, 'label': label,
+                        'outgoing_month': outgoing, 'before': before, 'after': after})
+    except Exception as e:
+        conn.close()
+        return jsonify({'error': str(e)}), 500
+
 def _policy_to972(phone):
     p = re.sub(r'\D', '', str(phone or ''))
     if not p:
