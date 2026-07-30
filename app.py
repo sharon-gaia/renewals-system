@@ -1364,6 +1364,15 @@ def update_customer(cid):
                 vals.append(agent)
         vals.append(cid)
         conn.execute(f"UPDATE customers SET {sets} WHERE id=?", vals)
+        # A renewal ('חודש') reactivates the person in the master (כל הלקוחות) — even if a
+        # previous month archived them as 'לא פעיל', a late renewal makes them active again.
+        if data.get('status') == 'חודש':
+            idn = normalize_id_number(data.get('id_number') or (crow['id_number'] if crow else ''))
+            if idn:
+                conn.execute(
+                    "UPDATE insureds SET status='פעיל', status_override=1, updated_at=? "
+                    "WHERE ltrim(id_number,'0')=?",
+                    (datetime.datetime.now().isoformat(), idn.lstrip('0')))
     # Write the audit trail for any audited field that actually changed.
     if before:
         now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -2947,6 +2956,37 @@ def api_month_stats():
                     'total': total, 'renewed': renewed, 'not_renewed': total - renewed})
     conn.close()
     return jsonify({'months': out})
+
+@app.route('/api/sync-renewed-active', methods=['POST'])
+def api_sync_renewed_active():
+    """Token-authed retroactive sync: every customer marked 'חודש' whose master record is not
+    'פעיל' is reactivated (status='פעיל', override). Optional {check:name} returns that insured's
+    status after the sync, to verify a specific late renewal."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    conn = get_db()
+    now = datetime.datetime.now().isoformat()
+    updated, seen = [], set()
+    for r in conn.execute("SELECT id_number, name FROM customers WHERE status='חודש'").fetchall():
+        idn = normalize_id_number(r['id_number'])
+        key = (idn or '').lstrip('0')
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        res = conn.execute(
+            "UPDATE insureds SET status='פעיל', status_override=1, updated_at=? "
+            "WHERE ltrim(id_number,'0')=? AND (status IS NULL OR status!='פעיל')", (now, key))
+        if res.rowcount:
+            updated.append(r['name'])
+    conn.commit()
+    checked = None
+    if data.get('check'):
+        checked = [dict(x) for x in conn.execute(
+            "SELECT name, id_number, status, status_override FROM insureds WHERE name LIKE ? LIMIT 8",
+            (f"%{data['check']}%",)).fetchall()]
+    conn.close()
+    return jsonify({'ok': True, 'updated': len(updated), 'names': updated, 'checked': checked})
 
 def _month_state(conn):
     """Snapshot of months + counts, for showing the before/after of a month transition."""
