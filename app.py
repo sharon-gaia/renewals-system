@@ -2964,7 +2964,7 @@ def _policy_queue_items(conn, brand_key):
             'name': c['name'],
             'policy_number': r['policy_number'],
             'brand': brand_key,
-            'phone': POLICY_TEST_PHONE if POLICY_AUTOSEND_TEST else real_phone,
+            'phone': _policy_to972(POLICY_TEST_PHONE) if POLICY_AUTOSEND_TEST else real_phone,
             'email': POLICY_TEST_EMAIL if POLICY_AUTOSEND_TEST else real_email,
             'whatsapp_pending': wa_pending,
             'email_pending': em_pending,
