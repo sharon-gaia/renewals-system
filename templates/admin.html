@@ -107,6 +107,30 @@
   </div>
   {% endif %}
 
+  <!-- חידושים של חודשים קודמים — כדי להמשיך לטפל בלקוחות שמחדשים באיחור -->
+  <div class="col-12">
+    <div class="card border-0 shadow-sm">
+      <div class="card-header fw-bold" style="background:#e7f1ff;">
+        <i class="bi bi-calendar-week me-2"></i>חידושים לפי חודש — המשך טיפול בלקוחות שמחדשים באיחור
+      </div>
+      <div class="card-body">
+        <p class="small text-muted mb-3">
+          גם אחרי מעבר לחודש חדש, אפשר להמשיך לפתוח את רשימת החידושים של חודש קודם ולסמן חידושים
+          מאוחרים (לקוחות שחוזרים יום-יומיים עד שבוע אחרי). סימון "חודש" שם עדיין מפעיל את שליחת
+          הפוליסה האוטומטית כרגיל.
+        </p>
+        <div class="d-flex flex-wrap gap-2">
+          {% for m in months %}
+          <a href="/customers?month={{ m['id'] }}"
+             class="btn btn-sm {{ 'btn-primary' if m['is_active'] else 'btn-outline-secondary' }}">
+            {{ m['name'] }}{% if m['is_active'] %} <span class="badge bg-light text-primary ms-1">פעיל</span>{% endif %}
+          </a>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- מילוי לקוחות מהמייל (סריקה אחורה) — כלי תפעולי, מנהל-על בלבד -->
   <div class="col-md-6">
     <div class="card border-0 shadow-sm">

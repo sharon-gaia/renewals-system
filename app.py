@@ -1165,10 +1165,19 @@ def index():
 @app.route('/customers')
 @login_required
 def customers():
-    month = active_month()
+    # Optional ?month=<id> lets ניהול open a PREVIOUS (archived) month's renewal list so
+    # late renewals can still be worked; default is the active month.
+    req_month = request.args.get('month', type=int)
+    if req_month:
+        conn0 = get_db()
+        month = conn0.execute("SELECT * FROM months WHERE id=?", (req_month,)).fetchone()
+        conn0.close()
+    else:
+        month = active_month()
     if not month:
         flash('אין חודש פעיל. המנהל צריך לטעון נתונים.', 'warning')
         return redirect(url_for('index'))
+    is_archived = not month['is_active']
 
     brand_filter = request.args.get('brand', '')
     status_filter = request.args.get('status', '')
@@ -1209,7 +1218,7 @@ def customers():
     return render_template('customers.html', customers=rows, month=month,
                            brand_filter=brand_filter, status_filter=status_filter,
                            midwife_filter=midwife_filter, search=search,
-                           statuses=STATUSES)
+                           statuses=STATUSES, is_archived=is_archived)
 
 @app.route('/search')
 @login_required
@@ -2264,24 +2273,22 @@ def _validate_renewal_file(conn, rows):
 
 
 def _apply_import(conn, wb, source, month_name):
-    """Apply a renewal file to the active month: promote the current customers of this
-    source's brands into the master, then swap in the fresh rows. (Shared by commit.)"""
+    """Commit a staged renewal file as a NEW month (option ב — each load is its own month).
+    The current active month's customers are promoted into the master and then KEPT (the month
+    is only deactivated, not deleted) so late renewals can still be worked from ניהול; the fresh
+    rows load into a brand-new active month."""
     ws = wb.active
     source_brands = ['אופיר'] if source == 'ofir' else ['גאיה', 'ווינר']
-    month = conn.execute("SELECT * FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
-    if not month:
-        conn.execute("UPDATE months SET is_active=0")
-        conn.execute("INSERT INTO months (name, created_at, is_active) VALUES (?,?,1)",
-                     (month_name, datetime.datetime.now().isoformat()))
-        month_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    else:
-        month_id = month['id']
-        if month_name and month_name != month['name']:
-            conn.execute("UPDATE months SET name=? WHERE id=?", (month_name, month_id))
-    promoted = promote_customers_to_insureds(conn, month_id, brands=source_brands)
-    conn.execute(
-        f"DELETE FROM customers WHERE month_id=? AND brand IN ({','.join('?' * len(source_brands))})",
-        [month_id] + source_brands)
+    now = datetime.datetime.now().isoformat()
+    prev = conn.execute("SELECT * FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    promoted = 0
+    if prev:
+        # Promote the outgoing month into the master, then archive it (keep its customers).
+        promoted = promote_customers_to_insureds(conn, prev['id'], brands=source_brands)
+    conn.execute("UPDATE months SET is_active=0")
+    conn.execute("INSERT INTO months (name, created_at, is_active) VALUES (?,?,1)",
+                 (month_name or 'חודש חדש', now))
+    month_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
     count = _import_ofir(conn, ws, month_id) if source == 'ofir' else _import_gaia_winner(conn, ws, month_id)
     conn.commit()
     label = 'אופיר' if source == 'ofir' else 'גאיה/ווינר'
@@ -2917,14 +2924,14 @@ def _policy_queue_items(conn, brand_key):
     """Documents ready for auto-delivery on `brand_key` ('gaia'|'winner'): a recent
     (≤48h) Harel RENEWAL PDF whose ת"ز matches an active-month customer marked 'חודש',
     still pending on at least one channel. In test mode recipients are forced to Sharon."""
-    month = active_month()
-    if not month:
-        return []
     brands = ['גאיה'] if brand_key == 'gaia' else ['ווינר', 'אופיר']
     custs = {}
-    q = ("SELECT * FROM customers WHERE month_id=? AND status='חודש' AND brand IN (%s)"
+    # Match renewed customers across ALL months (not just the active one) so a late renewer
+    # from a previous month still gets their policy — the ±48h fresh-PDF window bounds it.
+    # Most-recent month wins on duplicate ת"ז.
+    q = ("SELECT * FROM customers WHERE status='חודש' AND brand IN (%s) ORDER BY month_id ASC, id ASC"
          % ','.join('?' * len(brands)))
-    for c in conn.execute(q, [month['id']] + brands).fetchall():
+    for c in conn.execute(q, brands).fetchall():
         idn = normalize_id_number(c['id_number'])
         if idn:
             custs[idn] = c

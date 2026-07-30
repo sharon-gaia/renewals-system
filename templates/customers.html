@@ -3,7 +3,7 @@
 {% block content %}
 
 <div class="d-flex flex-column flex-md-row justify-content-md-between align-items-start align-items-md-center mb-3 gap-2">
-  <h5 class="mb-0"><i class="bi bi-people-fill text-primary me-2"></i>לקוחות — {{ month['name'] }}</h5>
+  <h5 class="mb-0"><i class="bi bi-people-fill text-primary me-2"></i>לקוחות — {{ month['name'] }}{% if is_archived %} <span class="badge bg-warning text-dark">חודש קודם (ארכיון)</span>{% endif %}</h5>
   <div class="d-flex flex-wrap align-items-center gap-2">
     {% if brand_filter or status_filter or search or midwife_filter %}
     <span class="text-muted small">מסונן</span>
@@ -17,8 +17,16 @@
   </div>
 </div>
 
+{% if is_archived %}
+<div class="alert alert-warning py-2 small mb-3">
+  אתה צופה בחודש קודם (לא הפעיל). אפשר להמשיך לסמן חידושים מאוחרים כאן — זה עדיין מפעיל את שליחת הפוליסה.
+  <a href="/customers" class="alert-link">חזרה לחודש הפעיל</a>
+</div>
+{% endif %}
+
 <!-- פילטרים -->
 <form method="GET" class="row g-2 mb-3">
+  {% if is_archived %}<input type="hidden" name="month" value="{{ month['id'] }}">{% endif %}
   <div class="col-6 col-md-3">
     <input type="text" name="q" class="form-control" placeholder="חיפוש שם / טלפון / פוליסה" value="{{ search }}">
   </div>
