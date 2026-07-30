@@ -2931,6 +2931,23 @@ def api_rename_month():
     conn.close()
     return jsonify({'ok': True, 'months': months})
 
+@app.route('/api/month-stats')
+def api_month_stats():
+    """Token-authed per-month status breakdown — lets late renewals on an archived
+    month be verified over time (renewed = status 'חודש')."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    out = []
+    for m in conn.execute("SELECT id, name, is_active FROM months ORDER BY id DESC").fetchall():
+        total = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=?", (m['id'],)).fetchone()['c']
+        renewed = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=? AND status='חודש'",
+                               (m['id'],)).fetchone()['c']
+        out.append({'id': m['id'], 'name': m['name'], 'is_active': m['is_active'],
+                    'total': total, 'renewed': renewed, 'not_renewed': total - renewed})
+    conn.close()
+    return jsonify({'months': out})
+
 def _month_state(conn):
     """Snapshot of months + counts, for showing the before/after of a month transition."""
     rows = conn.execute(
