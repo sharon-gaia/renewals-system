@@ -3811,6 +3811,7 @@ POLICY_TEST_EMAIL = os.environ.get('POLICY_TEST_EMAIL', 'sharon@gaia-ins.co.il')
 POLICY_SEND_WINDOW_HOURS = 48  # only auto-send documents received within this window
 
 POLICY_WA_RENEWAL = (
+    "תודה שבחרת להמשיך אצלנו את הביטוח המקצועי!\n\n"
     "*הפוליסה היא החשבונית, אפשר להעביר את זה לרואה החשבון שלך וזה מה שצריך כהוצאה מוכרת*.\n"
     "אני זמין כאן בוואטסאפ לכל שאלה או שירות.\n\n"
     "רק רציתי לציין שאנחנו בקבוצה מציעים גם פגישה אישית בשיחת טלפון, אצלך בבית, "
