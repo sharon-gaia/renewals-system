@@ -2910,6 +2910,27 @@ def api_fix_id():
     conn.close()
     return jsonify({'ok': True, **info})
 
+@app.route('/api/rename-month', methods=['POST'])
+def api_rename_month():
+    """Token-authed month rename (fixes a garbled name). With no name, just reads months."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip()
+    mid = data.get('id')
+    conn = get_db()
+    if name:
+        if mid:
+            conn.execute("UPDATE months SET name=? WHERE id=?", (name, mid))
+        else:
+            row = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+            if row:
+                conn.execute("UPDATE months SET name=? WHERE id=?", (name, row['id']))
+        conn.commit()
+    months = [dict(r) for r in conn.execute("SELECT id, name, is_active FROM months ORDER BY id DESC")]
+    conn.close()
+    return jsonify({'ok': True, 'months': months})
+
 def _month_state(conn):
     """Snapshot of months + counts, for showing the before/after of a month transition."""
     rows = conn.execute(
