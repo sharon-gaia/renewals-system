@@ -794,6 +794,10 @@ def init_db():
         conn.execute("""UPDATE policy_records SET doc_date=(
             SELECT received_at FROM policy_documents WHERE policy_documents.id=policy_records.policy_document_id)
             WHERE doc_date IS NULL""")
+    # Auto policy-delivery tracking: per-channel send timestamps on the document.
+    existing_pd = [r[1] for r in conn.execute("PRAGMA table_info(policy_documents)").fetchall()]
+    if 'email_sent_at' not in existing_pd:
+        conn.execute("ALTER TABLE policy_documents ADD COLUMN email_sent_at TEXT")
     conn.commit()
 
     # Zero-pad short numeric ID numbers to 9 digits (idempotent — once padded,
@@ -2899,6 +2903,123 @@ def api_fix_id():
     conn.close()
     return jsonify({'ok': True, **info})
 
+def _policy_to972(phone):
+    p = re.sub(r'\D', '', str(phone or ''))
+    if not p:
+        return ''
+    if p.startswith('0'):
+        return '972' + p[1:]
+    if not p.startswith('972'):
+        return '972' + p
+    return p
+
+def _policy_queue_items(conn, brand_key):
+    """Documents ready for auto-delivery on `brand_key` ('gaia'|'winner'): a recent
+    (≤48h) Harel RENEWAL PDF whose ת"ز matches an active-month customer marked 'חודש',
+    still pending on at least one channel. In test mode recipients are forced to Sharon."""
+    month = active_month()
+    if not month:
+        return []
+    brands = ['גאיה'] if brand_key == 'gaia' else ['ווינר', 'אופיר']
+    custs = {}
+    q = ("SELECT * FROM customers WHERE month_id=? AND status='חודש' AND brand IN (%s)"
+         % ','.join('?' * len(brands)))
+    for c in conn.execute(q, [month['id']] + brands).fetchall():
+        idn = normalize_id_number(c['id_number'])
+        if idn:
+            custs[idn] = c
+    if not custs:
+        return []
+    cutoff = (datetime.datetime.now() - datetime.timedelta(hours=POLICY_SEND_WINDOW_HOURS)
+              ).strftime('%Y-%m-%d %H:%M')
+    rows = conn.execute(
+        """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
+                  pd.policy_number, pr.insured_id, pr.doc_type_label
+           FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id
+           WHERE pd.received_at >= ? ORDER BY pd.received_at DESC""",
+        (cutoff,)).fetchall()
+    items, seen = [], set()
+    for r in rows:
+        if r['doc_id'] in seen or not is_renewal_doc(r['doc_type_label']):
+            continue
+        c = custs.get(normalize_id_number(r['insured_id']))
+        if not c:
+            continue
+        wa_pending = not r['whatsapp_sent_at']
+        em_pending = not r['email_sent_at']
+        if not (wa_pending or em_pending):
+            continue
+        seen.add(r['doc_id'])
+        real_phone = _policy_to972(c['phone'])
+        real_email = (c['email'] or '').strip() or (_campaign_email_for(conn, c) or '')
+        items.append({
+            'doc_id': r['doc_id'],
+            'name': c['name'],
+            'policy_number': r['policy_number'],
+            'brand': brand_key,
+            'phone': POLICY_TEST_PHONE if POLICY_AUTOSEND_TEST else real_phone,
+            'email': POLICY_TEST_EMAIL if POLICY_AUTOSEND_TEST else real_email,
+            'whatsapp_pending': wa_pending,
+            'email_pending': em_pending,
+            'wa_text': POLICY_WA_RENEWAL,
+            'email_subject': POLICY_EMAIL_SUBJECT,
+            'email_body': policy_email_body(c['name']),
+            'pdf_url': f'/api/policy/pdf/{r["doc_id"]}',
+            'test_mode': POLICY_AUTOSEND_TEST,
+            'intended': f"{c['name']} · {real_phone or '—'} · {real_email or '—'}",
+        })
+    return items
+
+@app.route('/api/policy/queue')
+def policy_queue():
+    """Per-brand auto-delivery list for the local sender (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', '')
+    if brand not in ('gaia', 'winner'):
+        return jsonify({'error': 'bad brand'}), 400
+    conn = get_db()
+    items = _policy_queue_items(conn, brand)
+    conn.close()
+    return jsonify({'brand': brand, 'test_mode': POLICY_AUTOSEND_TEST, 'count': len(items), 'items': items})
+
+@app.route('/api/policy/pdf/<int:doc_id>')
+def policy_pdf(doc_id):
+    """Serve a policy PDF to the local sender so it can attach + save it (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    doc = conn.execute('SELECT filename, filepath FROM policy_documents WHERE id=?', (doc_id,)).fetchone()
+    conn.close()
+    if not doc or not doc['filepath'] or not os.path.exists(doc['filepath']):
+        return jsonify({'error': 'not found'}), 404
+    safe_name = re.sub(r'[\r\n]+', ' ', doc['filename']).strip()
+    return send_file(doc['filepath'], as_attachment=True, download_name=safe_name)
+
+@app.route('/api/policy/sent', methods=['POST'])
+def policy_sent():
+    """Mark a policy as delivered on a channel + log it to the client timeline (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    doc_id, channel = data.get('doc_id'), data.get('channel')
+    if not doc_id or channel not in ('whatsapp', 'email'):
+        return jsonify({'error': 'need doc_id + channel'}), 400
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    col = 'whatsapp_sent_at' if channel == 'whatsapp' else 'email_sent_at'
+    conn.execute(f"UPDATE policy_documents SET {col}=? WHERE id=?", (now, doc_id))
+    pr = conn.execute(
+        "SELECT insured_id FROM policy_records WHERE policy_document_id=? LIMIT 1", (doc_id,)).fetchone()
+    if pr and pr['insured_id']:
+        ch = 'וואטסאפ' if channel == 'whatsapp' else 'מייל'
+        tag = ' [בדיקה]' if POLICY_AUTOSEND_TEST else ''
+        log_event(conn, event_key(normalize_id_number(pr['insured_id']), f'doc-{doc_id}'),
+                  f"פוליסת חידוש נשלחה אוטומטית ({ch}){tag}", 'system', kind='policy_send')
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
 @app.route('/api/wa/queue')
 def wa_queue():
     """Per-brand WhatsApp send list for the local sender tool (token-authed)."""
@@ -3678,6 +3799,41 @@ def _check_email_inbox_impl():
     return processed
 
 POLICY_DOCS_DIR = os.path.join(ATTACHMENTS_DIR, 'policies')
+
+# ── Automatic policy delivery (stage 1: renewals) ────────────────────────────
+# When a Harel renewal PDF arrives whose ת"ז matches a customer already marked
+# 'חודש' (renewed) in the active month, the local wa-sender picks it up and sends
+# it to the customer on BOTH channels (WhatsApp + email) with the PDF attached.
+# TEST mode routes every send to Sharon only until the flag is turned off.
+POLICY_AUTOSEND_TEST = os.environ.get('POLICY_AUTOSEND_TEST', '1') != '0'
+POLICY_TEST_PHONE = os.environ.get('POLICY_TEST_PHONE', '0502030579')
+POLICY_TEST_EMAIL = os.environ.get('POLICY_TEST_EMAIL', 'sharon@gaia-ins.co.il')
+POLICY_SEND_WINDOW_HOURS = 48  # only auto-send documents received within this window
+
+POLICY_WA_RENEWAL = (
+    "*הפוליסה היא החשבונית, אפשר להעביר את זה לרואה החשבון שלך וזה מה שצריך כהוצאה מוכרת*.\n"
+    "אני זמין כאן בוואטסאפ לכל שאלה או שירות.\n\n"
+    "רק רציתי לציין שאנחנו בקבוצה מציעים גם פגישה אישית בשיחת טלפון, אצלך בבית, "
+    "או בכל מקום שנוח לך!\nאחרי שהפתענו אותך במחיר של הביטוח הזה, אולי נצליח להפתיע "
+    "אותך גם בביטוחים האחרים 😊\n\n"
+    "*האם אפשר לחזור אליך בנוגע לביטוחים שיגנו עליך אישית אם יקרה לך משהו?*"
+)
+POLICY_EMAIL_SUBJECT = "הפוליסה המקצועית שלך — קבוצת אופיר"
+
+def policy_email_body(name):
+    greet = f"שלום {name}," if name else "שלום,"
+    return (f"{greet}\n\n"
+            "מצורפת פוליסת האחריות המקצועית המחודשת שלך.\n"
+            "הפוליסה מהווה חשבונית ומשמשת כהוצאה מוכרת — אפשר להעביר אותה לרואה החשבון.\n"
+            "אני זמין לכל שאלה או שירות.\n\n"
+            "—\nשרון דר, מנהל מכירות אחריות מקצועית\nקבוצת אופיר — אופיר, גאיה, ווינר\n073-3915555")
+
+def _wa_brand_key(brand):
+    """CRM brand → wa-sender client key. Winner handles ווינר + אופיר numbers."""
+    return 'gaia' if brand == 'גאיה' else 'winner'
+
+def is_renewal_doc(doc_type_label):
+    return 'חידוש' in (doc_type_label or '')
 
 def parse_harel_policy_pdf(source):
     """Best-effort field extraction from a Harel policy-schedule ('דף הרשימה') PDF page.
