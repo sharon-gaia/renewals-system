@@ -2971,6 +2971,7 @@ def _policy_queue_items(conn, brand_key):
             'wa_text': POLICY_WA_RENEWAL,
             'email_subject': POLICY_EMAIL_SUBJECT,
             'email_body': policy_email_body(c['name']),
+            'email_html': policy_email_html(c['name']),
             'pdf_url': f'/api/policy/pdf/{r["doc_id"]}',
             'test_mode': POLICY_AUTOSEND_TEST,
             'intended': f"{c['name']} · {real_phone or '—'} · {real_email or '—'}",
@@ -3826,15 +3827,30 @@ POLICY_WA_RENEWAL = (
     "אותך גם בביטוחים האחרים 😊\n\n"
     "*האם אפשר לחזור אליך בנוגע לביטוחים שיגנו עליך אישית אם יקרה לך משהו?*"
 )
-POLICY_EMAIL_SUBJECT = "הפוליסה המקצועית שלך — קבוצת אופיר"
+POLICY_EMAIL_SUBJECT = "הפוליסה המקצועית שלך"
+POLICY_EMAIL_SIGN = ("—\nשרון דר\nמנהל תחום אחריות מקצועית\nגאיה, ווינר ואופיר")
 
 def policy_email_body(name):
+    """Plain-text fallback body."""
     greet = f"שלום {name}," if name else "שלום,"
     return (f"{greet}\n\n"
             "מצורפת פוליסת האחריות המקצועית המחודשת שלך.\n"
             "הפוליסה מהווה חשבונית ומשמשת כהוצאה מוכרת — אפשר להעביר אותה לרואה החשבון.\n"
             "אני זמין לכל שאלה או שירות.\n\n"
-            "—\nשרון דר, מנהל מכירות אחריות מקצועית\nקבוצת אופיר — אופיר, גאיה, ווינר\n073-3915555")
+            f"{POLICY_EMAIL_SIGN}")
+
+def policy_email_html(name):
+    """Right-aligned (RTL) HTML body for the policy-delivery email."""
+    greet = f"שלום {name}," if name else "שלום,"
+    return (
+        '<div dir="rtl" style="text-align:right;font-family:Arial,Helvetica,sans-serif;'
+        'font-size:15px;line-height:1.6;color:#222;">'
+        f'{greet}<br><br>'
+        'מצורפת פוליסת האחריות המקצועית המחודשת שלך.<br>'
+        'הפוליסה מהווה חשבונית ומשמשת כהוצאה מוכרת — אפשר להעביר אותה לרואה החשבון.<br>'
+        'אני זמין לכל שאלה או שירות.<br><br>'
+        '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
+        '</div>')
 
 def _wa_brand_key(brand):
     """CRM brand → wa-sender client key. Winner handles ווינר + אופיר numbers."""
