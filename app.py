@@ -2281,6 +2281,59 @@ def _validate_renewal_file(conn, rows):
             'phone_conflicts': phone_conflict, 'potential_dupes': dupes}
 
 
+def _month_activity_summary(cust, month_name):
+    """One-line summary of a customer's month activity (status / WhatsApp / calls / note),
+    or None if there was none — used to preserve activity in the by-ת"ז event log."""
+    parts = []
+    st = (cust['status'] or '').strip()
+    if st:
+        parts.append(st)
+    wa = (cust['whatsapp_sent_date'] or '').strip()
+    if wa:
+        try:
+            wa = datetime.datetime.strptime(wa[:10], '%Y-%m-%d').strftime('%d/%m/%Y')
+        except Exception:
+            pass
+        parts.append(f"וואטסאפ נשלח {wa}")
+    calls = sum(1 for i in (1, 2, 3) if (cust[f'call_status_{i}'] or '').strip())
+    if calls:
+        parts.append(f"{calls} ניסיונות קשר")
+    note = (cust['agent_notes'] or '').strip()
+    if not parts and not note:
+        return None
+    text = f"פעילות {month_name}"
+    if parts:
+        text += ': ' + ' · '.join(parts)
+    if note:
+        text += f" — {note}"
+    return text
+
+
+def _backfill_activity_for(conn, month_id, month_name, dry=False):
+    """Log a one-line activity-summary event (by ת"ז) for every customer of `month_id` that
+    had activity — so the event log follows the person across months. Idempotent (skips a
+    customer that already has a 'פעילות <month>' event). Returns (logged, skipped, samples)."""
+    logged = skipped = 0
+    samples = []
+    for cust in conn.execute("SELECT * FROM customers WHERE month_id=?", (month_id,)).fetchall():
+        summary = _month_activity_summary(cust, month_name)
+        if not summary:
+            continue
+        z = event_key(cust['id_number'], '')
+        if not z:
+            continue
+        if conn.execute("SELECT 1 FROM client_events WHERE idkey=? AND note LIKE ?",
+                        (z, f"פעילות {month_name}%")).fetchone():
+            skipped += 1
+            continue
+        if not dry:
+            log_event(conn, z, summary, 'מערכת (סיכום חודש)', kind='month_activity')
+        logged += 1
+        if len(samples) < 8:
+            samples.append({'name': cust['name'], 'summary': summary})
+    return logged, skipped, samples
+
+
 def _apply_import(conn, wb, source, month_name):
     """Commit a staged renewal file as a NEW month (option ב — each load is its own month).
     The current active month's customers are promoted into the master and then KEPT (the month
@@ -2294,6 +2347,8 @@ def _apply_import(conn, wb, source, month_name):
     if prev:
         # Promote the outgoing month into the master, then archive it (keep its customers).
         promoted = promote_customers_to_insureds(conn, prev['id'], brands=source_brands)
+        # Preserve the outgoing month's activity in the by-ת"ז event log (follows the person).
+        _backfill_activity_for(conn, prev['id'], prev['name'])
     conn.execute("UPDATE months SET is_active=0")
     conn.execute("INSERT INTO months (name, created_at, is_active) VALUES (?,?,1)",
                  (month_name or 'חודש חדש', now))
@@ -2999,6 +3054,33 @@ def api_sync_renewed_active():
             (f"%{data['check']}%",)).fetchall()]
     conn.close()
     return jsonify({'ok': True, 'updated': len(updated), 'names': updated, 'checked': checked})
+
+@app.route('/api/backfill-activity-log', methods=['POST'])
+def api_backfill_activity_log():
+    """Token-authed one-time backfill: log a 'פעילות <month>' summary event (by ת"ז) for every
+    customer of an archived month that had activity but no such event yet. Pass dry_run to
+    preview. Defaults to the most recent archived (inactive) month."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    dry = bool(data.get('dry_run'))
+    mid = data.get('month_id')
+    conn = get_db()
+    if mid:
+        m = conn.execute("SELECT * FROM months WHERE id=?", (mid,)).fetchone()
+    else:
+        m = conn.execute("SELECT * FROM months WHERE is_active=0 ORDER BY id DESC LIMIT 1").fetchone()
+    if not m:
+        conn.close()
+        return jsonify({'error': 'no archived month'}), 404
+    logged, skipped, samples = _backfill_activity_for(conn, m['id'], m['name'], dry=dry)
+    if not dry:
+        conn.commit()
+    conn.close()
+    result = {'ok': True, 'dry_run': dry, 'month': m['name'],
+              'skipped_existing': skipped, 'samples': samples}
+    result['to_log' if dry else 'logged'] = logged
+    return jsonify(result)
 
 @app.route('/api/email-coverage')
 def api_email_coverage():
