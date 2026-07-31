@@ -3489,76 +3489,101 @@ def admin_backfill_site123():
     return redirect(url_for('admin'))
 
 
+def _enrich_from_file(conn, f):
+    """Parse a contacts export (CSV/XLSX) and fill MISSING email/phone on insureds+customers.
+    Content-based parsing (email by @, ת"ז by checksum, phone by pattern), matching by ת"ז
+    then phone (file phone normalised to leading-0). Returns (emails_filled, phones_filled);
+    the caller commits."""
+    rows = []
+    fname = (f.filename or '').lower()
+    if fname.endswith(('.xlsx', '.xls')):
+        wb = load_workbook(f, read_only=True, data_only=True)
+        for ws in wb.worksheets:
+            for r in ws.iter_rows(values_only=True):
+                rows.append(['' if c is None else str(c) for c in r])
+    else:
+        import csv as _csv, io as _io
+        for r in _csv.reader(_io.StringIO(f.read().decode('utf-8', 'replace'))):
+            rows.append(r)
+
+    def z(s):
+        return re.sub(r'\D', '', str(s or '')).lstrip('0')
+
+    def ph0(s):
+        d = re.sub(r'\D', '', str(s or ''))
+        return ('0' + d[-9:]) if len(d) >= 9 else ''
+
+    id2, ph2email = {}, {}
+    for r in rows:
+        cells = [str(c or '').strip() for c in r]
+        email = next((c for c in cells if '@' in c and '.' in c and 'http' not in c), '')
+        if '@' not in email:
+            email = ''
+        idc = next((c for c in cells if 5 <= len(re.sub(r'\D', '', c)) <= 9 and is_israeli_id(c)), '')
+        phone = next((c for c in cells if re.fullmatch(r'0?5\d{8}', re.sub(r'\D', '', c))), '')
+        zi = z(idc)
+        if zi:
+            d = id2.setdefault(zi, {})
+            if email:
+                d.setdefault('email', email)
+            if phone:
+                d.setdefault('phone', ph0(phone))
+        if phone and email:
+            ph2email.setdefault(ph0(phone)[-9:], email)
+
+    em_fill = ph_fill = 0
+    for tbl in ('insureds', 'customers'):
+        for row in conn.execute(f"SELECT id, id_number, email, phone FROM {tbl}").fetchall():
+            rec = id2.get(z(row['id_number']), {})
+            cur_em = (row['email'] or '').strip()
+            cur_ph = (row['phone'] or '').strip()
+            if (not cur_em or '@' not in cur_em):
+                new_em = rec.get('email') or ph2email.get(re.sub(r'\D', '', cur_ph)[-9:], '')
+                if new_em:
+                    conn.execute(f"UPDATE {tbl} SET email=? WHERE id=?", (new_em, row['id']))
+                    em_fill += 1
+            if not cur_ph and rec.get('phone'):
+                conn.execute(f"UPDATE {tbl} SET phone=? WHERE id=?", (rec['phone'], row['id']))
+                ph_fill += 1
+    return em_fill, ph_fill
+
+
 @app.route('/admin/enrich-contacts', methods=['POST'])
 @login_required
 @superadmin_required
 def enrich_contacts():
-    """Fill missing email/phone on insureds+customers from an uploaded contacts export
-    (CSV/XLSX). Content-based parsing (email by @, ת"ז by checksum, phone by pattern),
-    matching by ת"ז then phone; the file phone is normalised to a leading-0 form."""
+    """Fill missing email/phone on insureds+customers from an uploaded contacts export."""
     f = request.files.get('file')
     if not f:
         flash('חסר קובץ', 'danger')
         return redirect(url_for('admin'))
     try:
-        rows = []
-        fname = (f.filename or '').lower()
-        if fname.endswith(('.xlsx', '.xls')):
-            wb = load_workbook(f, read_only=True, data_only=True)
-            for ws in wb.worksheets:
-                for r in ws.iter_rows(values_only=True):
-                    rows.append(['' if c is None else str(c) for c in r])
-        else:
-            import csv as _csv, io as _io
-            for r in _csv.reader(_io.StringIO(f.read().decode('utf-8', 'replace'))):
-                rows.append(r)
-
-        def z(s):
-            return re.sub(r'\D', '', str(s or '')).lstrip('0')
-
-        def ph0(s):
-            d = re.sub(r'\D', '', str(s or ''))
-            return ('0' + d[-9:]) if len(d) >= 9 else ''
-
-        id2, ph2email = {}, {}
-        for r in rows:
-            cells = [str(c or '').strip() for c in r]
-            email = next((c for c in cells if '@' in c and '.' in c and 'http' not in c), '')
-            if '@' not in email:
-                email = ''
-            idc = next((c for c in cells if 5 <= len(re.sub(r'\D', '', c)) <= 9 and is_israeli_id(c)), '')
-            phone = next((c for c in cells if re.fullmatch(r'0?5\d{8}', re.sub(r'\D', '', c))), '')
-            zi = z(idc)
-            if zi:
-                d = id2.setdefault(zi, {})
-                if email:
-                    d.setdefault('email', email)
-                if phone:
-                    d.setdefault('phone', ph0(phone))
-            if phone and email:
-                ph2email.setdefault(ph0(phone)[-9:], email)
-
         conn = get_db()
-        em_fill = ph_fill = 0
-        for tbl in ('insureds', 'customers'):
-            for row in conn.execute(f"SELECT id, id_number, email, phone FROM {tbl}").fetchall():
-                rec = id2.get(z(row['id_number']), {})
-                cur_em = (row['email'] or '').strip()
-                cur_ph = (row['phone'] or '').strip()
-                if (not cur_em or '@' not in cur_em):
-                    new_em = rec.get('email') or ph2email.get(re.sub(r'\D', '', cur_ph)[-9:], '')
-                    if new_em:
-                        conn.execute(f"UPDATE {tbl} SET email=? WHERE id=?", (new_em, row['id']))
-                        em_fill += 1
-                if not cur_ph and rec.get('phone'):
-                    conn.execute(f"UPDATE {tbl} SET phone=? WHERE id=?", (rec['phone'], row['id']))
-                    ph_fill += 1
+        em_fill, ph_fill = _enrich_from_file(conn, f)
         conn.commit()
         conn.close()
         flash(f'העשרה מ-{f.filename}: מולאו {em_fill} מיילים ו-{ph_fill} טלפונים (לפי ת"ז/טלפון).', 'success')
     except Exception as e:
         flash(f'שגיאה בהעשרה: {e}', 'danger')
     return redirect(url_for('admin'))
+
+
+@app.route('/api/enrich-contacts', methods=['POST'])
+def api_enrich_contacts():
+    """Token-authed enrichment (same logic as /admin/enrich-contacts) — returns fill counts."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'missing file'}), 400
+    try:
+        conn = get_db()
+        em_fill, ph_fill = _enrich_from_file(conn, f)
+        conn.commit()
+        conn.close()
+        return jsonify({'ok': True, 'file': f.filename, 'emails_filled': em_fill, 'phones_filled': ph_fill})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/renewal', methods=['POST'])
