@@ -2356,9 +2356,13 @@ def import_commit(pid):
         conn.execute("UPDATE pending_imports SET status='committed' WHERE id=?", (pid,))
         conn.commit()
         conn.close()
+        # Auto-enrich the newly-loaded customers (SITE123 + stored contact files, by ת"ז),
+        # in the background so the commit returns immediately.
+        threading.Thread(target=_run_post_load_enrichment, daemon=True).start()
         msg = f'בוצע: נטענו {count} חידושים ({label})'
         if promoted:
             msg += f' · {promoted} לקוחות קודמים עברו ל"כל הלקוחות"'
+        msg += ' · העשרת מיילים (SITE123 + קבצים) רצה ברקע'
         flash(msg, 'success')
     except Exception as e:
         conn.close()
@@ -3075,8 +3079,10 @@ def api_commit_import():
         conn.commit()
         after = _month_state(conn)
         conn.close()
+        threading.Thread(target=_run_post_load_enrichment, daemon=True).start()
         return jsonify({'ok': True, 'loaded': count, 'promoted': promoted, 'label': label,
-                        'outgoing_month': outgoing, 'before': before, 'after': after})
+                        'outgoing_month': outgoing, 'before': before, 'after': after,
+                        'enrichment': 'running in background'})
     except Exception as e:
         conn.close()
         return jsonify({'error': str(e)}), 500
@@ -3489,21 +3495,22 @@ def admin_backfill_site123():
     return redirect(url_for('admin'))
 
 
-def _enrich_from_file(conn, f):
-    """Parse a contacts export (CSV/XLSX) and fill MISSING email/phone on insureds+customers.
-    Content-based parsing (email by @, ת"ז by checksum, phone by pattern), matching by ת"ז
-    then phone (file phone normalised to leading-0). Returns (emails_filled, phones_filled);
-    the caller commits."""
+def _enrich_from_bytes(conn, filename, data):
+    """Parse a contacts export (CSV/XLSX bytes) and fill MISSING email/phone on
+    insureds+customers. Content-based parsing (email by @, ת"ז by checksum, phone by
+    pattern), matching by ת"ז then phone (file phone normalised to leading-0). Returns
+    (emails_filled, phones_filled); the caller commits."""
     rows = []
-    fname = (f.filename or '').lower()
+    fname = (filename or '').lower()
     if fname.endswith(('.xlsx', '.xls')):
-        wb = load_workbook(f, read_only=True, data_only=True)
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
         for ws in wb.worksheets:
             for r in ws.iter_rows(values_only=True):
                 rows.append(['' if c is None else str(c) for c in r])
     else:
         import csv as _csv, io as _io
-        for r in _csv.reader(_io.StringIO(f.read().decode('utf-8', 'replace'))):
+        text = data.decode('utf-8', 'replace') if isinstance(data, (bytes, bytearray)) else str(data)
+        for r in _csv.reader(_io.StringIO(text)):
             rows.append(r)
 
     def z(s):
@@ -3546,6 +3553,72 @@ def _enrich_from_file(conn, f):
                 conn.execute(f"UPDATE {tbl} SET phone=? WHERE id=?", (rec['phone'], row['id']))
                 ph_fill += 1
     return em_fill, ph_fill
+
+
+def _enrich_from_file(conn, f):
+    """Thin wrapper: enrich from an uploaded Flask file object."""
+    return _enrich_from_bytes(conn, f.filename, f.read())
+
+
+def _enrich_dir():
+    # Lazy (ATTACHMENTS_DIR is defined later in the module).
+    return os.path.join(ATTACHMENTS_DIR, 'enrich')
+
+_enrich_state = {'running': False, 'started': None, 'done': None, 'report': None}
+
+def _run_post_load_enrichment(days_back=400):
+    """Background job after a month load: cross-reference SITE123 (Gmail) + the stored
+    contact files, keyed by ת"ז, to fill emails for the newly-loaded customers."""
+    _enrich_state.update(running=True, started=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), report=None)
+    rep = {'site123': None, 'files': []}
+    try:
+        rep['site123'] = backfill_site123(days_back)
+    except Exception as e:
+        rep['site123'] = {'error': str(e)}
+    try:
+        conn = get_db()
+        d = _enrich_dir()
+        if os.path.isdir(d):
+            for fn in sorted(os.listdir(d)):
+                fp = os.path.join(d, fn)
+                if not os.path.isfile(fp):
+                    continue
+                try:
+                    with open(fp, 'rb') as fh:
+                        em, ph = _enrich_from_bytes(conn, fn, fh.read())
+                    rep['files'].append({'file': fn, 'emails': em, 'phones': ph})
+                except Exception as e:
+                    rep['files'].append({'file': fn, 'error': str(e)})
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        rep['files_error'] = str(e)
+    _enrich_state.update(running=False, done=datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), report=rep)
+
+@app.route('/api/enrich-files', methods=['GET', 'POST'])
+def api_enrich_files():
+    """Token-authed management of the stored enrichment files that auto-run on each month
+    load. POST uploads/refreshes a file; GET lists them."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = _enrich_dir()
+    os.makedirs(d, exist_ok=True)
+    if request.method == 'POST':
+        f = request.files.get('file')
+        if not f:
+            return jsonify({'error': 'missing file'}), 400
+        safe = re.sub(r'[\\/*?:"<>|]', '_', f.filename or 'file.csv')
+        f.save(os.path.join(d, safe))
+    files = [{'name': fn, 'size': os.path.getsize(os.path.join(d, fn))}
+             for fn in sorted(os.listdir(d)) if os.path.isfile(os.path.join(d, fn))]
+    return jsonify({'ok': True, 'files': files})
+
+@app.route('/api/enrich-status')
+def api_enrich_status():
+    """Token-authed status/report of the last auto-enrichment run."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    return jsonify(_enrich_state)
 
 
 @app.route('/admin/enrich-contacts', methods=['POST'])
