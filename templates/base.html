@@ -41,7 +41,7 @@
         <li class="nav-item"><a class="nav-link" href="/admin/other-forms"><i class="bi bi-inbox me-1"></i>טפסים שאינם חידושים</a></li>
         <li class="nav-item"><a class="nav-link" href="/admin/policy-records"><i class="bi bi-people me-1"></i>לקוחות קבוצת אופיר</a></li>
         <li class="nav-item"><a class="nav-link" href="/admin/performance"><i class="bi bi-graph-up-arrow me-1"></i>ביצועי נציגים</a></li>
-        <li class="nav-item"><a class="nav-link" href="/admin/insurance-cert"><i class="bi bi-file-earmark-check me-1"></i>אישור קיום ביטוח</a></li>
+        {% if can_issue_cert %}<li class="nav-item"><a class="nav-link" href="/admin/insurance-cert"><i class="bi bi-file-earmark-check me-1"></i>אישור קיום ביטוח</a></li>{% endif %}
         {% endif %}
         {% if session.role == 'superadmin' %}
         <li class="nav-item"><a class="nav-link" href="/admin/campaign"><i class="bi bi-megaphone me-1"></i>קמפיין</a></li>

@@ -971,6 +971,18 @@ CERT_CONSTANTS = {
     'insurer':         'הראל חברה לביטוח בע"מ',
 }
 
+# Who may issue certificates. Restricted to Sharon's user only (until further notice) —
+# gates both the route and the visibility of the nav/dashboard links.
+INSURANCE_CERT_USERS = {'sharon'}
+
+def can_issue_cert():
+    return session.get('username') in INSURANCE_CERT_USERS
+
+@app.context_processor
+def _inject_cert_perm():
+    """Expose `can_issue_cert` to all templates (nav + dashboard link visibility)."""
+    return {'can_issue_cert': can_issue_cert()}
+
 
 def extract_insured_occupation(pdf_path):
     """Best-effort pull of "העיסוק המבוטח" from page 2 of a stored Harel policy PDF.
@@ -1725,6 +1737,10 @@ def insurance_cert():
     """אישור קיום ביטוחים (נספח א'): pick one of the recurring companies + a customer ת.ז,
     and get a print-ready certificate pre-filled from the insureds/policy data (Harel logo
     stamped). Every field on the sheet is editable before printing to PDF."""
+    # Restricted to Sharon's user only (until further notice).
+    if not can_issue_cert():
+        flash('הפקת אישור קיום ביטוח מוגבלת כרגע למשתמש מורשה בלבד', 'warning')
+        return redirect(url_for('index'))
     companies = INSURANCE_CERT_COMPANIES
 
     if request.method == 'GET':

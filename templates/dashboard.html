@@ -27,9 +27,11 @@
       {% endif %}
     </a>
     <a href="/admin" class="btn btn-outline-primary btn-sm d-none d-md-inline-block"><i class="bi bi-upload me-1"></i>טעינת חודש חדש</a>
+    {% if can_issue_cert %}
     <a href="/admin/insurance-cert" class="btn btn-outline-dark btn-sm">
       <i class="bi bi-file-earmark-check me-1"></i>אישור קיום ביטוח
     </a>
+    {% endif %}
     <a href="http://localhost:3100" target="_blank" rel="noopener"
        class="btn btn-success btn-sm d-none d-md-inline-block">
       <i class="bi bi-whatsapp me-1"></i>קישור למערכת השליחות
