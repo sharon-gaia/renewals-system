@@ -1772,7 +1772,10 @@ def insurance_cert():
     policy_num  = pick(pr['policy_number'] if pr else '', ins['policy_number'] if ins else '')
     period_start = pick(pr['period_start'] if pr else '', ins['period_start'] if ins else '')
     period_end   = pick(pr['period_end'] if pr else '', ins['period_end'] if ins else '')
-    occupation   = extract_insured_occupation(pr['doc_filepath']) if pr else ''
+    # Prefer the pre-extracted occupation column (filled in bulk via /api/set-occupations),
+    # falling back to on-the-fly extraction from the stored policy PDF.
+    occ_col = ins['occupation'] if (ins and 'occupation' in ins.keys()) else ''
+    occupation   = pick(occ_col, extract_insured_occupation(pr['doc_filepath']) if pr else '')
 
     C = CERT_CONSTANTS
     cert = {
