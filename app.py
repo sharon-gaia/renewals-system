@@ -3233,7 +3233,9 @@ def _policy_queue_items(conn, brand_key):
         real_phone = _policy_to972(c['phone'])
         real_email = (c['email'] or '').strip() or (_campaign_email_for(conn, c) or '')
         # Live if the system is live, OR this specific ת"ז is a per-customer live override.
-        live = (not POLICY_AUTOSEND_TEST) or (idn in _POLICY_LIVE_IDS)
+        # Compare leading-zero-stripped (the override list stores the stripped form), so IDs
+        # that start with 0 (pre-1988) match correctly.
+        live = (not POLICY_AUTOSEND_TEST) or ((idn or '').lstrip('0') in _POLICY_LIVE_IDS)
         items.append({
             'doc_id': r['doc_id'],
             'name': c['name'],
