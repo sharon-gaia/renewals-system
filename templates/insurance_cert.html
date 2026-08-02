@@ -39,16 +39,14 @@
 <div class="cert-sheet">
   <div class="cert-topbar">
     <div class="cert-no">מספר אישור: <span class="f">{{ cert.cert_number }}</span></div>
-    <div><!-- מקום החותמת/QR של הראל — מושאר ריק בכוונה --></div>
+    <img src="{{ url_for('static', filename='harel-logo.png') }}" class="cert-logo" alt="הראל ביטוח ופיננסים">
   </div>
 
   <div class="appendix-title">נספח א'</div>
 
   <table class="cert-table head-table">
     <tr>
-      <td class="date-cell">
-        תאריך הנפקת האישור<br><span class="f">{{ cert.issue_date }}</span>
-      </td>
+      <td class="date-cell">תאריך הנפקת האישור<br><span class="f">{{ cert.issue_date }}</span></td>
       <td class="main-title">אישור קיום ביטוחים</td>
     </tr>
   </table>
@@ -60,7 +58,7 @@
     במקרה שבו תנאי באישור זה מיטיב עם מבקש האישור.
   </div>
 
-  <!-- טבלת הצדדים -->
+  <!-- טבלת הצדדים — שלוש רצועות (שם / ת.ז / מען) מופרדות בקווים אפורים -->
   <table class="cert-table parties">
     <thead>
       <tr>
@@ -72,47 +70,46 @@
       </tr>
     </thead>
     <tbody>
+      <!-- רצועת "שם" -->
       <tr>
-        <!-- מבקש האישור הראשי -->
-        <td class="party">
-          <div class="fld"><span class="lbl">שם :</span> <span class="f">{{ cert.req_name }}</span></div>
-          <div class="fld"><span class="lbl">ת.ז./ח.פ. :</span> <span class="f">{{ cert.req_hp }}</span></div>
-          {% if cert.req_hp_extra %}<div class="fld hp-extra"><span class="f">{{ cert.req_hp_extra }}</span></div>{% endif %}
-          <div class="fld"><span class="lbl">מען :</span> <span class="f">{{ cert.req_address }}</span></div>
-        </td>
-        <!-- גורמים נוספים -->
-        <td class="party">
-          <div class="fld"><span class="lbl">שם :</span> <span class="f">&nbsp;</span></div>
-          <div class="fld"><span class="lbl">ת.ז./ח.פ. :</span> <span class="f">&nbsp;</span></div>
-          <div class="fld"><span class="lbl">מען :</span> <span class="f">&nbsp;</span></div>
-          <div class="fld small-note">תיאור הקשר למבקש האישור הראשי:</div>
-          <div class="fld"><span class="f">&nbsp;</span></div>
-        </td>
-        <!-- המבוטח -->
-        <td class="party">
-          <div class="fld"><span class="lbl">שם :</span> <span class="f">{{ cert.ins_name }}</span></div>
-          <div class="fld"><span class="lbl">ת.ז./ח.פ. :</span> <span class="f">{{ cert.ins_id }}</span></div>
-          <div class="fld"><span class="lbl">מען :</span> <span class="f">{{ cert.ins_address }}</span></div>
-        </td>
-        <!-- אופי העסקה והעיסוק -->
-        <td class="party">
-          <div class="fld"><span class="lbl underline">אופי העסקה:</span></div>
+        <td class="party"><span class="lbl">שם :</span> <span class="f">{{ cert.req_name }}</span></td>
+        <td class="party"><span class="lbl">שם :</span> <span class="f">&nbsp;</span></td>
+        <td class="party"><span class="lbl">שם :</span> <span class="f">{{ cert.ins_name }}</span></td>
+        <td class="party deal-cell" rowspan="3">
+          <div class="lbl underline">אופי העסקה:</div>
           <div class="opts">
             {% for o in DEAL_OPTS %}
-            <div class="opt {{ 'on' if o == MARK_DEAL }}">{{ o }}<span class="cb">{{ '✕' if o == MARK_DEAL }}</span></div>
+            <div class="opt {{ 'on' if o == MARK_DEAL }}"><span class="cb">{{ '✕' if o == MARK_DEAL }}</span><span class="opt-txt">{{ o }}</span></div>
             {% endfor %}
           </div>
-          <div class="fld mt"><span class="lbl underline">העיסוק המבוטח:</span></div>
-          <div class="fld"><span class="f occ">{{ cert.occupation or ' ' }}</span></div>
+          <div class="lbl underline occ-head">העיסוק המבוטח:</div>
+          <div class="f occ">{{ cert.occupation or ' ' }}</div>
         </td>
-        <!-- מעמד מבקש האישור -->
-        <td class="party">
+        <td class="party status-cell" rowspan="3">
           <div class="opts">
             {% for o in STATUS_OPTS %}
-            <div class="opt {{ 'on' if o == MARK_STATUS }}">{{ o }}<span class="cb">{{ '✕' if o == MARK_STATUS }}</span></div>
+            <div class="opt {{ 'on' if o == MARK_STATUS }}"><span class="cb">{{ '✕' if o == MARK_STATUS }}</span><span class="opt-txt">{{ o }}</span></div>
             {% endfor %}
           </div>
         </td>
+      </tr>
+      <!-- רצועת "ת.ז./ח.פ." -->
+      <tr>
+        <td class="party"><span class="lbl">ת.ז./ח.פ. :</span> <span class="f">{{ cert.req_hp }}</span>{% if cert.req_hp_extra %}<div class="hp-extra"><span class="f">{{ cert.req_hp_extra }}</span></div>{% endif %}</td>
+        <td class="party"><span class="lbl">ת.ז./ח.פ. :</span> <span class="f">&nbsp;</span></td>
+        <td class="party"><span class="lbl">ת.ז./ח.פ. :</span> <span class="f">{{ cert.ins_id }}</span></td>
+      </tr>
+      <!-- רצועת "מען" -->
+      <tr>
+        <td class="party men-cell"><span class="lbl">מען :</span> <span class="f">{{ cert.req_address }}</span></td>
+        <td class="party men-cell">
+          <div><span class="lbl">מען :</span> <span class="f">&nbsp;</span></div>
+          <div class="rel-note">
+            <div class="small-note">תיאור הקשר למבקש האישור הראשי:</div>
+            <div class="f">מבקש אישור נוסף</div>
+          </div>
+        </td>
+        <td class="party men-cell"><span class="lbl">מען :</span> <span class="f">{{ cert.ins_address }}</span></td>
       </tr>
     </tbody>
   </table>
@@ -170,13 +167,15 @@
   <div class="cert-footnote">
     * באישור ביטוח כללי ואישור על הסכמה לעריכת ביטוח ניתן לסמן שדות אלה כשדות שאינם בתוקף.
   </div>
+
+  <div class="cert-web"><img src="{{ url_for('static', filename='harel-footer.png') }}" alt="אתר הראל לשירותך www.harel-group.co.il"></div>
 </div>
 
 <!-- ══════════════ עמוד 2 ══════════════ -->
 <div class="cert-sheet page2">
   <div class="cert-topbar">
     <div class="cert-no">מספר אישור: <span class="f">{{ cert.cert_number }}</span></div>
-    <div><!-- ריק --></div>
+    <img src="{{ url_for('static', filename='harel-logo.png') }}" class="cert-logo" alt="הראל ביטוח ופיננסים">
   </div>
 
   <div class="sec-head">פירוט השירותים</div>
@@ -208,75 +207,84 @@
     הקוד ברשימה הסגורה.
   </div>
 
-  <div class="cert-web">אתר הראל לשירותך · www.harel-group.co.il</div>
+  <div class="cert-web"><img src="{{ url_for('static', filename='harel-footer.png') }}" alt="אתר הראל לשירותך www.harel-group.co.il"></div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <style>
   /* ── אישור קיום ביטוחים — שחזור נספח א' התקני ──
-     גדלים/פרופורציות לפי טופס ה-Word הרשמי (גוף 10pt = w:sz 20).
-     הפונט עצמו אינו David (זה הפונט של ה-Word בלבד) — ב-PDF הרשמי הפונט קרוב
-     יותר ל-Narkisim, אז זה הפונט כאן; ה-Word שימש לפרופורציות בלבד. */
+     פרופורציות/גדלים לפי טופס ה-Word הרשמי, מוגדלים לבקשת המשתמש. הפונט Narkisim
+     (קרוב ל-PDF הרשמי; David הוא הפונט של ה-Word בלבד). */
   .cert-sheet{
     background:#fff; color:#000; direction:rtl;
     width:210mm; min-height:296mm; box-sizing:border-box;
-    padding:12mm 11mm; margin:0 auto 10mm; border:1px solid #ccc;
+    padding:11mm 11mm; margin:0 auto 10mm; border:1px solid #ccc;
     font-family:'Narkisim','Times New Roman',serif;
-    font-size:10pt; line-height:1.3;
+    font-size:12pt; line-height:1.3;
+    display:flex; flex-direction:column;
     box-shadow:0 2px 10px rgba(0,0,0,.12);
   }
-  .cert-topbar{display:flex; justify-content:space-between; align-items:flex-start; min-height:38px;}
-  .cert-no{font-size:9pt; font-weight:700;}
-  .appendix-title{text-align:center; font-weight:700; font-size:14pt; text-decoration:underline; margin:3px 0 9px;}
+  .cert-topbar{display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;}
+  .cert-no{font-size:10pt; font-weight:700;}
+  .cert-logo{height:52px;}
+  .appendix-title{text-align:center; font-weight:700; font-size:15pt; text-decoration:underline; margin:2px 0 8px;}
 
   .head-table{margin-bottom:0;}
-  .head-table td{border:1px solid #000; padding:7px 8px; vertical-align:middle;}
-  .head-table .date-cell{width:26%; text-align:center; font-size:10pt;}
-  .head-table .main-title{text-align:center; font-weight:700; font-size:17pt;}
+  .head-table td{border:1px solid #777; padding:7px 8px; vertical-align:middle;}
+  .head-table .date-cell{width:26%; text-align:center; font-size:11pt;}
+  .head-table .main-title{text-align:center; font-weight:700; font-size:18pt;}
 
-  .cert-boiler{border:1px solid #000; border-top:0; padding:8px; font-size:10pt; text-align:justify; margin-bottom:11px;}
+  .cert-boiler{border:1px solid #777; border-top:0; padding:8px; font-size:11pt; text-align:justify; margin-bottom:10px; line-height:1.35;}
 
   .cert-table{width:100%; border-collapse:collapse; table-layout:fixed;}
-  .cert-table th,.cert-table td{border:1px solid #000; padding:4px 5px; vertical-align:top; text-align:center;}
-  .cert-table th{background:#ececec; font-size:9pt; font-weight:700; line-height:1.2;}
-  .th-sub{display:block; font-weight:400; font-size:7.5pt;}
-  .coverage th.sub{font-size:8pt;}
+  /* קווי הפרדה אפורים בהירים בין המקטעים והרצועות */
+  .cert-table th,.cert-table td{border:1px solid #999; padding:4px 6px; vertical-align:top; text-align:center;}
+  .cert-table th{background:#eceff2; font-size:10pt; font-weight:700; line-height:1.2;}
+  .th-sub{display:block; font-weight:400; font-size:8pt;}
+  .coverage th.sub{font-size:9pt;}
 
-  .parties td.party{text-align:right; font-size:10pt; height:250px; vertical-align:top;}
-  .parties .fld{margin-bottom:13px;}
+  .parties td.party{text-align:right; font-size:11pt;}
   .parties .lbl{font-weight:700;}
-  .parties .lbl.underline{text-decoration:underline;}
-  .parties .hp-extra{margin-top:-8px; padding-inline-start:56px;}
-  .parties .small-note{font-size:8.5pt; margin-top:24px;}
-  .parties .mt{margin-top:22px;}
+  .parties .lbl.underline{text-decoration:underline; display:block; margin-bottom:3px;}
+  .parties .hp-extra{padding-inline-start:4px;}
+  .parties .men-cell{height:120px;}
+  .parties .rel-note{margin-top:22px;}
+  .parties .small-note{font-size:9.5pt;}
+  .parties .occ-head{margin-top:16px;}
+  .parties .deal-cell,.parties .status-cell{vertical-align:top;}
 
-  /* תיבות סימון (X) */
-  .opts{display:flex; flex-direction:column; gap:6px; margin-top:3px;}
-  .opt{font-size:10pt; display:flex; align-items:center; gap:6px;}
-  .opt .cb{display:inline-block; width:13px; height:13px; line-height:12px; text-align:center;
-           border:1px solid #000; font-size:11pt; flex:0 0 auto; cursor:pointer;}
-  .opt.on{font-weight:700;}
+  /* תיבות סימון (X) — grid: עמודה 1 (התיבה) בצד ימין ב-RTL, עמודה 2 (הטקסט) משמאלה */
+  .opts{margin-top:2px;}
+  .opt{display:grid; grid-template-columns:auto 1fr; align-items:center; gap:7px;
+       font-size:11pt; margin-bottom:7px;}
+  .opt .cb{width:14px; height:14px; line-height:13px; text-align:center;
+           border:1px solid #000; font-size:12pt; cursor:pointer;}
+  .opt .opt-txt{text-align:right;}
+  .opt.on .opt-txt{font-weight:700;}
 
-  .cover-title{font-weight:700; margin:11px 0 4px; font-size:12pt;}
-  .coverage td{font-size:9pt;}
-  .coverage tbody td{height:85px; vertical-align:top;}
+  .cover-title{font-weight:700; margin:10px 0 4px; font-size:13pt;}
+  .coverage td{font-size:10pt;}
+  .coverage tbody td{height:80px; vertical-align:top;}
   .coverage td.rtl{text-align:right;}
-  .coverage .retro{margin-top:14px; font-size:8.5pt; text-align:right;}
-  .coverage .disc{margin-top:6px; font-size:8.5pt;}
+  .coverage .retro{margin-top:14px; font-size:9.5pt; text-align:right;}
+  .coverage .disc{margin-top:6px; font-size:9.5pt;}
 
-  .cert-footnote{font-size:8pt; margin-top:9px;}
-  .cert-footnote.small2{margin-top:16px; line-height:1.6;}
+  .cert-footnote{font-size:9pt; margin-top:8px;}
+  .cert-footnote.small2{margin-top:14px; line-height:1.6;}
 
   /* עמוד 2 */
-  .sec-head{background:#ececec; border:1px solid #000; font-weight:700; font-size:12pt; padding:5px 8px; margin-top:15px;}
-  .svc-note{border:1px solid #000; border-top:0; padding:7px 8px; font-size:9.5pt; text-align:justify;}
-  .svc-box{border:1px solid #000; border-top:0; padding:11px 8px; font-weight:700; min-height:48px;}
-  .sec-body{border:1px solid #000; border-top:0; padding:8px; font-size:10pt; text-align:justify;}
-  .sign-row{border:1px solid #000; border-top:0; padding:11px 8px; display:flex; align-items:center; gap:48px; min-height:72px;}
-  .sign-label{font-size:10pt; font-weight:700;}
-  .sign-stamp{height:48px;}
-  .cert-web{text-align:center; color:#777; font-size:9pt; margin-top:28px;}
+  .sec-head{background:#eceff2; border:1px solid #999; font-weight:700; font-size:13pt; padding:5px 8px; margin-top:14px;}
+  .svc-note{border:1px solid #999; border-top:0; padding:7px 8px; font-size:10.5pt; text-align:justify;}
+  .svc-box{border:1px solid #999; border-top:0; padding:11px 8px; font-weight:700; min-height:48px;}
+  .sec-body{border:1px solid #999; border-top:0; padding:8px; font-size:11pt; text-align:justify;}
+  .sign-row{border:1px solid #999; border-top:0; padding:11px 8px; display:flex; align-items:center; gap:48px; min-height:74px;}
+  .sign-label{font-size:11pt; font-weight:700;}
+  .sign-stamp{height:50px;}
+
+  /* פוטר "אתר הראל לשירותך" — נצמד לתחתית הדף בשני העמודים */
+  .cert-web{margin-top:auto; padding-top:20px; text-align:center;}
+  .cert-web img{width:360px; max-width:70%; height:auto;}
 
   /* שדות לעריכה */
   .f{border-bottom:1px dashed #9db; padding:0 2px; min-width:8px; display:inline-block;}
@@ -302,8 +310,9 @@
   // לחיצה על תיבת סימון מוסיפה/מסירה X.
   document.querySelectorAll('.cert-sheet .cb').forEach(function(box){
     box.addEventListener('click', function(){
-      box.textContent = box.textContent.trim() ? '' : '✕';
-      box.parentElement.classList.toggle('on', !!box.textContent.trim());
+      var on = box.textContent.trim();
+      box.textContent = on ? '' : '✕';
+      box.closest('.opt').classList.toggle('on', !on);
     });
   });
 </script>

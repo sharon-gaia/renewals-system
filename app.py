@@ -965,7 +965,7 @@ INSURANCE_CERT_COMPANIES = [
 
 # Fixed values shared by every certificate (defaults — editable in the preview).
 CERT_CONSTANTS = {
-    'cert_number':     '121828-0000',   # מספר אישור (Harel group master reference)
+    'cert_number':     '7338-0001',     # מספר אישור — בסיס/גיבוי; בפועל רץ סדרתית (ראה next_cert_number)
     'form_edition':    '01/2022',       # נוסח ומהדורת ביטוח
     'amount':          '1,200,000',     # גבול אחריות / סכום ביטוח (₪)
     'currency':        'ש"ח',
@@ -1791,6 +1791,13 @@ def insurance_cert():
            WHERE ltrim(COALESCE(pr.insured_id,''),'0') = ?
            ORDER BY pr.extracted_at DESC LIMIT 1""", (norm,)
     ).fetchone()
+    # Sequential certificate number 7338-0001, 7338-0002, … (persisted in app_meta).
+    _row = conn.execute("SELECT value FROM app_meta WHERE key='cert_seq'").fetchone()
+    _seq = (int(_row['value']) if _row and str(_row['value']).isdigit() else 0) + 1
+    conn.execute("INSERT INTO app_meta (key, value) VALUES ('cert_seq', ?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(_seq),))
+    conn.commit()
+    cert_number = f"7338-{_seq:04d}"
     conn.close()
 
     if not ins and not pr:
@@ -1815,7 +1822,7 @@ def insurance_cert():
 
     C = CERT_CONSTANTS
     cert = {
-        'cert_number':  C['cert_number'],
+        'cert_number':  cert_number,
         'issue_date':   datetime.date.today().strftime('%d/%m/%Y'),
         # requesting company
         'req_name':     f"{company['name']} {CERT_RELATED_SUFFIX}",
