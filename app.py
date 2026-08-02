@@ -3180,6 +3180,7 @@ def _policy_to972(phone):
     return p
 
 _POLICY_FORCE_IDS = set()  # TEST-only: ת"ז forced into the queue regardless of the 48h window
+_POLICY_LIVE_IDS = set()   # per-ת"ז LIVE override: real recipient even while the system is in test mode
 
 def _policy_queue_items(conn, brand_key):
     """Documents ready for auto-delivery on `brand_key` ('gaia'|'winner'): a recent
@@ -3231,13 +3232,15 @@ def _policy_queue_items(conn, brand_key):
             continue
         real_phone = _policy_to972(c['phone'])
         real_email = (c['email'] or '').strip() or (_campaign_email_for(conn, c) or '')
+        # Live if the system is live, OR this specific ת"ז is a per-customer live override.
+        live = (not POLICY_AUTOSEND_TEST) or (idn in _POLICY_LIVE_IDS)
         items.append({
             'doc_id': r['doc_id'],
             'name': c['name'],
             'policy_number': r['policy_number'],
             'brand': brand_key,
-            'phone': _policy_to972(POLICY_TEST_PHONE) if POLICY_AUTOSEND_TEST else real_phone,
-            'email': POLICY_TEST_EMAIL if POLICY_AUTOSEND_TEST else real_email,
+            'phone': real_phone if live else _policy_to972(POLICY_TEST_PHONE),
+            'email': real_email if live else POLICY_TEST_EMAIL,
             'whatsapp_pending': wa_pending,
             'email_pending': em_pending,
             'wa_text': POLICY_WA_RENEWAL,
@@ -3245,7 +3248,7 @@ def _policy_queue_items(conn, brand_key):
             'email_body': policy_email_body(c['name']),
             'email_html': policy_email_html(c['name']),
             'pdf_url': f'/api/policy/pdf/{r["doc_id"]}',
-            'test_mode': POLICY_AUTOSEND_TEST,
+            'test_mode': not live,
             'intended': f"{c['name']} · {real_phone or '—'} · {real_email or '—'}",
         })
     return items
@@ -3729,6 +3732,31 @@ def api_policy_force_test():
     if q:
         _POLICY_FORCE_IDS.add(q)
     return jsonify({'ok': True, 'forced_ids': sorted(_POLICY_FORCE_IDS)})
+
+@app.route('/api/policy/send-live', methods=['POST'])
+def api_policy_send_live():
+    """Send ONE specific customer to their REAL contact while the system stays in test mode:
+    resets that ת"ז's renewal docs' sent flags (so the latest re-enters the queue) and marks
+    the ת"ז as a live override. {q: ת"ז} to arm; {clear: true} to reset the override list."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    if data.get('clear'):
+        _POLICY_LIVE_IDS.clear()
+        return jsonify({'ok': True, 'live_ids': []})
+    q = re.sub(r'\D', '', str(data.get('q') or '')).lstrip('0')
+    if not q:
+        return jsonify({'error': 'need q'}), 400
+    conn = get_db()
+    reset = conn.execute(
+        """UPDATE policy_documents SET whatsapp_sent_at=NULL, email_sent_at=NULL
+           WHERE id IN (SELECT pd.id FROM policy_documents pd
+                        JOIN policy_records pr ON pr.policy_document_id=pd.id
+                        WHERE ltrim(COALESCE(pr.insured_id,''),'0')=?)""", (q,))
+    conn.commit()
+    conn.close()
+    _POLICY_LIVE_IDS.add(q)
+    return jsonify({'ok': True, 'live_ids': sorted(_POLICY_LIVE_IDS), 'docs_reset': reset.rowcount})
 
 @app.route('/api/policy/scan', methods=['POST'])
 def api_policy_scan():
