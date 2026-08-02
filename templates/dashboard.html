@@ -27,22 +27,10 @@
       {% endif %}
     </a>
     <a href="/admin" class="btn btn-outline-primary btn-sm d-none d-md-inline-block"><i class="bi bi-upload me-1"></i>טעינת חודש חדש</a>
-    <div class="dropdown d-none d-md-inline-block">
-      <button class="btn btn-success btn-sm dropdown-toggle" data-bs-toggle="dropdown">
-        <i class="bi bi-whatsapp me-1"></i>ייצוא לWASender
-      </button>
-      <ul class="dropdown-menu">
-        <li><h6 class="dropdown-header">📤 שליחה ראשונה (כולם)</h6></li>
-        <li><a class="dropdown-item" href="/export/wasender?mode=first&mark_sent=1">כל המותגים — ייצוא + סימון נשלח</a></li>
-        <li><a class="dropdown-item" href="/export/wasender?mode=first&brand=גאיה&mark_sent=1">גאיה בלבד + סימון</a></li>
-        <li><a class="dropdown-item" href="/export/wasender?mode=first&brand=ווינר&mark_sent=1">ווינר בלבד + סימון</a></li>
-        <li><hr class="dropdown-divider"></li>
-        <li><h6 class="dropdown-header">🔁 תזכורת (מי שלא חידש)</h6></li>
-        <li><a class="dropdown-item" href="/export/wasender?mode=reminder&mark_sent=0">כל המותגים — ייצוא בלבד</a></li>
-        <li><a class="dropdown-item" href="/export/wasender?mode=reminder&brand=גאיה&mark_sent=0">גאיה בלבד</a></li>
-        <li><a class="dropdown-item" href="/export/wasender?mode=reminder&brand=ווינר&mark_sent=0">ווינר בלבד</a></li>
-      </ul>
-    </div>
+    <a href="http://localhost:3100" target="_blank" rel="noopener"
+       class="btn btn-success btn-sm d-none d-md-inline-block">
+      <i class="bi bi-whatsapp me-1"></i>קישור למערכת השליחות
+    </a>
     {% endif %}
   </div>
 </div>

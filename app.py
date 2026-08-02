@@ -38,7 +38,7 @@ EMAIL_CONFIG = {
     'password': os.environ['EMAIL_PASSWORD'],
     'sender_filter': 'onboarding@resend.dev',
     'subject_filter': '',
-    'check_interval': 300,
+    'check_interval': 180,
     'enabled': True,
 }
 
