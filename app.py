@@ -3181,7 +3181,7 @@ def _policy_to972(phone):
 
 def _policy_queue_items(conn, brand_key):
     """Documents ready for auto-delivery on `brand_key` ('gaia'|'winner'): a recent
-    (≤48h) Harel RENEWAL PDF whose ת"ز matches an active-month customer marked 'חודש',
+    (≤48h) Harel RENEWAL PDF whose ת"ز matches a customer in ANY month (incl. archived) marked 'חודש',
     still pending on at least one channel. In test mode recipients are forced to Sharon."""
     brands = ['גאיה'] if brand_key == 'gaia' else ['ווינר', 'אופיר']
     custs = {}
