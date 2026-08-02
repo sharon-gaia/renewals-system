@@ -3839,6 +3839,49 @@ def api_policy_inbox_search():
         out['error'] = str(e)
     return jsonify(out)
 
+@app.route('/api/policy/inspect-email', methods=['POST'])
+def api_policy_inspect_email():
+    """Token-authed: open recent ComposeDoc emails (optionally filtered by subject substring),
+    parse their PDF attachment, and return filename + parsed fields — to see how to extract the
+    policy number for subject-less 'new policy' emails."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    subj = str(data.get('subject_contains') or '').strip()
+    days = int(data.get('days') or 3)
+    cfg = EMAIL_CONFIG
+    out = {'emails': []}
+    try:
+        import imaplib, email as _email
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
+        _, dta = mail.search(None, f'(SINCE {since} FROM "ComposeDoc@harel-ins.co.il")')
+        ids = dta[0].split() if dta and dta[0] else []
+        for mid in ids[-10:]:
+            _, full = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = _email.message_from_bytes(full[0][1])
+            subject = decode_str(msg.get('Subject', ''))
+            if subj and subj not in subject:
+                continue
+            info = {'subject': subject, 'date': msg.get('Date', ''), 'attachments': []}
+            for part in msg.walk():
+                cd = str(part.get('Content-Disposition', ''))
+                if 'attachment' not in cd and part.get_content_type() != 'application/octet-stream':
+                    continue
+                fn = decode_str(part.get_filename() or '')
+                if not fn:
+                    continue
+                dbytes = part.get_payload(decode=True)
+                info['attachments'].append({'filename': fn,
+                                            'parsed': (parse_harel_policy_pdf(dbytes) if dbytes else {})})
+            out['emails'].append(info)
+        mail.logout()
+    except Exception as e:
+        out['error'] = str(e)
+    return jsonify(out)
+
 @app.route('/api/policy/scan', methods=['POST'])
 def api_policy_scan():
     """Token-authed on-demand scan for new Harel policy PDFs (so a just-arrived renewal is
