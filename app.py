@@ -834,6 +834,8 @@ def init_db():
             conn.execute(f"ALTER TABLE {tbl} ADD COLUMN alt_phone TEXT")
         if 'import_source' not in cols:
             conn.execute(f"ALTER TABLE {tbl} ADD COLUMN import_source TEXT")
+        if 'occupation' not in cols:  # עיסוק המבוטח (extracted from the policy PDF, page דף-2)
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN occupation TEXT")
     # Renewal-campaign tracking (email touch date + do-not-contact opt-out).
     _ccols = [r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()]
     if 'email_sent_date' not in _ccols:
@@ -921,6 +923,114 @@ def _refresh_session_from_db():
             session['brands'] = [r['brand'] for r in
                                  conn.execute("SELECT brand FROM user_brands WHERE user_id=?", (uid,)).fetchall()]
     conn.close()
+
+# ── אישור קיום ביטוחים (נספח א') — data ──────────────────────
+# The standard regulated "Certificate of Insurance" (נספח א') that ~9 recurring
+# companies require signed. Sharon is authorized by Harel to issue these. The form
+# layout is fixed; only the per-company block, the per-customer block, and the policy
+# dates change. Every field is editable in the preview before printing (the source of
+# truth is the signed print-out, so the tool only pre-fills a best-effort draft).
+
+# Suffix appended to every requesting company's name (exact wording, per the official form).
+CERT_RELATED_SUFFIX = 'ו/או חברות אם ו/או חברות בנות ו/או חברות שלובות ו/או חברות קשורות'
+
+# The 9 requesting companies. `codes` = the "פירוט השירותים" service code(s) on page 2.
+# `hp_extra` (מובמנט only) = additional ח.פ. numbers shown on a lower line, separated by "/".
+INSURANCE_CERT_COMPANIES = [
+    {'key': 'target',   'name': 'טרגט קאר בע"מ',
+     'hp': '515732162', 'hp_extra': '', 'address': 'הבושם 3, אשדוד', 'codes': '73'},
+    {'key': 'movement', 'name': 'מוב וולנס בע"מ ו/או פריפיט בע"מ ו/או מובמנט בע"מ',
+     'hp': '514527456', 'hp_extra': '516868965 / 513600528', 'address': 'הברזל 30, תל אביב', 'codes': '94, 95'},
+    {'key': 'fami',     'name': 'פמי פרימיום בע"מ',
+     'hp': '512676206', 'hp_extra': '', 'address': 'המשביר 1, חולון', 'codes': '73'},
+    {'key': 'natali',   'name': 'נטלי החברה לשירותי רפואה דחופה בע"מ',
+     'hp': '511441701', 'hp_extra': '', 'address': 'החילזון 4, רמת גן', 'codes': '94'},
+    {'key': 'bikurofe', 'name': 'ביקורופא בע"מ',
+     'hp': '511657322', 'hp_extra': '', 'address': 'יגאל אלון 90, תל אביב', 'codes': '73'},
+    {'key': 'bewell',   'name': 'בי וול פתרונות לאיכות חיים בע"מ',
+     'hp': '514163823', 'hp_extra': '', 'address': 'בני גאון 14, נתניה', 'codes': '94, 95'},
+    {'key': 'fattal',   'name': 'מלונות פתאל בע"מ',
+     'hp': '510678816', 'hp_extra': '', 'address': 'יגאל אלון 94, תל אביב', 'codes': '94'},
+    {'key': 'dan',      'name': 'מלונות דן בע"מ',
+     'hp': '520023573', 'hp_extra': '', 'address': 'הירקון 111, תל אביב', 'codes': '94'},
+    {'key': 'space',    'name': 'ספייס מועדוני כושר בע"מ',
+     'hp': '515190866', 'hp_extra': '', 'address': 'רפפורט 3, כפר סבא', 'codes': '31'},
+]
+
+# Fixed values shared by every certificate (defaults — editable in the preview).
+CERT_CONSTANTS = {
+    'cert_number':     '121828-0000',   # מספר אישור (Harel group master reference)
+    'form_edition':    '01/2022',       # נוסח ומהדורת ביטוח
+    'amount':          '1,200,000',     # גבול אחריות / סכום ביטוח (₪)
+    'currency':        'ש"ח',
+    'codes_main':      '302, 304, 309, 315, 321, 322, 326, 328, 329',  # צד ג' / אחריות מקצועית רפואית
+    'codes_supp':      '332',            # אחריות מקצועית רפואה משלימה
+    'discovery_codes': '302, 304, 309, 315, 321, 326, 327, 328',       # תקופת גילוי
+    'deal_type':       'נדל"ן',          # אופי העסקה (highlighted option)
+    'req_status':      'משכיר',          # מעמד מבקש האישור (highlighted option)
+    'insurer':         'הראל חברה לביטוח בע"מ',
+}
+
+
+def extract_insured_occupation(pdf_path):
+    """Best-effort pull of "העיסוק המבוטח" from page 2 of a stored Harel policy PDF.
+    Page 2 lists occupation/institution/year triplets under the header
+    `עיסוק המבוטח | מוסד הסמכה | שנת הסמכה`. We want the occupation column only; there
+    can be several (e.g. "פילאטיס מזרן, פילאטיס מכשירים"). Returns a comma-joined string,
+    or '' when nothing is found (the field is then filled manually in the preview)."""
+    if not pdf_path or not os.path.exists(pdf_path):
+        return ''
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            occ_text = None
+            for page in pdf.pages:
+                t = page.extract_text() or ''
+                if 'עיסוק המבוטח' in t and 'הסמכה' in t:
+                    occ_text = t
+                    break
+        if not occ_text:
+            return ''
+    except Exception as e:
+        print(f'[cert-occupation] שגיאת קריאת PDF: {e}')
+        return ''
+
+    lines = [get_display(l) for l in occ_text.split('\n')]
+    occupations = []
+    started = False
+    for l in lines:
+        if 'עיסוק המבוטח' in l and 'הסמכה' in l:
+            started = True
+            continue
+        if not started:
+            continue
+        s = l.strip()
+        if not s:
+            continue
+        # Stop when we leave the occupations block (next section headers / footer).
+        if any(k in s for k in ('חתימת', 'המבטח', 'סה"כ', 'פרטי הפוליסה', 'תקופת הביטוח',
+                                'דמי ביטוח', 'כתובת', 'עמוד')):
+            break
+        # Drop a trailing 4-digit certification year and any run of digits (institution ids),
+        # keeping the occupation words (the right-most column of the triplet).
+        occ = re.sub(r'\b\d{4}\b', '', s)          # year
+        occ = re.sub(r'\d+', '', occ)               # stray numbers
+        occ = occ.strip(' -|\t')
+        # Heuristic: the occupation is the first token-group; institution names often contain
+        # "מכון"/"בית ספר"/"אוניברסיטת"/"מכללת" — cut there when both share a line.
+        for sep in ('מכון', 'בית ספר', 'ביה"ס', 'אוניברסיט', 'מכלל', 'קולג'):
+            idx = occ.find(sep)
+            if idx > 0:
+                occ = occ[:idx].strip(' -|,')
+                break
+        if occ and not re.fullmatch(r'[\W_]+', occ):
+            occupations.append(occ)
+    # De-dup while preserving order.
+    seen, uniq = set(), []
+    for o in occupations:
+        if o not in seen:
+            seen.add(o)
+            uniq.append(o)
+    return ', '.join(uniq)
 
 # ── Routes ──────────────────────────────────────────────────
 
@@ -1606,6 +1716,101 @@ def other_forms():
     conn.close()
     return render_template('other_forms.html', items=rows, counts=counts, show=show,
                            queue_labels=FORM_QUEUE_LABELS)
+
+
+@app.route('/admin/insurance-cert', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def insurance_cert():
+    """אישור קיום ביטוחים (נספח א'): pick one of the recurring companies + a customer ת.ז,
+    and get a print-ready certificate pre-filled from the insureds/policy data (Harel logo
+    stamped). Every field on the sheet is editable before printing to PDF."""
+    companies = INSURANCE_CERT_COMPANIES
+
+    if request.method == 'GET':
+        return render_template('insurance_cert_form.html', companies=companies, C=CERT_CONSTANTS)
+
+    # POST — look up the customer and build the certificate draft.
+    company_key = request.form.get('company', '')
+    id_raw = request.form.get('id_number', '')
+    company = next((c for c in companies if c['key'] == company_key), None)
+    norm = re.sub(r'\D', '', id_raw).lstrip('0')
+
+    if not company:
+        flash('בחר חברה מבקשת אישור', 'danger')
+        return redirect(url_for('insurance_cert'))
+    if not norm:
+        flash('הזן תעודת זהות של המבוטח', 'danger')
+        return redirect(url_for('insurance_cert'))
+
+    conn = get_db()
+    ins = conn.execute(
+        "SELECT * FROM insureds WHERE ltrim(COALESCE(id_number,''),'0') = ?", (norm,)
+    ).fetchone()
+    # Newest policy record for this ת.ז (policy number, period, name/address fallback + the PDF).
+    pr = conn.execute(
+        """SELECT pr.*, pd.filepath AS doc_filepath
+           FROM policy_records pr
+           LEFT JOIN policy_documents pd ON pr.policy_document_id = pd.id
+           WHERE ltrim(COALESCE(pr.insured_id,''),'0') = ?
+           ORDER BY pr.extracted_at DESC LIMIT 1""", (norm,)
+    ).fetchone()
+    conn.close()
+
+    if not ins and not pr:
+        flash(f'לא נמצא מבוטח עם ת.ז {id_raw} במאגר', 'warning')
+        return redirect(url_for('insurance_cert'))
+
+    def pick(*vals):
+        for v in vals:
+            if v:
+                return v
+        return ''
+
+    ins_name    = pick(ins['name'] if ins else '', pr['insured_name'] if pr else '')
+    ins_address = pick(ins['address'] if ins else '', pr['address'] if pr else '')
+    policy_num  = pick(pr['policy_number'] if pr else '', ins['policy_number'] if ins else '')
+    period_start = pick(pr['period_start'] if pr else '', ins['period_start'] if ins else '')
+    period_end   = pick(pr['period_end'] if pr else '', ins['period_end'] if ins else '')
+    occupation   = extract_insured_occupation(pr['doc_filepath']) if pr else ''
+
+    C = CERT_CONSTANTS
+    cert = {
+        'cert_number':  C['cert_number'],
+        'issue_date':   datetime.date.today().strftime('%d/%m/%Y'),
+        # requesting company
+        'req_name':     f"{company['name']} {CERT_RELATED_SUFFIX}",
+        'req_hp':       company['hp'],
+        'req_hp_extra': company['hp_extra'],
+        'req_address':  company['address'],
+        'service_codes': company['codes'],
+        'deal_type':    C['deal_type'],
+        'req_status':   C['req_status'],
+        # insured (customer)
+        'ins_name':     ins_name,
+        'ins_id':       norm,
+        'ins_address':  ins_address,
+        'occupation':   occupation,
+        # policy + coverage
+        'policy_number': policy_num,
+        'form_edition':  C['form_edition'],
+        'period_start':  period_start,
+        'period_end':    period_end,
+        'amount':        C['amount'],
+        'currency':      C['currency'],
+        'codes_main':    C['codes_main'],
+        'codes_supp':    C['codes_supp'],
+        'discovery_codes': C['discovery_codes'],
+        'retro_date':    period_start,
+        'insurer':       C['insurer'],
+    }
+    # Warn about anything the operator must fill by hand before signing.
+    missing = [lbl for lbl, val in
+               [('שם המבוטח', ins_name), ('כתובת המבוטח', ins_address),
+                ('מספר פוליסה', policy_num), ('תקופת ביטוח', period_start and period_end),
+                ('עיסוק המבוטח', occupation)] if not val]
+    return render_template('insurance_cert.html', cert=cert, company=company,
+                           missing=missing, matched_master=bool(ins))
 
 
 @app.route('/admin/other-forms/<int:sid>/file', methods=['POST'])
@@ -3023,6 +3228,28 @@ def api_month_stats():
                     'total': total, 'renewed': renewed, 'not_renewed': total - renewed})
     conn.close()
     return jsonify({'months': out})
+
+@app.route('/api/set-occupations', methods=['POST'])
+def api_set_occupations():
+    """Token-authed bulk fill of the occupation column (עיסוק המבוטח, extracted locally from
+    the policy PDFs), matching by ת"ز on customers + insureds. Body: {map: {"<ת"ז>": "<occ>"}}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    m = (request.get_json(silent=True) or {}).get('map') or {}
+    conn = get_db()
+    cust_n = ins_n = 0
+    for idn, occ in m.items():
+        z = re.sub(r'\D', '', str(idn or '')).lstrip('0')
+        occ = (occ or '').strip()
+        if not z or not occ:
+            continue
+        cust_n += conn.execute("UPDATE customers SET occupation=? WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                               (occ, z)).rowcount
+        ins_n += conn.execute("UPDATE insureds SET occupation=? WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                              (occ, z)).rowcount
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'input': len(m), 'customers_updated': cust_n, 'insureds_updated': ins_n})
 
 @app.route('/api/sync-renewed-active', methods=['POST'])
 def api_sync_renewed_active():
