@@ -3253,6 +3253,42 @@ def _policy_queue_items(conn, brand_key):
             'test_mode': not live,
             'intended': f"{c['name']} · {real_phone or '—'} · {real_email or '—'}",
         })
+    # ── New-business policies (WhatsApp only), gated by POLICY_NEW_MODE ('test'→Sharon,'live') ──
+    if POLICY_NEW_MODE in ('test', 'live'):
+        new_test = (POLICY_NEW_MODE == 'test')
+        seen_new = set()
+        for r in conn.execute(
+            """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.policy_number,
+                      pr.insured_id, pr.insured_name, pr.phone_mobile, pr.agent_number, pr.doc_type_label
+               FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id
+               WHERE pd.received_at >= ? ORDER BY pd.received_at DESC, pd.id DESC""", (cutoff,)).fetchall():
+            if r['whatsapp_sent_at'] or not is_new_doc(r['doc_type_label']):
+                continue
+            if _new_policy_brand_key(r['agent_number']) != brand_key:
+                continue
+            key = (normalize_id_number(r['insured_id']) or '').lstrip('0')
+            if not key or key in seen_new:
+                continue
+            real_phone = _policy_to972(r['phone_mobile'])
+            if not real_phone:
+                continue
+            seen_new.add(key)
+            items.append({
+                'doc_id': r['doc_id'],
+                'name': r['insured_name'] or '',
+                'policy_number': r['policy_number'],
+                'brand': brand_key,
+                'phone': _policy_to972(POLICY_TEST_PHONE) if new_test else real_phone,
+                'email': '',
+                'whatsapp_pending': True,
+                'email_pending': False,
+                'wa_text': POLICY_WA_NEW,
+                'email_subject': '', 'email_body': '', 'email_html': '',
+                'pdf_url': f'/api/policy/pdf/{r["doc_id"]}',
+                'kind': 'new',
+                'test_mode': new_test,
+                'intended': f"{r['insured_name']} · {real_phone or '—'} (חדש)",
+            })
     return items
 
 @app.route('/api/policy/queue')
@@ -3295,12 +3331,20 @@ def policy_sent():
     col = 'whatsapp_sent_at' if channel == 'whatsapp' else 'email_sent_at'
     conn.execute(f"UPDATE policy_documents SET {col}=? WHERE id=?", (now, doc_id))
     pr = conn.execute(
-        "SELECT insured_id FROM policy_records WHERE policy_document_id=? LIMIT 1", (doc_id,)).fetchone()
+        """SELECT insured_id, insured_name, phone_mobile, email, agent_number, doc_type_label, policy_number
+           FROM policy_records WHERE policy_document_id=? LIMIT 1""", (doc_id,)).fetchone()
     if pr and pr['insured_id']:
         ch = 'וואטסאפ' if channel == 'whatsapp' else 'מייל'
-        tag = ' [בדיקה]' if POLICY_AUTOSEND_TEST else ''
-        log_event(conn, event_key(normalize_id_number(pr['insured_id']), f'doc-{doc_id}'),
-                  f"פוליסת חידוש נשלחה אוטומטית ({ch}){tag}", 'system', kind='policy_send')
+        idkey = event_key(normalize_id_number(pr['insured_id']), f'doc-{doc_id}')
+        if is_new_doc(pr['doc_type_label']):
+            # New business — create a serviceable customer record + log without "חידוש".
+            _ensure_new_customer(conn, pr)
+            tag = ' [בדיקה]' if POLICY_NEW_MODE == 'test' else ''
+            note = f"פוליסה חדשה נשלחה ({ch}){tag}"
+        else:
+            tag = ' [בדיקה]' if POLICY_AUTOSEND_TEST else ''
+            note = f"פוליסת חידוש נשלחה אוטומטית ({ch}){tag}"
+        log_event(conn, idkey, note, 'system', kind='policy_send')
     conn.commit()
     conn.close()
     return jsonify({'ok': True})
@@ -4291,6 +4335,48 @@ POLICY_WA_RENEWAL = (
     "אותך גם בביטוחים האחרים 😊\n\n"
     f"{POLICY_OPTIN}"
 )
+
+# ── New-business policies (WhatsApp only) ─────────────────────────────────────
+# 'off' = disabled · 'test' = send to Sharon · 'live' = send to the real customer.
+POLICY_NEW_MODE = os.environ.get('POLICY_NEW_MODE', 'off')
+# Agent number printed on the Harel policy → agency. Ofir's new business is sent from Winner.
+NEW_AGENT_BRAND = {'50185': 'גאיה', '411998': 'ווינר', '411025': 'אופיר'}
+
+def is_new_doc(label):
+    return 'חדש' in (label or '')
+
+def _new_policy_brand_key(agent_number):
+    """Agent number on the new-policy PDF → wa-sender brand key (gaia | winner). Ofir→winner."""
+    brand = NEW_AGENT_BRAND.get(re.sub(r'\D', '', str(agent_number or '')))
+    return None if not brand else ('gaia' if brand == 'גאיה' else 'winner')
+
+POLICY_WA_NEW = (
+    "תודה שבחרת בנו לביטוח המקצועי!\n\n"
+    "*הפוליסה היא החשבונית, אפשר להעביר את זה לרואה החשבון שלך וזה מה שצריך כהוצאה מוכרת*.\n"
+    "אני זמין כאן בוואטסאפ לכל שאלה או שירות.\n\n"
+    "רק רציתי לציין שאנחנו בקבוצה מציעים גם פגישה אישית בשיחת טלפון, אצלך בבית, "
+    "או בכל מקום שנוח לך!\nאחרי שהפתענו אותך במחיר של הביטוח הזה, אולי נצליח להפתיע "
+    "אותך גם בביטוחים האחרים 😊\n\n"
+    f"{POLICY_OPTIN}"
+)
+
+def _ensure_new_customer(conn, pr):
+    """Create a customers record for a new-business policy (so it's serviceable), if not present."""
+    idn = normalize_id_number(pr['insured_id'])
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not idn or not month:
+        return
+    if conn.execute("SELECT 1 FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
+                    (month['id'], idn.lstrip('0'))).fetchone():
+        return
+    brand = NEW_AGENT_BRAND.get(re.sub(r'\D', '', str(pr['agent_number'] or '')), '')
+    conn.execute(
+        """INSERT INTO customers (month_id, policy_number, name, id_number, phone, email, brand,
+                                  status, import_source)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (month['id'], pr['policy_number'], (pr['insured_name'] or ''), idn,
+         re.sub(r'\D', '', str(pr['phone_mobile'] or '')), (pr['email'] or ''), brand, '', 'new_policy'))
+
 POLICY_EMAIL_SUBJECT = "הפוליסה המקצועית שלך"
 POLICY_EMAIL_SIGN = ("—\nשרון דר\nמנהל תחום אחריות מקצועית\nגאיה, ווינר ואופיר")
 
