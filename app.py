@@ -4640,15 +4640,9 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
                 continue
 
             m = re.search(r'(\d{6,})\s*$', subject.strip())
-            policy_number = m.group(1) if m else None
-            if not policy_number:
-                continue
-
-            customer = conn.execute(
-                "SELECT id FROM customers WHERE ltrim(policy_number,'0')=?",
-                (policy_number.lstrip('0'),)
-            ).fetchone()
-            customer_id = customer['id'] if customer else None
+            subj_policy = m.group(1) if m else None
+            # No early skip: new-business policies arrive with a generic subject
+            # ("הודעה מהראל…") and carry the policy number in the attachment filename instead.
 
             _, full_data = mail.fetch(mid, '(BODY.PEEK[])')
             msg = email_lib.message_from_bytes(full_data[0][1])
@@ -4665,6 +4659,15 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
                 data_bytes = part.get_payload(decode=True)
                 if not data_bytes:
                     continue
+                # Policy number: from the subject, else from the filename ("…שמספרה <num>.pdf").
+                fnm = re.search(r'(\d{6,})', filename)
+                policy_number = subj_policy or (fnm.group(1) if fnm else None)
+                if not policy_number:
+                    continue
+                customer = conn.execute(
+                    "SELECT id FROM customers WHERE ltrim(policy_number,'0')=?",
+                    (policy_number.lstrip('0'),)).fetchone()
+                customer_id = customer['id'] if customer else None
                 filepath = ''
                 if keep_pdf:
                     folder_key = str(customer_id) if customer_id else f'unmatched_{policy_number}'
