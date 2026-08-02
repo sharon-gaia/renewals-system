@@ -65,6 +65,7 @@
         <td class="party">
           <div class="fld"><span class="lbl">שם:</span> <span class="f">{{ cert.req_name }}</span></div>
           <div class="fld"><span class="lbl">ת.ז./ח.פ.:</span> <span class="f">{{ cert.req_hp }}</span></div>
+          {% if cert.req_hp_extra %}<div class="fld"><span class="f">{{ cert.req_hp_extra }}</span></div>{% endif %}
           <div class="fld"><span class="lbl">מען:</span> <span class="f">{{ cert.req_address }}</span></div>
         </td>
         <!-- גורמים נוספים -->

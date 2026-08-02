@@ -1750,7 +1750,9 @@ def insurance_cert():
     company_key = request.form.get('company', '')
     id_raw = request.form.get('id_number', '')
     company = next((c for c in companies if c['key'] == company_key), None)
-    norm = re.sub(r'\D', '', id_raw).lstrip('0')
+    digits = re.sub(r'\D', '', id_raw)
+    norm = digits.lstrip('0')          # normalized key for matching (leading zeros dropped)
+    id_display = digits.zfill(9)       # full 9-digit ת.ז for the certificate (keep leading zeros)
 
     if not company:
         flash('בחר חברה מבקשת אישור', 'danger')
@@ -1807,7 +1809,7 @@ def insurance_cert():
         'req_status':   C['req_status'],
         # insured (customer)
         'ins_name':     ins_name,
-        'ins_id':       norm,
+        'ins_id':       id_display,
         'ins_address':  ins_address,
         'occupation':   occupation,
         # policy + coverage
