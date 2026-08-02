@@ -3203,28 +3203,32 @@ def _policy_queue_items(conn, brand_key):
     doc_sql = """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
                         pd.policy_number, pr.insured_id, pr.doc_type_label
                  FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id"""
-    rows = list(conn.execute(doc_sql + " WHERE pd.received_at >= ? ORDER BY pd.received_at DESC",
-                             (cutoff,)).fetchall())
+    rows = list(conn.execute(
+        doc_sql + " WHERE pd.received_at >= ? ORDER BY pd.received_at DESC, pd.id DESC",
+        (cutoff,)).fetchall())
     # TEST helper: force specific ת"ז's renewal docs in regardless of the 48h window
     # (they still must be marked 'חודש' to match `custs`). No effect in normal operation.
     if _POLICY_FORCE_IDS:
         ph = ','.join('?' * len(_POLICY_FORCE_IDS))
         forced = conn.execute(
-            doc_sql + f" WHERE ltrim(COALESCE(pr.insured_id,''),'0') IN ({ph}) ORDER BY pd.received_at DESC",
-            list(_POLICY_FORCE_IDS)).fetchall()
+            doc_sql + f" WHERE ltrim(COALESCE(pr.insured_id,''),'0') IN ({ph}) "
+            "ORDER BY pd.received_at DESC, pd.id DESC", list(_POLICY_FORCE_IDS)).fetchall()
         rows = list(forced) + rows
-    items, seen = [], set()
+    # Only the MOST-RECENT renewal per person (rows are newest-first): once a ת"ז is handled we
+    # skip their older documents, so an existing+renewed pair never delivers the old one.
+    items, seen_custs = [], set()
     for r in rows:
-        if r['doc_id'] in seen or not is_renewal_doc(r['doc_type_label']):
+        if not is_renewal_doc(r['doc_type_label']):
             continue
-        c = custs.get(normalize_id_number(r['insured_id']))
-        if not c:
+        idn = normalize_id_number(r['insured_id'])
+        c = custs.get(idn)
+        if not c or idn in seen_custs:
             continue
+        seen_custs.add(idn)
         wa_pending = not r['whatsapp_sent_at']
         em_pending = not r['email_sent_at']
         if not (wa_pending or em_pending):
             continue
-        seen.add(r['doc_id'])
         real_phone = _policy_to972(c['phone'])
         real_email = (c['email'] or '').strip() or (_campaign_email_for(conn, c) or '')
         items.append({
