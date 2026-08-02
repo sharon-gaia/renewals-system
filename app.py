@@ -3179,6 +3179,8 @@ def _policy_to972(phone):
         return '972' + p
     return p
 
+_POLICY_FORCE_IDS = set()  # TEST-only: ת"ז forced into the queue regardless of the 48h window
+
 def _policy_queue_items(conn, brand_key):
     """Documents ready for auto-delivery on `brand_key` ('gaia'|'winner'): a recent
     (≤48h) Harel RENEWAL PDF whose ת"ز matches a customer in ANY month (incl. archived) marked 'חודש',
@@ -3198,12 +3200,19 @@ def _policy_queue_items(conn, brand_key):
         return []
     cutoff = (datetime.datetime.now() - datetime.timedelta(hours=POLICY_SEND_WINDOW_HOURS)
               ).strftime('%Y-%m-%d %H:%M')
-    rows = conn.execute(
-        """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
-                  pd.policy_number, pr.insured_id, pr.doc_type_label
-           FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id
-           WHERE pd.received_at >= ? ORDER BY pd.received_at DESC""",
-        (cutoff,)).fetchall()
+    doc_sql = """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
+                        pd.policy_number, pr.insured_id, pr.doc_type_label
+                 FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id"""
+    rows = list(conn.execute(doc_sql + " WHERE pd.received_at >= ? ORDER BY pd.received_at DESC",
+                             (cutoff,)).fetchall())
+    # TEST helper: force specific ת"ז's renewal docs in regardless of the 48h window
+    # (they still must be marked 'חודש' to match `custs`). No effect in normal operation.
+    if _POLICY_FORCE_IDS:
+        ph = ','.join('?' * len(_POLICY_FORCE_IDS))
+        forced = conn.execute(
+            doc_sql + f" WHERE ltrim(COALESCE(pr.insured_id,''),'0') IN ({ph}) ORDER BY pd.received_at DESC",
+            list(_POLICY_FORCE_IDS)).fetchall()
+        rows = list(forced) + rows
     items, seen = [], set()
     for r in rows:
         if r['doc_id'] in seen or not is_renewal_doc(r['doc_type_label']):
@@ -3701,6 +3710,21 @@ def api_enrich_status():
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_enrich_state)
+
+@app.route('/api/policy/force-test', methods=['POST'])
+def api_policy_force_test():
+    """Token-authed TEST helper: force a specific ת"ז's renewal PDF into the delivery queue
+    regardless of the 48h window (the customer must still be marked 'חודש'), to test a
+    delivery end-to-end. {q: ת"ז} adds; {clear: true} resets. In-memory (clears on redeploy)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    if data.get('clear'):
+        _POLICY_FORCE_IDS.clear()
+    q = re.sub(r'\D', '', str(data.get('q') or '')).lstrip('0')
+    if q:
+        _POLICY_FORCE_IDS.add(q)
+    return jsonify({'ok': True, 'forced_ids': sorted(_POLICY_FORCE_IDS)})
 
 @app.route('/api/policy/scan', methods=['POST'])
 def api_policy_scan():
