@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% block title %} — אישור קיום ביטוחים{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-7 col-md-9">
+    <div class="card shadow-sm">
+      <div class="card-header bg-primary text-white d-flex align-items-center gap-2">
+        <i class="bi bi-file-earmark-check"></i>
+        <span class="fw-bold">אישור קיום ביטוחים (נספח א')</span>
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">
+          בחר את החברה מבקשת האישור והזן תעודת זהות של המבוטח. הכלי ימשוך את פרטי הלקוח
+          והפוליסה מהמאגר, ימלא את נספח א' עם חותמת הראל, ויציג תצוגה מקדימה לעריכה
+          לפני הדפסה / שמירה כ‑PDF.
+        </p>
+        <form method="POST" action="{{ url_for('insurance_cert') }}">
+          <div class="mb-3">
+            <label class="form-label fw-bold">חברה מבקשת האישור</label>
+            <select name="company" class="form-select" required>
+              <option value="" selected disabled>— בחר חברה —</option>
+              {% for c in companies %}
+              <option value="{{ c.key }}">{{ c.name }} · ח.פ. {{ c.hp }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label fw-bold">תעודת זהות של המבוטח</label>
+            <input type="text" name="id_number" class="form-control" inputmode="numeric"
+                   placeholder="למשל 312345678" autocomplete="off" required>
+            <div class="form-text">הנתונים נמשכים ממאגר הלקוחות והפוליסות (הראל).</div>
+          </div>
+          <button type="submit" class="btn btn-primary">
+            <i class="bi bi-magic me-1"></i>צור אישור
+          </button>
+        </form>
+      </div>
+    </div>
+    <p class="text-muted small mt-3 mb-0">
+      <i class="bi bi-info-circle me-1"></i>
+      כל שדה באישור ניתן לעריכה בתצוגה המקדימה לפני ההדפסה. סכום גבול האחריות מוזן כברירת
+      מחדל ל‑{{ C.amount }} ₪ — ודא/תקן מול הפוליסה בפועל.
+    </p>
+  </div>
+</div>
+{% endblock %}

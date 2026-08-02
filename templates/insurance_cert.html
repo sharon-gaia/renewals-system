@@ -1,0 +1,273 @@
+{% extends 'base.html' %}
+{% block title %} — אישור קיום ביטוחים{% endblock %}
+{% block content %}
+
+<!-- Toolbar (screen only) -->
+<div class="no-print mb-3 d-flex flex-wrap align-items-center gap-2">
+  <a href="{{ url_for('insurance_cert') }}" class="btn btn-outline-secondary btn-sm">
+    <i class="bi bi-arrow-right me-1"></i>אישור חדש
+  </a>
+  <button onclick="window.print()" class="btn btn-primary btn-sm">
+    <i class="bi bi-printer me-1"></i>הדפס / שמור כ‑PDF
+  </button>
+  <span class="text-muted small ms-2">
+    <i class="bi bi-pencil-square me-1"></i>ניתן ללחוץ ולערוך כל שדה מודגש לפני ההדפסה
+  </span>
+</div>
+
+{% if missing %}
+<div class="no-print alert alert-warning py-2 small">
+  <i class="bi bi-exclamation-triangle me-1"></i>
+  לא נמצא/ה במאגר: <strong>{{ missing | join(', ') }}</strong> — יש להשלים ידנית בשדות המודגשים.
+</div>
+{% endif %}
+{% if not matched_master %}
+<div class="no-print alert alert-info py-2 small">
+  <i class="bi bi-info-circle me-1"></i>
+  המבוטח לא נמצא בטבלת "כל הלקוחות" — הנתונים נמשכו מרשומת הפוליסה האחרונה בלבד.
+</div>
+{% endif %}
+
+<!-- ══════════════ עמוד 1 ══════════════ -->
+<div class="cert-sheet">
+  <div class="cert-topbar">
+    <img src="{{ url_for('static', filename='harel-stamp.png') }}" class="cert-logo" alt="הראל">
+    <div class="cert-no">מספר אישור: <span class="f">{{ cert.cert_number }}</span></div>
+  </div>
+
+  <div class="cert-titles">
+    <div class="cert-appendix">נספח א'</div>
+    <h1>אישור קיום ביטוחים</h1>
+    <div class="cert-date">תאריך הנפקת האישור <span class="f">{{ cert.issue_date }}</span></div>
+  </div>
+
+  <p class="cert-boiler">
+    אישור ביטוח זה מהווה אסמכתא לכך שלמבוטח ישנה פוליסת ביטוח בתוקף, בהתאם למידע המפורט בה.
+    המידע המפורט באישור זה אינו כולל את כל תנאי הפוליסה וחריגיה. יחד עם זאת, במקרה של סתירה בין
+    התנאים שמפורטים באישור זה לבין התנאים הקבועים בפוליסת הביטוח יגבר האמור בפוליסת הביטוח למעט
+    במקרה שבו תנאי באישור זה מיטיב עם מבקש האישור.
+  </p>
+
+  <!-- טבלת הצדדים -->
+  <table class="cert-table parties">
+    <thead>
+      <tr>
+        <th style="width:24%">מבקש האישור הראשי*</th>
+        <th style="width:20%">גורמים נוספים הקשורים למבקש האישור וייחשבו כמבקש האישור*</th>
+        <th style="width:22%">המבוטח*</th>
+        <th style="width:18%">אופי העסקה והעיסוק המבוטח*</th>
+        <th style="width:16%">מעמד מבקש האישור*</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <!-- מבקש האישור הראשי -->
+        <td class="party">
+          <div class="fld"><span class="lbl">שם:</span> <span class="f">{{ cert.req_name }}</span></div>
+          <div class="fld"><span class="lbl">ת.ז./ח.פ.:</span> <span class="f">{{ cert.req_hp }}</span></div>
+          <div class="fld"><span class="lbl">מען:</span> <span class="f">{{ cert.req_address }}</span></div>
+        </td>
+        <!-- גורמים נוספים -->
+        <td class="party muted-col">
+          <div class="fld"><span class="lbl">שם:</span> <span class="f">&nbsp;</span></div>
+          <div class="fld"><span class="lbl">ת.ז./ח.פ.:</span> <span class="f">&nbsp;</span></div>
+          <div class="fld"><span class="lbl">מען:</span> <span class="f">&nbsp;</span></div>
+          <div class="fld small-note">תיאור הקשר למבקש האישור הראשי:</div>
+          <div class="fld"><span class="f">&nbsp;</span></div>
+        </td>
+        <!-- המבוטח -->
+        <td class="party">
+          <div class="fld"><span class="lbl">שם:</span> <span class="f">{{ cert.ins_name }}</span></div>
+          <div class="fld"><span class="lbl">ת.ז./ח.פ.:</span> <span class="f">{{ cert.ins_id }}</span></div>
+          <div class="fld"><span class="lbl">מען:</span> <span class="f">{{ cert.ins_address }}</span></div>
+        </td>
+        <!-- אופי העסקה והעיסוק -->
+        <td class="party">
+          <div class="fld"><span class="lbl">אופי העסקה:</span></div>
+          <div class="opts">
+            {% for o in ['נדל"ן','שירותים','אספקת מוצרים','אחר'] %}
+            <span class="opt {{ 'on' if o == cert.deal_type }}">{{ o }}</span>
+            {% endfor %}
+          </div>
+          <div class="fld mt"><span class="lbl">העיסוק המבוטח:</span></div>
+          <div class="fld"><span class="f occ">{{ cert.occupation or ' ' }}</span></div>
+        </td>
+        <!-- מעמד מבקש האישור -->
+        <td class="party">
+          <div class="opts col">
+            {% for o in ['משכיר','שוכר','זכיין','קבלני משנה','מזמין שירותים','מזמין מוצרים','אחר'] %}
+            <span class="opt {{ 'on' if o == cert.req_status }}">{{ o }}</span>
+            {% endfor %}
+          </div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <!-- טבלת הכיסויים -->
+  <div class="cover-title">כיסויים:</div>
+  <table class="cert-table coverage">
+    <thead>
+      <tr>
+        <th style="width:16%">סוג הביטוח לפי גבולות אחריות או סכומי ביטוח</th>
+        <th style="width:12%">מספר הפוליסה</th>
+        <th style="width:9%">נוסח ומהדורת ביטוח</th>
+        <th style="width:9%">תאריך תחילה</th>
+        <th style="width:9%">תאריך סיום</th>
+        <th style="width:13%">גבול אחריות / סכום ביטוח</th>
+        <th style="width:6%">מטבע</th>
+        <th style="width:26%">כיסויים נוספים בתוקף וביטול חריגים****</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="rtl">צד ג' משולב · אחריות מקצועית רפואית</td>
+        <td><span class="f">{{ cert.policy_number }}</span></td>
+        <td><span class="f">{{ cert.form_edition }}</span></td>
+        <td><span class="f">{{ cert.period_start }}</span></td>
+        <td><span class="f">{{ cert.period_end }}</span></td>
+        <td><span class="f">{{ cert.amount }}</span></td>
+        <td>{{ cert.currency }}</td>
+        <td class="rtl"><span class="f">{{ cert.codes_main }}</span></td>
+      </tr>
+      <tr>
+        <td class="rtl">אחריות מקצועית רפואה משלימה</td>
+        <td><span class="f">{{ cert.policy_number }}</span></td>
+        <td><span class="f">{{ cert.form_edition }}</span></td>
+        <td><span class="f">{{ cert.period_start }}</span></td>
+        <td><span class="f">{{ cert.period_end }}</span></td>
+        <td><span class="f">{{ cert.amount }}</span></td>
+        <td>{{ cert.currency }}</td>
+        <td class="rtl">
+          <div><span class="f">{{ cert.codes_supp }}</span></div>
+          <div class="disc">
+            תקופת גילוי — <span class="f">{{ cert.discovery_codes }}</span><br>
+            תאריך רטרו: <span class="f">{{ cert.retro_date }}</span>
+          </div>
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="cert-footnote">
+    * באישור ביטוח כללי ואישור על הסכמה לעריכת ביטוח ניתן לסמן שדות אלה כשדות שאינם בתוקף.
+  </div>
+</div>
+
+<!-- ══════════════ עמוד 2 ══════════════ -->
+<div class="cert-sheet page2">
+  <div class="cert-topbar">
+    <div class="cert-no">מספר אישור: <span class="f">{{ cert.cert_number }}</span></div>
+  </div>
+
+  <div class="svc-block">
+    <div class="svc-head">
+      פירוט השירותים (בכפוף לשירותים המפורטים בהסכם בין המבוטח למבקש האישור, יש לציין את קוד
+      השירות מתוך הרשימה הסגורה המפורטת בנספח ג' כפי שמפורסם על ידי רשות שוק ההון, ביטוח וחסכון.
+      ניתן להציג בנוסף גם המלל המוצג לצד הקוד ברשימה הסגורה)*:
+    </div>
+    <div class="svc-codes"><span class="f">{{ cert.service_codes }}</span></div>
+  </div>
+
+  <div class="cancel-block">
+    <div class="cancel-head">ביטול/שינוי הפוליסה*</div>
+    <div class="cancel-body">
+      שינוי לרעת מבקש האישור או ביטול של פוליסת ביטוח, לא ייכנס לתוקף אלא 30 יום לאחר משלוח
+      הודעה למבקש האישור בדבר השינוי או הביטול.
+    </div>
+  </div>
+
+  <div class="sign-block">
+    <div class="sign-title">חתימת האישור</div>
+    <div class="sign-row">
+      <div class="sign-label">המבטח: <span class="f">{{ cert.insurer }}</span></div>
+      <img src="{{ url_for('static', filename='harel-stamp.png') }}" class="cert-logo sign-stamp" alt="חתימת המבטח">
+    </div>
+  </div>
+
+  <div class="cert-footnote small2">
+    ** שדות אלה יופיעו באישור על הסכמה לעריכת ביטוח בלבד. &nbsp;
+    *** שדות אלה לא יופיעו באישור על הסכמה לעריכת ביטוח. &nbsp;
+    **** יש לציין קוד כיסוי בהתאם לרשימה הסגורה המנויה בנספח ד' כפי שמפורסם על ידי רשות שוק ההון,
+    ביטוח וחסכון.
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<style>
+  /* ── אישור קיום ביטוחים — layout ── */
+  .cert-sheet{
+    background:#fff; color:#000; direction:rtl;
+    width:210mm; min-height:296mm; box-sizing:border-box;
+    padding:14mm 12mm; margin:0 auto 10mm; border:1px solid #ccc;
+    font-family:'Segoe UI',Arial,sans-serif; font-size:11px; line-height:1.35;
+    box-shadow:0 2px 10px rgba(0,0,0,.12);
+  }
+  .cert-topbar{display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:4px;}
+  .cert-logo{height:34px;}
+  .cert-no{font-size:11px; font-weight:600;}
+  .cert-titles{text-align:center; margin:2px 0 8px;}
+  .cert-appendix{font-weight:700; font-size:13px;}
+  .cert-titles h1{font-size:16px; font-weight:700; margin:2px 0;}
+  .cert-date{font-size:11px;}
+  .cert-boiler{font-size:10px; text-align:justify; margin:6px 0 10px;}
+
+  .cert-table{width:100%; border-collapse:collapse; table-layout:fixed;}
+  .cert-table th,.cert-table td{border:1px solid #333; padding:4px 5px; vertical-align:top; text-align:center;}
+  .cert-table th{background:#eef2f7; font-size:9.5px; font-weight:600;}
+  .parties td.party{text-align:right; font-size:10px;}
+  .parties .fld{margin-bottom:3px;}
+  .parties .lbl{color:#333; font-weight:600;}
+  .parties .small-note{font-size:9px; color:#555; margin-top:6px;}
+  .muted-col{background:#fcfcfc;}
+  .opts{display:flex; flex-wrap:wrap; gap:3px 6px; margin-top:2px;}
+  .opts.col{flex-direction:column; gap:3px;}
+  .opt{font-size:9.5px; color:#888;}
+  .opt.on{color:#000; font-weight:700; background:#fff3b0; padding:0 3px; border-radius:2px;}
+  .mt{margin-top:6px;}
+
+  .cover-title{font-weight:700; margin:10px 0 3px; font-size:11px;}
+  .coverage td{font-size:9.5px;}
+  .coverage td.rtl{text-align:right;}
+  .coverage .disc{margin-top:4px; font-size:9px; color:#333;}
+
+  .cert-footnote{font-size:8.5px; color:#444; margin-top:8px;}
+  .cert-footnote.small2{margin-top:14px; line-height:1.5;}
+
+  .page2 .svc-block{margin-top:6px;}
+  .svc-head{font-size:10px; text-align:justify;}
+  .svc-codes{border:1px solid #333; padding:6px 8px; margin-top:6px; font-weight:700; min-height:30px;}
+  .cancel-block{margin-top:16px;}
+  .cancel-head{font-weight:700; font-size:11px; margin-bottom:3px;}
+  .cancel-body{font-size:10px; text-align:justify;}
+  .sign-block{margin-top:22px;}
+  .sign-title{font-weight:700; font-size:11px; border-bottom:1px solid #333; padding-bottom:3px; display:inline-block;}
+  .sign-row{display:flex; align-items:center; gap:16px; margin-top:8px;}
+  .sign-stamp{height:44px;}
+  .sign-label{font-size:11px; font-weight:600;}
+
+  /* editable fields */
+  .f{border-bottom:1px dashed #9db; padding:0 2px; min-width:8px; display:inline-block;}
+  .f:focus{outline:2px solid #4a90d9; background:#eef6ff;}
+  .occ{min-width:120px;}
+
+  @media print{
+    @page{size:A4; margin:0;}
+    body{background:#fff;}
+    .navbar,.no-print,.alert,footer{display:none !important;}
+    .container-fluid{padding:0 !important; margin:0 !important;}
+    .cert-sheet{border:0; box-shadow:none; margin:0 auto; width:210mm; min-height:297mm; page-break-after:always;}
+    .cert-sheet.page2{page-break-after:auto;}
+    .f{border-bottom:0;}
+    .opt.on{background:transparent; text-decoration:underline;}
+  }
+</style>
+<script>
+  // Make every pre-filled field editable before printing, without letting structural
+  // markup be altered (plain-text editing only).
+  document.querySelectorAll('.cert-sheet .f').forEach(function(el){
+    el.setAttribute('contenteditable','true');
+    el.setAttribute('spellcheck','false');
+  });
+</script>
+{% endblock %}
