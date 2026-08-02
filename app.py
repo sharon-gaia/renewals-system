@@ -600,6 +600,10 @@ def init_db():
             message_id TEXT PRIMARY KEY,
             processed_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS processed_leads (
+            message_id TEXT PRIMARY KEY,
+            processed_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS customer_attachments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER NOT NULL,
@@ -688,7 +692,9 @@ def init_db():
     for col, typ in [('form_card_number','TEXT'), ('form_card_expiry','TEXT'),
                      ('form_id_card_holder','TEXT'), ('handled_by','TEXT'), ('email','TEXT'),
                      ('address','TEXT'), ('status_changed_at','TEXT'),
-                     ('is_midwife','INTEGER')]:
+                     ('is_midwife','INTEGER'),
+                     ('lead_form_json','TEXT'), ('marketing_consent','TEXT'),
+                     ('lead_doc_path','TEXT'), ('lead_doc_saved','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     if 'is_midwife' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
@@ -1238,12 +1244,14 @@ def index():
             no_renew = sum(1 for r in subset if r['status'] in NO_RENEW)
             seen = sum(1 for r in subset if r['status'] in CONTACTED)
             forms = sum(1 for r in subset if r['status'] == 'טופס התקבל')
+            pending_issue = sum(1 for r in subset if r['status'] == 'ממתין להפקה')
             return {
                 'total': t, 'renewed': rnw,
                 'renewed_from_forms': sum(1 for r in subset if r['status'] == 'חודש' and r['form_received_at']),
                 'forms': forms, 'no_renew': no_renew, 'seen': seen,
+                'pending_issue': pending_issue,
                 'no_contact': sum(1 for r in subset if not r['status'] and not _contacted(r)),
-                'pending': t - rnw - no_renew - seen - forms,
+                'pending': t - rnw - no_renew - seen - forms - pending_issue,
                 'pct': round(rnw / t * 100, 1) if t else 0,
             }
         # Per-agency views for the top-of-dashboard toggle (client-side switch).
@@ -1394,10 +1402,17 @@ def customer_detail(cid):
         flash('אין לך הרשאה לצפות בלקוח של סוכנות זו', 'danger')
         return redirect(url_for('customers'))
     wa_link = build_followup_wa_link(customer)
+    # Rich underwriting data captured from a website join form (fields not in the policy PDF).
+    lead_data = None
+    try:
+        if customer['import_source'] == 'join_form' and customer['lead_form_json']:
+            lead_data = json.loads(customer['lead_form_json'])
+    except Exception:
+        lead_data = None
     return render_template('customer_detail.html', c=customer, month=month,
                            statuses=STATUSES, status_options=status_options_for(customer['brand']),
                            managers=managers, changes=changes, audit_labels=AUDIT_LABELS,
-                           events=events, wa_link=wa_link)
+                           events=events, wa_link=wa_link, lead_data=lead_data)
 
 
 def build_followup_wa_link(customer):
@@ -4178,8 +4193,55 @@ def api_policy_scan():
     processed now instead of waiting for the 5-minute poll). Runs in the background."""
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
-    threading.Thread(target=check_policy_documents, daemon=True).start()
+    def _scan_all():
+        check_policy_documents()
+        check_join_forms()
+    threading.Thread(target=_scan_all, daemon=True).start()
     return jsonify({'ok': True, 'scanning': True})
+
+@app.route('/api/lead/attachments')
+def lead_attachments():
+    """Leads whose customer-uploaded document is on the server but not yet filed to OneDrive
+    (token-authed; the local wa-sender fetches + saves them to the לקוחות folder)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    rows = conn.execute(
+        """SELECT id, id_number, name, lead_doc_path FROM customers
+           WHERE import_source='join_form' AND lead_doc_path IS NOT NULL AND lead_doc_path!=''
+                 AND (lead_doc_saved IS NULL OR lead_doc_saved='')""").fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        ext = os.path.splitext(r['lead_doc_path'])[1] or '.jpg'
+        out.append({'cust_id': r['id'], 'id_number': r['id_number'], 'name': r['name'],
+                    'filename': f"מסמך {r['id_number']}{ext}", 'url': f"/api/lead/attachment/{r['id']}"})
+    return jsonify({'items': out, 'count': len(out)})
+
+@app.route('/api/lead/attachment/<int:cid>')
+def lead_attachment(cid):
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    r = conn.execute("SELECT lead_doc_path FROM customers WHERE id=?", (cid,)).fetchone()
+    conn.close()
+    if not r or not r['lead_doc_path'] or not os.path.exists(r['lead_doc_path']):
+        return jsonify({'error': 'not found'}), 404
+    return send_file(r['lead_doc_path'], as_attachment=True,
+                     download_name=os.path.basename(r['lead_doc_path']))
+
+@app.route('/api/lead/attachment/saved', methods=['POST'])
+def lead_attachment_saved():
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    cid = (request.get_json(silent=True) or {}).get('cust_id')
+    if not cid:
+        return jsonify({'error': 'need cust_id'}), 400
+    conn = get_db()
+    conn.execute("UPDATE customers SET lead_doc_saved=? WHERE id=?",
+                 (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), cid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
 
 @app.route('/api/policy/trace', methods=['POST'])
 def api_policy_trace():
@@ -4678,6 +4740,7 @@ def _check_email_inbox_impl():
     return processed
 
 POLICY_DOCS_DIR = os.path.join(ATTACHMENTS_DIR, 'policies')
+LEAD_DOCS_DIR = os.path.join(ATTACHMENTS_DIR, 'leads')
 
 # ── Automatic policy delivery (stage 1: renewals) ────────────────────────────
 # When a Harel renewal PDF arrives whose ת"ז matches a customer already marked
@@ -4728,16 +4791,28 @@ POLICY_WA_NEW = (
     f"{POLICY_OPTIN}"
 )
 
+# Status of a join-form lead awaiting policy issuance (see the join-form pipeline below).
+LEAD_STATUS = 'ממתין להפקה'
+
 def _ensure_new_customer(conn, pr):
-    """Create a customers record for a new-business policy (so it's serviceable), if not present."""
+    """Create a customers record for a new-business policy (so it's serviceable). If a
+    pending-issuance lead (from a website join form) already exists for this ת"ז, upgrade
+    it in place — fill the policy number and clear the wait status — instead of duplicating."""
     idn = normalize_id_number(pr['insured_id'])
     month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
     if not idn or not month:
         return
-    if conn.execute("SELECT 1 FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
-                    (month['id'], idn.lstrip('0'))).fetchone():
-        return
+    existing = conn.execute(
+        "SELECT id, status FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
+        (month['id'], idn.lstrip('0'))).fetchone()
     brand = NEW_AGENT_BRAND.get(re.sub(r'\D', '', str(pr['agent_number'] or '')), '')
+    if existing:
+        if (existing['status'] or '') == LEAD_STATUS:
+            conn.execute(
+                "UPDATE customers SET policy_number=COALESCE(NULLIF(policy_number,''),?), "
+                "status='', status_changed_at=? WHERE id=?",
+                (pr['policy_number'], datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), existing['id']))
+        return
     conn.execute(
         """INSERT INTO customers (month_id, policy_number, name, id_number, phone, email, brand,
                                   status, import_source)
@@ -5022,6 +5097,177 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
 
     return processed
 
+# ── Join-request forms (new-business leads from the agency website) ───────────
+# Customers fill a quote/enrolment form on the Gaia/Winner site; it arrives from
+# resend.dev to the inbox with a rich set of underwriting fields NOT present in the
+# Harel policy PDF (prior insurer, health fund, professional org, declarations,
+# marketing consent, …). We capture them as a lead ("ממתין להפקה") keyed by ת"ז;
+# when Sharon later issues the policy in Harel, the arriving PDF upgrades the lead
+# (see _ensure_new_customer) and the message-send fires.
+JOIN_FORM_SENDER = 'onboarding@resend.dev'
+JOIN_FORM_SUBJECT_MARK = 'בקשת הצטרפות חדשה'
+
+def _lead_brand_from_subject(subject):
+    """'גאיה | בקשת הצטרפות חדשה' / 'ווינר | …' → brand."""
+    s = (subject or '').strip()
+    for b in ('גאיה', 'ווינר', 'אופיר'):
+        if s.startswith(b):
+            return b
+    return ''
+
+def parse_join_form(html):
+    """Parse the two-column HTML table of a join-request form → {label: value}."""
+    import html as _htmlmod
+    out = {}
+    for tr in re.findall(r'<tr[^>]*>(.*?)</tr>', html or '', re.S | re.I):
+        tds = re.findall(r'<td[^>]*>(.*?)</td>', tr, re.S | re.I)
+        if len(tds) < 2:
+            continue
+        label = _htmlmod.unescape(re.sub(r'<[^>]+>', '', tds[0])).strip()
+        val = _htmlmod.unescape(re.sub(r'<[^>]+>', '', tds[1])).strip()
+        if not label:
+            continue
+        out[label] = '' if val in ('—', '-') else val
+    return out
+
+def _ingest_join_form(conn, subject, html, received_at, attach_path=None):
+    """Store/refresh a join-form lead in the active month, keyed by ת"ז. Returns ת"ז or None."""
+    f = parse_join_form(html)
+    idn = normalize_id_number(f.get('מספר ת.ז') or f.get('ת.ז המצהיר') or '')
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not idn or not month:
+        return None
+    brand = _lead_brand_from_subject(subject)
+    name = f.get('שם מלא') or f.get('שם המצהיר') or ''
+    phone = re.sub(r'\D', '', f.get('טלפון') or '')
+    email = f.get('אימייל') or ''
+    address = ' '.join(x for x in (f.get('כתובת'), f.get('עיר')) if x)
+    occupation = f.get('מקצועות') or ''
+    installments = f.get('מספר תשלומים') or ''
+    pay_method = f.get('אמצעי גביה') or ''
+    consent = f.get('הסכמה לשיווק') or ''
+    card = re.sub(r'\D', '', f.get('מספר כרטיס') or '')
+    card_last4 = ('****' + card[-4:]) if len(card) >= 4 else ''
+    # Rich underwriting payload — keep everything EXCEPT the full card number/expiry (PCI).
+    safe = dict(f)
+    if safe.get('מספר כרטיס'):
+        safe['מספר כרטיס'] = card_last4
+    safe.pop('תוקף כרטיס', None)
+    lead_json = json.dumps(safe, ensure_ascii=False)
+    row = conn.execute(
+        "SELECT id, status FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
+        (month['id'], idn.lstrip('0'))).fetchone()
+    if row:
+        keep_status = row['status'] if (row['status'] and row['status'] != LEAD_STATUS) else LEAD_STATUS
+        conn.execute(
+            """UPDATE customers SET name=COALESCE(NULLIF(?,''),name), phone=COALESCE(NULLIF(?,''),phone),
+                   email=COALESCE(NULLIF(?,''),email), address=COALESCE(NULLIF(?,''),address),
+                   occupation=COALESCE(NULLIF(?,''),occupation), brand=COALESCE(NULLIF(?,''),brand),
+                   form_installments=?, form_payment_method=?, form_received_at=?,
+                   form_card_number=?, marketing_consent=?, lead_form_json=?, status=?,
+                   lead_doc_path=COALESCE(?,lead_doc_path)
+               WHERE id=?""",
+            (name, phone, email, address, occupation, brand, installments, pay_method, received_at,
+             card_last4, consent, lead_json, keep_status, attach_path, row['id']))
+        cid = row['id']
+    else:
+        cur = conn.execute(
+            """INSERT INTO customers (month_id, name, id_number, phone, email, address, brand,
+                   occupation, status, import_source, form_installments, form_payment_method,
+                   form_received_at, form_card_number, marketing_consent, lead_form_json, lead_doc_path)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (month['id'], name, idn, phone, email, address, brand, occupation, LEAD_STATUS,
+             'join_form', installments, pay_method, received_at, card_last4, consent, lead_json, attach_path))
+        cid = cur.lastrowid
+    card_note = f" · אשראי {card_last4}" if card_last4 else ""
+    log_event(conn, event_key(idn, 'cust-%d' % cid),
+              f"טופס הצטרפות התקבל ({brand or '—'}) · עיסוק: {occupation or '—'}{card_note}",
+              'system', kind='join_form')
+    return idn
+
+_join_form_lock = threading.Lock()
+
+def check_join_forms(days_back=14):
+    """Scan the inbox for agency join-request forms and ingest them as leads."""
+    if not _join_form_lock.acquire(blocking=False):
+        return 0
+    try:
+        return _check_join_forms_impl(days_back)
+    finally:
+        _join_form_lock.release()
+
+def _check_join_forms_impl(days_back=14):
+    cfg = EMAIL_CONFIG
+    if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
+        return 0
+    from email.utils import parsedate_to_datetime
+    processed = 0
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'FROM "{JOIN_FORM_SENDER}" SINCE {since_date}')
+        if status != 'OK':
+            mail.logout(); return 0
+        conn = get_db()
+        for mid in data[0].split():
+            _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hdr_data[0][1])
+            message_id = hdr.get('Message-ID', '').strip()
+            subject = decode_str(hdr.get('Subject', ''))
+            if JOIN_FORM_SUBJECT_MARK not in subject:
+                continue
+            if message_id and conn.execute(
+                    'SELECT 1 FROM processed_leads WHERE message_id=?', (message_id,)).fetchone():
+                continue
+            try:
+                received_at = parsedate_to_datetime(hdr.get('Date', '')).astimezone().strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                received_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+            _, full_data = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(full_data[0][1])
+            html = None
+            for part in msg.walk():
+                if part.get_content_type() == 'text/html' and 'attachment' not in str(part.get('Content-Disposition', '')):
+                    try:
+                        html = part.get_content()
+                    except Exception:
+                        pl = part.get_payload(decode=True)
+                        html = pl.decode('utf-8', 'replace') if pl else None
+                    break
+            if not html:
+                continue
+            f_preview = parse_join_form(html)
+            idn_preview = normalize_id_number(f_preview.get('מספר ת.ז') or f_preview.get('ת.ז המצהיר') or '')
+            attach_path = None
+            for part in msg.walk():
+                if 'attachment' not in str(part.get('Content-Disposition', '')):
+                    continue
+                raw_fn = part.get_filename()
+                payload = part.get_payload(decode=True)
+                if not raw_fn or not payload:
+                    continue
+                ext = os.path.splitext(decode_str(raw_fn))[1] or '.jpg'
+                folder = os.path.join(LEAD_DOCS_DIR, idn_preview or 'unknown')
+                os.makedirs(folder, exist_ok=True)
+                attach_path = os.path.join(folder, f'מסמך {idn_preview}{ext}')
+                with open(attach_path, 'wb') as fh:
+                    fh.write(payload)
+                break
+            idn = _ingest_join_form(conn, subject, html, received_at, attach_path)
+            if message_id:
+                conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
+                             (message_id, datetime.datetime.now().isoformat()))
+            conn.commit()
+            processed += 1
+            print(f'[join-forms] ליד נקלט: {idn} ({subject})')
+        conn.close()
+        mail.logout()
+    except Exception as e:
+        print(f'[join-forms] שגיאה: {e}')
+    return processed
+
 def email_poll_thread():
     """Background thread: check inbox every N seconds."""
     while True:
@@ -5038,6 +5284,12 @@ def email_poll_thread():
                 print(f'[policy-docs] עובדו {n2} פוליסות חדשות')
         except Exception as e:
             print(f'[policy-docs] שגיאת thread: {e}')
+        try:
+            n3 = check_join_forms()
+            if n3:
+                print(f'[join-forms] נקלטו {n3} טפסי הצטרפות')
+        except Exception as e:
+            print(f'[join-forms] שגיאת thread: {e}')
 
 # ── Admin email trigger ──────────────────────────────────────
 
@@ -5069,6 +5321,7 @@ def refresh_data():
         try:
             check_email_inbox()
             check_policy_documents()
+            check_join_forms()
             conn = get_db()
             rebuild_insureds(conn)
             recompute_insured_statuses(conn)

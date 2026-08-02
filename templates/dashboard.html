@@ -98,6 +98,16 @@
       </div>
     </a>
   </div>
+  <div class="col-6 col-md-3">
+    <a href="/customers?status=ממתין+להפקה" class="text-decoration-none stat-link" data-status="ממתין להפקה">
+      <div class="card text-center border-0 shadow-sm h-100 {% if stats.pending_issue %}border-warning{% endif %}">
+        <div class="card-body">
+          <div class="stat-number text-warning" data-stat="pending_issue">{{ stats.pending_issue }}</div>
+          <div class="stat-label">📝 ממתין להפקה (טפסים חדשים)</div>
+        </div>
+      </div>
+    </a>
+  </div>
 </div>
 <div class="row g-3 mb-4">
   <div class="col-6 col-md-3">

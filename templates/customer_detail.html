@@ -130,12 +130,38 @@
           </tr>
           <tr><th>פרמיה שנה שעברה</th><td>{{ c.premium_last_year or '—' }}</td></tr>
           <tr><th>עיסוק</th><td>{{ c.occupation or '—' }}</td></tr>
+          {% if c.import_source == 'join_form' %}
+          <tr><th>טופס הצטרפות</th><td>התקבל {{ c.form_received_at or '—' }}</td></tr>
+          <tr><th>הסכמת שיווק</th><td>{{ c.marketing_consent or '—' }}</td></tr>
+          {% if c.form_installments or c.form_payment_method %}
+          <tr><th>תשלום</th><td>{{ c.form_payment_method or '' }} · {{ c.form_installments or '' }} תשלומים</td></tr>
+          {% endif %}
+          {% if session.role in ('admin', 'superadmin') and c.form_card_number %}
+          <tr><th>אשראי (4 אחרונות)</th><td><span class="text-muted">{{ c.form_card_number }}</span></td></tr>
+          {% endif %}
+          {% if c.lead_doc_path %}
+          <tr><th>מסמך לקוח</th><td>{{ 'נשמר ✓' if c.lead_doc_saved else 'ממתין לשמירה' }}</td></tr>
+          {% endif %}
+          {% endif %}
           {% for col, label in extra_field_defs %}
           {% if c[col] %}
           <tr><th>{{ label }}</th><td>{{ c[col] }}</td></tr>
           {% endif %}
           {% endfor %}
         </table>
+        {% if lead_data %}
+        <button class="btn btn-link btn-sm p-0 mt-2 text-warning" type="button"
+                data-bs-toggle="collapse" data-bs-target="#lead-form">
+          <i class="bi bi-clipboard-data me-1"></i>פרטי טופס ההצטרפות ({{ lead_data|length }} שדות)
+        </button>
+        <div class="collapse mt-2" id="lead-form">
+          <table class="table table-sm table-borderless mb-0">
+            {% for k, v in lead_data.items() %}
+            {% if v %}<tr><th class="text-muted fw-normal" style="width:45%">{{ k }}</th><td>{{ v }}</td></tr>{% endif %}
+            {% endfor %}
+          </table>
+        </div>
+        {% endif %}
         {% if changes %}
         <button class="btn btn-link btn-sm p-0 mt-2 text-secondary" type="button"
                 data-bs-toggle="collapse" data-bs-target="#change-log">
