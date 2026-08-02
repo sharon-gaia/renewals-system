@@ -1238,20 +1238,23 @@ def index():
         def _contacted(r):
             return bool(r['call_status_1'] or r['call_status_2'] or r['call_status_3'])
         def _funnel(subset):
-            """Renewal funnel counts over a subset of customer rows."""
-            t = len(subset)
-            rnw = sum(1 for r in subset if r['status'] == 'חודש')
-            no_renew = sum(1 for r in subset if r['status'] in NO_RENEW)
-            seen = sum(1 for r in subset if r['status'] in CONTACTED)
-            forms = sum(1 for r in subset if r['status'] == 'טופס התקבל')
+            """Renewal funnel counts. New-business leads ("ממתין להפקה") are NOT renewals —
+            they're counted separately (pending_issue) and excluded from the renewal
+            total, the buckets, and the renewal-percentage denominator."""
             pending_issue = sum(1 for r in subset if r['status'] == 'ממתין להפקה')
+            core = [r for r in subset if r['status'] != 'ממתין להפקה']
+            t = len(core)
+            rnw = sum(1 for r in core if r['status'] == 'חודש')
+            no_renew = sum(1 for r in core if r['status'] in NO_RENEW)
+            seen = sum(1 for r in core if r['status'] in CONTACTED)
+            forms = sum(1 for r in core if r['status'] == 'טופס התקבל')
             return {
                 'total': t, 'renewed': rnw,
-                'renewed_from_forms': sum(1 for r in subset if r['status'] == 'חודש' and r['form_received_at']),
+                'renewed_from_forms': sum(1 for r in core if r['status'] == 'חודש' and r['form_received_at']),
                 'forms': forms, 'no_renew': no_renew, 'seen': seen,
                 'pending_issue': pending_issue,
-                'no_contact': sum(1 for r in subset if not r['status'] and not _contacted(r)),
-                'pending': t - rnw - no_renew - seen - forms - pending_issue,
+                'no_contact': sum(1 for r in core if not r['status'] and not _contacted(r)),
+                'pending': t - rnw - no_renew - seen - forms,
                 'pct': round(rnw / t * 100, 1) if t else 0,
             }
         # Per-agency views for the top-of-dashboard toggle (client-side switch).
