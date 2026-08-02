@@ -3882,6 +3882,48 @@ def api_policy_inspect_email():
         out['error'] = str(e)
     return jsonify(out)
 
+@app.route('/api/policy/pdf-text', methods=['POST'])
+def api_policy_pdf_text():
+    """Token-authed: find the ComposeDoc email whose PDF matches ת"ز {q} and return its raw
+    text lines + parsed fields — to locate fields the parser doesn't extract (e.g. מס' תוספת)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    q = re.sub(r'\D', '', str(data.get('q') or '')).lstrip('0')
+    days = int(data.get('days') or 8)
+    cfg = EMAIL_CONFIG
+    out = {'q': q, 'found': False}
+    try:
+        import imaplib, email as _email
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
+        _, dta = mail.search(None, f'(SINCE {since} FROM "ComposeDoc@harel-ins.co.il")')
+        ids = dta[0].split() if dta and dta[0] else []
+        for mid in reversed(ids):
+            _, full = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = _email.message_from_bytes(full[0][1])
+            for part in msg.walk():
+                cd = str(part.get('Content-Disposition', ''))
+                if 'attachment' not in cd and part.get_content_type() != 'application/octet-stream':
+                    continue
+                dbytes = part.get_payload(decode=True)
+                if not dbytes:
+                    continue
+                fields = parse_harel_policy_pdf(dbytes)
+                if re.sub(r'\D', '', str(fields.get('insured_id', ''))).lstrip('0') == q:
+                    out.update(found=True, parsed=fields, subject=decode_str(msg.get('Subject', '')),
+                               date=msg.get('Date', ''), filename=decode_str(part.get_filename() or ''),
+                               lines=_policy_pdf_lines(dbytes, 60))
+                    break
+            if out['found']:
+                break
+        mail.logout()
+    except Exception as e:
+        out['error'] = str(e)
+    return jsonify(out)
+
 @app.route('/api/policy/scan', methods=['POST'])
 def api_policy_scan():
     """Token-authed on-demand scan for new Harel policy PDFs (so a just-arrived renewal is
@@ -4493,6 +4535,19 @@ def _wa_brand_key(brand):
 
 def is_renewal_doc(doc_type_label):
     return 'חידוש' in (doc_type_label or '')
+
+def _policy_pdf_lines(source, limit=60):
+    """Raw get_display'd text lines of the policy-schedule page (diagnostics)."""
+    try:
+        pdf_src = io.BytesIO(source) if isinstance(source, (bytes, bytearray)) else source
+        with pdfplumber.open(pdf_src) as pdf:
+            for page in pdf.pages:
+                t = page.extract_text() or ''
+                if any('רשימה' in h for h in t.split('\n')[:2]):
+                    return [get_display(l) for l in t.split('\n')][:limit]
+    except Exception:
+        pass
+    return []
 
 def parse_harel_policy_pdf(source):
     """Best-effort field extraction from a Harel policy-schedule ('דף הרשימה') PDF page.
