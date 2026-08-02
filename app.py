@@ -3702,6 +3702,53 @@ def api_enrich_status():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_enrich_state)
 
+@app.route('/api/policy/scan', methods=['POST'])
+def api_policy_scan():
+    """Token-authed on-demand scan for new Harel policy PDFs (so a just-arrived renewal is
+    processed now instead of waiting for the 5-minute poll). Runs in the background."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    threading.Thread(target=check_policy_documents, daemon=True).start()
+    return jsonify({'ok': True, 'scanning': True})
+
+@app.route('/api/policy/trace', methods=['POST'])
+def api_policy_trace():
+    """Token-authed diagnosis of why a policy is / isn't in the auto-delivery queue.
+    Accepts {q: policy number | ת"ز | name}; returns the matching documents + customers."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    q = str((request.get_json(silent=True) or {}).get('q') or '').strip()
+    if not q:
+        return jsonify({'error': 'need q'}), 400
+    qz = re.sub(r'\D', '', q).lstrip('0')
+    like = f'%{q}%'
+    conn = get_db()
+    cutoff = (datetime.datetime.now() - datetime.timedelta(hours=POLICY_SEND_WINDOW_HOURS)
+              ).strftime('%Y-%m-%d %H:%M')
+    docs = []
+    for d in conn.execute(
+        """SELECT pd.id, pd.policy_number, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
+                  pr.insured_id, pr.insured_name, pr.doc_type_label
+           FROM policy_documents pd LEFT JOIN policy_records pr ON pr.policy_document_id=pd.id
+           WHERE ltrim(COALESCE(pd.policy_number,''),'0')=? OR ltrim(COALESCE(pr.insured_id,''),'0')=?
+                 OR pr.insured_name LIKE ? ORDER BY pd.id DESC LIMIT 12""", (qz, qz, like)).fetchall():
+        docs.append({'doc_id': d['id'], 'policy_number': d['policy_number'], 'received_at': d['received_at'],
+                     'insured_id': d['insured_id'], 'insured_name': d['insured_name'],
+                     'doc_type': d['doc_type_label'], 'is_renewal': is_renewal_doc(d['doc_type_label']),
+                     'within_48h': bool(d['received_at'] and d['received_at'] >= cutoff),
+                     'whatsapp_sent_at': d['whatsapp_sent_at'], 'email_sent_at': d['email_sent_at']})
+    custs = []
+    for c in conn.execute(
+        """SELECT c.id, m.name mname, m.is_active, c.name, c.id_number, c.status, c.brand
+           FROM customers c LEFT JOIN months m ON m.id=c.month_id
+           WHERE ltrim(COALESCE(c.id_number,''),'0')=? OR c.name LIKE ?
+           ORDER BY c.month_id DESC LIMIT 12""", (qz, like)).fetchall():
+        custs.append({'cust_id': c['id'], 'month': c['mname'], 'active_month': bool(c['is_active']),
+                      'name': c['name'], 'id_number': c['id_number'], 'status': c['status'],
+                      'marked_renewed': (c['status'] == 'חודש'), 'brand': c['brand']})
+    conn.close()
+    return jsonify({'query': q, 'window_cutoff': cutoff, 'policy_documents': docs, 'customers': custs})
+
 
 @app.route('/admin/enrich-contacts', methods=['POST'])
 @login_required
