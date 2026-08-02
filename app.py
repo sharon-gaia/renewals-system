@@ -3804,6 +3804,41 @@ def api_policy_send_live():
     _POLICY_LIVE_IDS.add(q)
     return jsonify({'ok': True, 'live_ids': sorted(_POLICY_LIVE_IDS), 'docs_reset': reset.rowcount})
 
+@app.route('/api/policy/inbox-search', methods=['POST'])
+def api_policy_inbox_search():
+    """Token-authed IMAP diagnostic (read-only): find emails whose SUBJECT contains {q}
+    (last 14 days) + list recent ComposeDoc subjects — to see the real sender/subject of a
+    policy the scanner missed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    q = str((request.get_json(silent=True) or {}).get('q') or '').strip()
+    cfg = EMAIL_CONFIG
+    out = {'query': q, 'matches': [], 'recent_composedoc': []}
+    try:
+        import imaplib, email as _email
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = (datetime.datetime.now() - datetime.timedelta(days=14)).strftime('%d-%b-%Y')
+        if q:
+            _, data = mail.search(None, f'(SINCE {since} SUBJECT "{q}")')
+            for mid in (data[0].split() if data and data[0] else [])[-10:]:
+                _, hd = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])')
+                h = _email.message_from_bytes(hd[0][1])
+                out['matches'].append({'from': decode_str(h.get('From', '')),
+                                       'subject': decode_str(h.get('Subject', '')), 'date': h.get('Date', '')})
+        _, data = mail.search(None, f'(SINCE {since} FROM "ComposeDoc@harel-ins.co.il")')
+        ids = data[0].split() if data and data[0] else []
+        out['composedoc_count'] = len(ids)
+        for mid in ids[-6:]:
+            _, hd = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
+            h = _email.message_from_bytes(hd[0][1])
+            out['recent_composedoc'].append({'subject': decode_str(h.get('Subject', '')), 'date': h.get('Date', '')})
+        mail.logout()
+    except Exception as e:
+        out['error'] = str(e)
+    return jsonify(out)
+
 @app.route('/api/policy/scan', methods=['POST'])
 def api_policy_scan():
     """Token-authed on-demand scan for new Harel policy PDFs (so a just-arrived renewal is
