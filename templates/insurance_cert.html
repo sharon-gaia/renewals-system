@@ -264,11 +264,12 @@
   .opt.on .opt-txt{font-weight:700;}
 
   .cover-title{font-weight:700; margin:10px 0 4px; font-size:13pt;}
-  .coverage td{font-size:10pt;}
-  .coverage tbody td{height:80px; vertical-align:top;}
+  .coverage th,.coverage td{padding:5px 7px;}
+  .coverage td{font-size:11pt;}
+  .coverage tbody td{min-height:78px; vertical-align:top; line-height:1.5;}
   .coverage td.rtl{text-align:right;}
-  .coverage .retro{margin-top:14px; font-size:9.5pt; text-align:right;}
-  .coverage .disc{margin-top:6px; font-size:9.5pt;}
+  .coverage .retro{margin-top:16px; font-size:10pt; text-align:right;}
+  .coverage .disc{margin-top:8px; font-size:10pt;}
 
   .cert-footnote{font-size:9pt; margin-top:8px;}
   .cert-footnote.small2{margin-top:14px; line-height:1.6;}
@@ -302,6 +303,9 @@
   }
 </style>
 <script>
+  // שם המסמך → שם ברירת-המחדל של קובץ ה-PDF בשמירה: "שם לקוח - מילה ראשונה של החברה".
+  document.title = {{ ((cert.ins_name or 'אישור') ~ ' - ' ~ (company.name.split(' ')[0])) | tojson }};
+
   // כל שדה מודגש ניתן לעריכה לפני ההדפסה.
   document.querySelectorAll('.cert-sheet .f').forEach(function(el){
     el.setAttribute('contenteditable','true');
