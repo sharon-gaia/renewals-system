@@ -3238,7 +3238,11 @@ def render_renewal_email(cust, month_name):
             f'<p>לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו), יש להיכנס לקישור:</p>'
             f'<p><a href="{link}" style="background:#0d6efd;color:#fff;padding:10px 22px;'
             f'border-radius:6px;text-decoration:none;display:inline-block">{label}</a></p>'
-            f'{CAMPAIGN_CROSS_SELL}</div></td></tr></table>')
+            f'{CAMPAIGN_CROSS_SELL}'
+            + (f'<p style="margin-top:18px;padding-top:12px;border-top:1px solid #eee;'
+               f'color:#555;font-size:14px">{_html.escape(WINNER_EMAIL_UPDATE)}</p>'
+               if cust['brand'] == 'ווינר' else '')
+            + '</div></td></tr></table>')
 
 def send_campaign_email(to_email, subject, html_body):
     """Send one renewal email. Prefers Resend (HTTPS API — works on Railway, which blocks
@@ -3285,10 +3289,12 @@ def within_business_hours(now=None):
         return False
     return 8 <= now.hour < 16
 
-# Winner customers were historically messaged from Gaia's WhatsApp number; a trust line
-# on Winner's message reassures them it's the same team when it now comes from Winner's number.
-WINNER_WA_TRUST = ("כאן שרון מקבוצת אופיר (גאיה, ווינר ואופיר). בעבר אולי היינו בקשר גם ממספר "
-                   "אחר שלנו — זה אנחנו, אותו צוות ואותו שירות.")
+# Winner customers were historically messaged from Gaia's number; a closing line on Winner's
+# message announces the new Winner number (058-7900009) and reassures it's the same team.
+WINNER_WA_TRUST = ("דרך אגב, זה שרון מווינר-אופיר, התחדשנו בטלפון של אלופים - 058-7900009. "
+                   "בעבר אולי היינו בקשר גם ממספר אחר שלנו - אבל זה אנחנו, אותו צוות ואותו שירות ללא עלות.")
+# Short closing update line for Winner renewal emails (announces the new Winner number).
+WINNER_EMAIL_UPDATE = "עדכון - התחדשנו בטלפון של אלופים - 058-7900009"
 
 def render_renewal_whatsapp(cust, month_name):
     """Plain-text renewal message for WhatsApp (concise — link + price + signature).
@@ -3297,13 +3303,13 @@ def render_renewal_whatsapp(cust, month_name):
     amt = renewal_amount(cust['is_midwife'], cust['premium_last_year'])
     price = (f"המחיר לשנה הקרובה: {amt:,} ₪ — ללא שינוי מהשנה שעברה."
              if amt is not None else "המחיר נשאר כמו שנה שעברה.")
-    trust = f"{WINNER_WA_TRUST}\n" if cust['brand'] == 'ווינר' else ''
+    trust = f"\n\n{WINNER_WA_TRUST}" if cust['brand'] == 'ווינר' else ''
     return (f"שלום, {cust['name']}\n"
-            f"{trust}"
             f"הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.\n"
             f"{price}\n\n"
             f"לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו):\n{link}\n\n"
-            f"—\nשרון דר, מנהל מכירות אחריות מקצועית\nקבוצת אופיר — אופיר, גאיה, ווינר\n073-3915555")
+            f"—\nשרון דר, מנהל מכירות אחריות מקצועית\nקבוצת אופיר — אופיר, גאיה, ווינר\n073-3915555"
+            f"{trust}")
 
 def _wa_api_authed():
     tok = os.environ.get('WA_API_TOKEN', '')
