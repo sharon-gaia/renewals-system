@@ -1169,6 +1169,52 @@ def api_fill_occupations_status():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_occ_fill_state)
 
+@app.route('/api/scan-bounces')
+def api_scan_bounces():
+    """Read Delivery-Status-Notification (Failure) bounce emails, extract the failed recipient
+    addresses, and (with apply=1) clear that email from the customer + insured records so we
+    never email a dead address again. Token-authed. Default is a dry run."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 3))
+    apply = request.args.get('apply') == '1'
+    cfg = EMAIL_CONFIG
+    bounced = set()
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'(SUBJECT "Delivery Status Notification" SINCE {since})')
+        for mid in (data[0].split() if status == 'OK' else []):
+            _, fd = mail.fetch(mid, '(BODY.PEEK[])')
+            raw = fd[0][1].decode('utf-8', 'replace')
+            for m in re.finditer(r'Final-Recipient:\s*rfc822;\s*<?([^\s<>]+@[^\s<>]+?)>?\s', raw, re.I):
+                bounced.add(m.group(1).strip().lower().strip('.'))
+        mail.logout()
+    except Exception as e:
+        return jsonify({'error': str(e)})
+    conn = get_db()
+    results = []
+    for em in sorted(bounced):
+        rows = conn.execute(
+            "SELECT c.id, c.name, m.name AS month FROM customers c JOIN months m ON m.id=c.month_id "
+            "WHERE lower(COALESCE(c.email,''))=?", (em,)).fetchall()
+        results.append({'email': em, 'customers': [f"{r['name']} ({r['month']})" for r in rows]})
+        if apply and rows:
+            for r in rows:
+                idn = conn.execute("SELECT id_number FROM customers WHERE id=?", (r['id'],)).fetchone()
+                if idn:
+                    log_event(conn, event_key(idn['id_number'], 'cust-%d' % r['id']),
+                              f"מייל הוסר — נדחה (bounce): {em}", 'system', kind='email_bounce')
+            conn.execute("UPDATE customers SET email='' WHERE lower(COALESCE(email,''))=?", (em,))
+            conn.execute("UPDATE insureds SET email='' WHERE lower(COALESCE(email,''))=?", (em,))
+    if apply:
+        conn.commit()
+    conn.close()
+    return jsonify({'bounced_count': len(bounced), 'applied': apply,
+                    'matched_customers': sum(len(r['customers']) for r in results), 'results': results})
+
 @app.route('/api/inbox-forms')
 def api_inbox_forms():
     """Diagnostic: recent website-form emails (onboarding@resend.dev) in the inbox — subjects +
