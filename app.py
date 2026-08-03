@@ -5608,45 +5608,64 @@ def _imap_utf7(s):
 
 def label_sent_policy_emails(limit=None):
     """Gmail-label + archive the Harel emails whose policy was already delivered, so the inbox
-    shows only what still needs handling. Adds label GMAIL_SENT_LABEL and removes \\Inbox."""
+    shows only what still needs handling. Searches ALL MAIL (so already-archived ones aren't
+    missed), adds GMAIL_SENT_LABEL, removes \\Inbox. Returns {processed, found, not_found, misses}."""
     if not _gmail_label_lock.acquire(blocking=False):
-        return 0
+        return {'processed': 0, 'found': 0, 'not_found': 0, 'misses': []}
     try:
         cfg = EMAIL_CONFIG
         if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
-            return 0
+            return {'processed': 0, 'found': 0, 'not_found': 0, 'misses': []}
         conn = get_db()
-        q = ("SELECT id, message_id FROM policy_documents WHERE COALESCE(message_id,'')!='' "
+        q = ("SELECT id, message_id, policy_number FROM policy_documents WHERE COALESCE(message_id,'')!='' "
              "AND COALESCE(gmail_labeled,'')='' AND (COALESCE(whatsapp_sent_at,'')!='' "
              "OR COALESCE(email_sent_at,'')!='') ORDER BY id DESC")
         if limit:
             q += f" LIMIT {int(limit)}"
         rows = conn.execute(q).fetchall()
         if not rows:
-            conn.close(); return 0
+            conn.close(); return {'processed': 0, 'found': 0, 'not_found': 0, 'misses': []}
         label = '"' + _imap_utf7(GMAIL_SENT_LABEL) + '"'
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-        done = 0
         mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
         mail.login(cfg['username'], cfg['password'])
-        mail.select('INBOX')
+        allbox = None                                    # find the \All (All Mail) folder
+        try:
+            typ, boxes = mail.list()
+            for b in (boxes or []):
+                line = b.decode('utf-8', 'replace') if isinstance(b, (bytes, bytearray)) else str(b)
+                if '\\All' in line:
+                    mm = re.findall(r'"([^"]*)"', line)
+                    if mm:
+                        allbox = mm[-1]; break
+        except Exception:
+            pass
+        mail.select(allbox or 'INBOX')
+        found = not_found = 0
+        misses = []
         for r in rows:
             mid = (r['message_id'] or '').strip()
+            hit = False
             try:
                 typ, data = mail.search(None, 'HEADER', 'Message-ID', mid)
                 for uid in (data[0].split() if typ == 'OK' else []):
                     mail.store(uid, '+X-GM-LABELS', label)
                     mail.store(uid, '-X-GM-LABELS', '\\Inbox')   # archive out of the inbox
-                done += 1
+                    hit = True
             except Exception as e:
                 print(f'[gmail-label] {mid}: {e}')
-            conn.execute("UPDATE policy_documents SET gmail_labeled=? WHERE id=?", (now, r['id']))
+            if hit:
+                found += 1
+                conn.execute("UPDATE policy_documents SET gmail_labeled=? WHERE id=?", (now, r['id']))
+            else:
+                not_found += 1
+                misses.append(r['policy_number'])          # left un-marked → retried next run
         conn.commit(); conn.close()
         mail.logout()
-        return done
+        return {'processed': len(rows), 'found': found, 'not_found': not_found, 'misses': misses[:40]}
     except Exception as e:
         print(f'[gmail-label] שגיאה: {e}')
-        return 0
+        return {'processed': 0, 'found': 0, 'not_found': 0, 'misses': [], 'error': str(e)}
     finally:
         _gmail_label_lock.release()
 
@@ -5655,8 +5674,7 @@ def api_gmail_label_sent():
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
     limit = (request.get_json(silent=True) or {}).get('limit')
-    n = label_sent_policy_emails(limit=limit)
-    return jsonify({'labeled': n})
+    return jsonify(label_sent_policy_emails(limit=limit))
 
 _policy_check_lock = threading.Lock()
 
@@ -6101,6 +6119,12 @@ def email_poll_thread():
                 print(f'[renewal-forms] עובדו {rp} טפסי חידוש ({ru} לא תואמים)')
         except Exception as e:
             print(f'[renewal-forms] שגיאת thread: {e}')
+        try:
+            lr = label_sent_policy_emails()
+            if lr.get('found'):
+                print(f"[gmail-label] תויגו ואורכבו {lr['found']} מיילי פוליסות שנשלחו")
+        except Exception as e:
+            print(f'[gmail-label] שגיאת thread: {e}')
 
 # ── Admin email trigger ──────────────────────────────────────
 
