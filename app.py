@@ -1037,49 +1037,45 @@ def extract_insured_occupation(pdf_path):
         return ''
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            occ_text = None
+            page_lines = None
             for page in pdf.pages:
-                t = page.extract_text() or ''
-                if 'עיסוק המבוטח' in t and 'הסמכה' in t:
-                    occ_text = t
+                # pdfplumber extracts RTL text reversed → bidi-process BEFORE searching.
+                bidi = get_display(page.extract_text() or '')
+                if 'עיסוק המבוטח' in bidi and 'הסמכה' in bidi:
+                    page_lines = [l.strip() for l in bidi.split('\n')]
                     break
-        if not occ_text:
+        if not page_lines:
             return ''
     except Exception as e:
         print(f'[cert-occupation] שגיאת קריאת PDF: {e}')
         return ''
 
-    lines = [get_display(l) for l in occ_text.split('\n')]
+    # The block is: header row → dashes → occupation line(s) → institution → year+licence.
+    hi = next((i for i, l in enumerate(page_lines)
+               if 'עיסוק המבוטח' in l and 'הסמכה' in l), None)
+    if hi is None:
+        return ''
+    INSTITUTION = ('משרד', 'מדינת', 'אוניברסיט', 'מכון', 'בית ספר', 'ביה"ס', 'מכלל',
+                   'קולג', 'ארגון', 'המכללה', 'הטכניון', 'הסמכה')
+    STOP = ('במקום חריג', 'הביטוח ל', 'תשומת לב', 'הפוליסה', 'תא סוכן', 'גבול', 'הרחב',
+            'פרמיה', 'תאריך', 'כפוף', 'למען הסר', 'במסגרת', 'חריג', 'כולל מפגשים',
+            'סכום', 'תאור הכיסוי', 'המבטח')
     occupations = []
-    started = False
-    for l in lines:
-        if 'עיסוק המבוטח' in l and 'הסמכה' in l:
-            started = True
+    for l in page_lines[hi + 1:]:
+        if not l or set(l) <= set('- '):        # blank or dashes separator
             continue
-        if not started:
-            continue
-        s = l.strip()
-        if not s:
-            continue
-        # Stop when we leave the occupations block (next section headers / footer).
-        if any(k in s for k in ('חתימת', 'המבטח', 'סה"כ', 'פרטי הפוליסה', 'תקופת הביטוח',
-                                'דמי ביטוח', 'כתובת', 'עמוד')):
+        if any(k in l for k in INSTITUTION):     # reached the institution column → stop
             break
-        # Drop a trailing 4-digit certification year and any run of digits (institution ids),
-        # keeping the occupation words (the right-most column of the triplet).
-        occ = re.sub(r'\b\d{4}\b', '', s)          # year
-        occ = re.sub(r'\d+', '', occ)               # stray numbers
-        occ = occ.strip(' -|\t')
-        # Heuristic: the occupation is the first token-group; institution names often contain
-        # "מכון"/"בית ספר"/"אוניברסיטת"/"מכללת" — cut there when both share a line.
-        for sep in ('מכון', 'בית ספר', 'ביה"ס', 'אוניברסיט', 'מכלל', 'קולג'):
-            idx = occ.find(sep)
-            if idx > 0:
-                occ = occ[:idx].strip(' -|,')
-                break
+        if re.fullmatch(r'[\d\s.\-/]+', l):      # a year / licence-number line → stop
+            break
+        if any(k in l for k in STOP):            # coverage / boilerplate → stop
+            break
+        occ = re.sub(r'\s*\d[\d\s]*$', '', l).strip(' -|,\t')  # trailing numbers
         if occ and not re.fullmatch(r'[\W_]+', occ):
             occupations.append(occ)
-    # De-dup while preserving order.
+        if len(occupations) >= 3:                # safety — take the leading occupation lines
+            break
+    # De-dup, order-preserving.
     seen, uniq = set(), []
     for o in occupations:
         if o not in seen:
@@ -1190,7 +1186,8 @@ def api_occ_debug():
     if not row:
         return jsonify({'error': 'no stored pdf for active month'})
     fp = row['filepath']
-    out = {'id_number': row['id_number'], 'filepath': fp, 'exists': os.path.exists(fp), 'pages': []}
+    out = {'id_number': row['id_number'], 'filepath': fp, 'exists': os.path.exists(fp),
+           'extracted': extract_insured_occupation(fp), 'pages': []}
     try:
         with pdfplumber.open(fp) as pdf:
             out['page_count'] = len(pdf.pages)
