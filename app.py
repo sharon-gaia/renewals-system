@@ -1227,6 +1227,29 @@ def api_policy_pdf_lines():
         return jsonify({'error': 'no file'})
     return jsonify({'lines': _policy_pdf_lines(d['filepath'], limit=90)})
 
+@app.route('/api/duplicates')
+def api_duplicates():
+    """Customers sharing the same ת"ז in the active month (data-integrity check). Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'duplicate_ids': 0, 'items': []})
+    conn = get_db()
+    dups = conn.execute(
+        "SELECT ltrim(COALESCE(id_number,''),'0') AS z, COUNT(*) AS n FROM customers "
+        "WHERE month_id=? AND COALESCE(id_number,'')!='' GROUP BY z HAVING n>1 ORDER BY n DESC",
+        (month['id'],)).fetchall()
+    out = []
+    for d in dups:
+        rows = conn.execute(
+            "SELECT id, name, id_number, brand, status, import_source, policy_number, email_sent_date "
+            "FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=? ORDER BY id",
+            (month['id'], d['z'])).fetchall()
+        out.append({'id_number': d['z'], 'count': d['n'], 'rows': [dict(r) for r in rows]})
+    conn.close()
+    return jsonify({'duplicate_ids': len(out), 'items': out})
+
 @app.route('/api/queue-monitor')
 def api_queue_monitor():
     """Work-queue watchdog: run a fresh renewal-form scan and report how many are now in the
