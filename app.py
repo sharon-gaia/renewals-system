@@ -1227,6 +1227,36 @@ def api_policy_pdf_lines():
         return jsonify({'error': 'no file'})
     return jsonify({'lines': _policy_pdf_lines(d['filepath'], limit=90)})
 
+@app.route('/api/dedupe-forms', methods=['POST'])
+def api_dedupe_forms():
+    """One-time dedupe: any website-form submission whose ת"ז is already an active-month customer
+    is a duplicate (the person is tracked as a customer / lead) → mark it 'טופל' so it drops off
+    /admin/other-forms and lives only in the customer list. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'resolved': 0})
+    conn = get_db()
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    rows = conn.execute(
+        "SELECT u.id AS uid, u.id_number, u.subject, c.id AS cid FROM unmatched_submissions u "
+        "JOIN customers c ON c.month_id=? AND "
+        "ltrim(COALESCE(c.id_number,''),'0')=ltrim(COALESCE(u.id_number,''),'0') "
+        "WHERE u.status IN ('ממתין','בטיפול') AND COALESCE(u.id_number,'')!=''",
+        (month['id'],)).fetchall()
+    n = 0
+    for r in rows:
+        conn.execute("UPDATE unmatched_submissions SET status='טופל', handled_at=? WHERE id=?",
+                     (now, r['uid']))
+        # Document in the customer file so nothing is lost when it leaves the forms list.
+        log_event(conn, event_key(r['id_number'], 'cust-%d' % r['cid']),
+                  f"טופס מהאתר קושר לתיק הלקוח: {r['subject'] or ''}", 'system', kind='form_linked')
+        n += 1
+    conn.commit()
+    conn.close()
+    return jsonify({'resolved': n})
+
 @app.route('/api/duplicates')
 def api_duplicates():
     """Customers sharing the same ת"ז in the active month (data-integrity check). Token-authed."""
