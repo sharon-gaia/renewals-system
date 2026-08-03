@@ -855,6 +855,8 @@ def init_db():
     existing_pd = [r[1] for r in conn.execute("PRAGMA table_info(policy_documents)").fetchall()]
     if 'email_sent_at' not in existing_pd:
         conn.execute("ALTER TABLE policy_documents ADD COLUMN email_sent_at TEXT")
+    if 'gmail_labeled' not in [r[1] for r in conn.execute("PRAGMA table_info(policy_documents)").fetchall()]:
+        conn.execute("ALTER TABLE policy_documents ADD COLUMN gmail_labeled TEXT")
     conn.commit()
 
     # Zero-pad short numeric ID numbers to 9 digits (idempotent — once padded,
@@ -4158,8 +4160,12 @@ def policy_sent():
             tag = ' [בדיקה]' if POLICY_AUTOSEND_TEST else ''
             note = f"פוליסת חידוש נשלחה אוטומטית ({ch}){tag}"
         log_event(conn, idkey, note, 'system', kind='policy_send')
+    mid = conn.execute("SELECT message_id FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
     conn.commit()
     conn.close()
+    # After delivery, label the source Harel email 'טופל-שליחה-אוטומטית' + archive it (background).
+    if mid and mid['message_id']:
+        threading.Thread(target=_label_email, args=(mid['message_id'],), daemon=True).start()
     return jsonify({'ok': True})
 
 @app.route('/api/wa/queue')
@@ -5525,6 +5531,132 @@ def parse_harel_policy_pdf(source):
         result['doc_type_label'] = 'ביטול'
 
     return result
+
+POLICY_SENT_LABEL = 'טופל-שליחה-אוטומטית'
+
+def _imap_utf7(s):
+    """Encode a string to IMAP modified UTF-7 (RFC 3501) — for Gmail label/folder names."""
+    import base64
+    out, i = [], 0
+    while i < len(s):
+        if 0x20 <= ord(s[i]) <= 0x7e:
+            out.append('&-' if s[i] == '&' else s[i]); i += 1
+        else:
+            j = i
+            while j < len(s) and not (0x20 <= ord(s[j]) <= 0x7e):
+                j += 1
+            enc = base64.b64encode(s[i:j].encode('utf-16-be')).decode('ascii').rstrip('=').replace('/', ',')
+            out.append('&' + enc + '-'); i = j
+    return ''.join(out)
+
+def _label_email(message_id, label=POLICY_SENT_LABEL, archive=True):
+    """Gmail-label the Harel policy email (by Message-ID) after delivery + archive it out of the
+    inbox. Best-effort; never raises. Returns True if a message was found and labelled."""
+    cfg = EMAIL_CONFIG
+    if not message_id or not cfg.get('password'):
+        return False
+    ok = False
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        typ, data = mail.search(None, 'HEADER', 'Message-ID', f'"{message_id.strip()}"')
+        if typ == 'OK' and data and data[0].split():
+            lbl = '"' + _imap_utf7(label) + '"'
+            for num in data[0].split():
+                mail.store(num, '+X-GM-LABELS', lbl)
+                if archive:
+                    mail.store(num, '-X-GM-LABELS', '\\Inbox')
+                ok = True
+        mail.logout()
+    except Exception as e:
+        print(f'[label] שגיאה: {e}')
+    return ok
+
+@app.route('/api/label-email', methods=['POST'])
+def api_label_email():
+    """Test/backfill: label + archive the Harel email of a given policy doc_id. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    doc_id = (request.get_json(silent=True) or {}).get('doc_id')
+    conn = get_db()
+    r = conn.execute("SELECT message_id FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
+    conn.close()
+    if not r or not r['message_id']:
+        return jsonify({'error': 'no message_id'})
+    return jsonify({'labelled': _label_email(r['message_id'])})
+
+GMAIL_SENT_LABEL = 'טופל-שליחה-אוטומטית'
+_gmail_label_lock = threading.Lock()
+
+def _imap_utf7(s):
+    """Encode a string to IMAP modified UTF-7 (for a Hebrew Gmail label name)."""
+    import base64
+    out, i = [], 0
+    while i < len(s):
+        o = ord(s[i])
+        if 0x20 <= o <= 0x7e:
+            out.append('&-' if s[i] == '&' else s[i]); i += 1
+        else:
+            j = i
+            while j < len(s) and not (0x20 <= ord(s[j]) <= 0x7e):
+                j += 1
+            b = s[i:j].encode('utf-16-be')
+            out.append('&' + base64.b64encode(b).decode('ascii').rstrip('=').replace('/', ',') + '-')
+            i = j
+    return ''.join(out)
+
+def label_sent_policy_emails(limit=None):
+    """Gmail-label + archive the Harel emails whose policy was already delivered, so the inbox
+    shows only what still needs handling. Adds label GMAIL_SENT_LABEL and removes \\Inbox."""
+    if not _gmail_label_lock.acquire(blocking=False):
+        return 0
+    try:
+        cfg = EMAIL_CONFIG
+        if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
+            return 0
+        conn = get_db()
+        q = ("SELECT id, message_id FROM policy_documents WHERE COALESCE(message_id,'')!='' "
+             "AND COALESCE(gmail_labeled,'')='' AND (COALESCE(whatsapp_sent_at,'')!='' "
+             "OR COALESCE(email_sent_at,'')!='') ORDER BY id DESC")
+        if limit:
+            q += f" LIMIT {int(limit)}"
+        rows = conn.execute(q).fetchall()
+        if not rows:
+            conn.close(); return 0
+        label = '"' + _imap_utf7(GMAIL_SENT_LABEL) + '"'
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        done = 0
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        for r in rows:
+            mid = (r['message_id'] or '').strip()
+            try:
+                typ, data = mail.search(None, 'HEADER', 'Message-ID', mid)
+                for uid in (data[0].split() if typ == 'OK' else []):
+                    mail.store(uid, '+X-GM-LABELS', label)
+                    mail.store(uid, '-X-GM-LABELS', '\\Inbox')   # archive out of the inbox
+                done += 1
+            except Exception as e:
+                print(f'[gmail-label] {mid}: {e}')
+            conn.execute("UPDATE policy_documents SET gmail_labeled=? WHERE id=?", (now, r['id']))
+        conn.commit(); conn.close()
+        mail.logout()
+        return done
+    except Exception as e:
+        print(f'[gmail-label] שגיאה: {e}')
+        return 0
+    finally:
+        _gmail_label_lock.release()
+
+@app.route('/api/gmail-label-sent', methods=['POST'])
+def api_gmail_label_sent():
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    limit = (request.get_json(silent=True) or {}).get('limit')
+    n = label_sent_policy_emails(limit=limit)
+    return jsonify({'labeled': n})
 
 _policy_check_lock = threading.Lock()
 
