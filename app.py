@@ -1199,6 +1199,34 @@ def api_resolve_issued_forms():
     conn.close()
     return jsonify({'resolved': n})
 
+@app.route('/api/policy/doc-types')
+def api_policy_doc_types():
+    """Distinct doc_type_labels in policy_records + a sample stored doc_id for each (to find
+    endorsements/cancellations). Token-authed diagnostic."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT pr.doc_type_label AS lbl, COUNT(*) AS n, "
+        "MAX(CASE WHEN COALESCE(pd.filepath,'')!='' THEN pd.id END) AS sample_doc "
+        "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+        "GROUP BY pr.doc_type_label ORDER BY n DESC").fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+@app.route('/api/policy/pdf-lines')
+def api_policy_pdf_lines():
+    """Bidi text lines of a stored policy PDF (schedule page) — to locate fields. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    doc_id = request.args.get('doc_id', type=int)
+    conn = get_db()
+    d = conn.execute("SELECT filepath FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
+    conn.close()
+    if not d or not d['filepath'] or not os.path.exists(d['filepath']):
+        return jsonify({'error': 'no file'})
+    return jsonify({'lines': _policy_pdf_lines(d['filepath'], limit=90)})
+
 @app.route('/api/queue-monitor')
 def api_queue_monitor():
     """Work-queue watchdog: run a fresh renewal-form scan and report how many are now in the
