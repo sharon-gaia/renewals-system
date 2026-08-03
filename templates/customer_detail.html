@@ -74,6 +74,7 @@
             <td class="inline-edit" data-field="id_number">
               <span class="ie-view">{{ c.id_number or '—' }}
                 <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="ieEdit(this)" title="עריכת ת.ז"><i class="bi bi-pencil"></i></button>
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="copyField(this)" data-copy="{{ c.id_number or '' }}" title="העתק ת.ז"><i class="bi bi-clipboard"></i></button>
               </span>
               <span class="ie-edit d-none">
                 <input type="text" inputmode="numeric" class="ie-input form-control form-control-sm d-inline-block align-middle" style="width:140px" value="{{ c.id_number or '' }}">
@@ -90,6 +91,7 @@
                   <i class="bi bi-whatsapp {{ 'text-warning' if c.whatsapp_source == 'ווינר' else 'text-success' }} me-1"></i>{{ c.phone or '—' }}
                 </a>
                 <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="editPhone()" title="עריכת טלפון"><i class="bi bi-pencil"></i></button>
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="copyField(this)" data-copy="{{ c.phone or '' }}" title="העתק טלפון"><i class="bi bi-clipboard"></i></button>
               </span>
               <span id="phone-edit" class="d-none">
                 <input type="tel" id="phone-input" class="form-control form-control-sm d-inline-block align-middle" style="width:130px" value="{{ c.phone or '' }}">
@@ -103,6 +105,7 @@
             <td class="inline-edit" data-field="email">
               <span class="ie-view">{{ c.email or '—' }}
                 <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="ieEdit(this)" title="עריכת אימייל"><i class="bi bi-pencil"></i></button>
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="copyField(this)" data-copy="{{ c.email or '' }}" title="העתק אימייל"><i class="bi bi-clipboard"></i></button>
               </span>
               <span class="ie-edit d-none">
                 <input type="email" class="ie-input form-control form-control-sm d-inline-block align-middle" style="width:180px" value="{{ c.email or '' }}">
@@ -360,6 +363,23 @@
 {% endblock %}
 {% block scripts %}
 <script>
+function copyField(btn) {
+  const v = btn.getAttribute('data-copy') || '';
+  if (!v) return;
+  const done = () => {
+    const i = btn.querySelector('i'), prev = i.className;
+    i.className = 'bi bi-check-lg text-success';
+    setTimeout(() => { i.className = prev; }, 1200);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(v).then(done).catch(() => {});
+  } else {
+    const t = document.createElement('textarea');
+    t.value = v; document.body.appendChild(t); t.select();
+    try { document.execCommand('copy'); done(); } catch (e) {}
+    document.body.removeChild(t);
+  }
+}
 document.getElementById('save-btn').addEventListener('click', () => {
   const data = {
     status: document.getElementById('det-status').value,
