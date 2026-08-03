@@ -1173,6 +1173,37 @@ def api_fill_occupations_status():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_occ_fill_state)
 
+@app.route('/api/occ-debug')
+def api_occ_debug():
+    """Dump per-page text of one active-month stored PDF, so we can locate the occupation."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    conn = get_db()
+    row = conn.execute(
+        """SELECT c.id_number, pd.filepath FROM customers c
+           JOIN policy_records pr ON ltrim(COALESCE(pr.insured_id,''),'0')=ltrim(COALESCE(c.id_number,''),'0')
+           JOIN policy_documents pd ON pd.id=pr.policy_document_id
+           WHERE c.month_id=? AND COALESCE(pd.filepath,'')!='' ORDER BY pd.id DESC LIMIT 1""",
+        (month['id'],)).fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'no stored pdf for active month'})
+    fp = row['filepath']
+    out = {'id_number': row['id_number'], 'filepath': fp, 'exists': os.path.exists(fp), 'pages': []}
+    try:
+        with pdfplumber.open(fp) as pdf:
+            out['page_count'] = len(pdf.pages)
+            for i, page in enumerate(pdf.pages):
+                t = page.extract_text() or ''
+                out['pages'].append({
+                    'page': i + 1,
+                    'has_עיסוק_raw': 'עיסוק' in t, 'has_הסמכה_raw': 'הסמכה' in t,
+                    'raw': t[:900], 'bidi': get_display(t)[:900]})
+    except Exception as e:
+        out['error'] = str(e)
+    return jsonify(out)
+
 # ── Routes ──────────────────────────────────────────────────
 
 @app.route('/login', methods=['GET', 'POST'])
