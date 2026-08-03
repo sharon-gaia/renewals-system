@@ -3151,8 +3151,16 @@ CAMPAIGN_CROSS_SELL = """
     <li>החל מ-9 ₪ לחודש בלבד לכיסוי חוסן למחר</li>
   </ul>
   <p>זה נספח קטן, אבל יכול לעשות הבדל גדול ביום שהכי תצטרכו אותו. אם תרצו לצרף אותו לחידוש — רק תגידו לנו ונחבר אתכם למנהל התחום.</p>
-  <p>המשך יום נפלא,</p>
-  <p style="color:#555">--<br>שרון דר<br>מנהל מכירות אחריות מקצועית<br>קבוצת אופיר — אופיר, גאיה, ווינר<br>טלפון 073-3915555</p>"""
+  <p>המשך יום נפלא,</p>"""
+
+# Signature agency name per brand (name + registration year), shown in the renewal
+# message signature. Gaia/Winner are the active campaign brands.
+AGENCY_SIGNATURE = {
+    'ווינר': 'ווינר סוכנות לביטוח (2009) בע"מ',
+    'גאיה': 'גאיה סוכנות לביטוח (2019) בע"מ',
+}
+def _agency_name(brand):
+    return AGENCY_SIGNATURE.get(brand, AGENCY_SIGNATURE['גאיה'])
 
 def _premium_num(v):
     d = re.sub(r'[^\d.]', '', str(v or ''))
@@ -3239,7 +3247,9 @@ def render_renewal_email(cust, month_name):
             f'<p><a href="{link}" style="background:#0d6efd;color:#fff;padding:10px 22px;'
             f'border-radius:6px;text-decoration:none;display:inline-block">{label}</a></p>'
             f'{CAMPAIGN_CROSS_SELL}'
-            + (f'<p style="margin-top:18px;padding-top:12px;border-top:1px solid #eee;'
+            + (f'<p style="color:#555;margin-top:6px">—<br>שרון דר<br>'
+               f'מנהל מכירות אחריות מקצועית<br>{_html.escape(_agency_name(cust["brand"]))}</p>')
+            + (f'<p style="margin-top:14px;padding-top:10px;border-top:1px solid #eee;'
                f'color:#555;font-size:14px">{_html.escape(WINNER_EMAIL_UPDATE)}</p>'
                if cust['brand'] == 'ווינר' else '')
             + '</div></td></tr></table>')
@@ -3303,13 +3313,13 @@ def render_renewal_whatsapp(cust, month_name):
     amt = renewal_amount(cust['is_midwife'], cust['premium_last_year'])
     price = (f"המחיר לשנה הקרובה: {amt:,} ₪ — ללא שינוי מהשנה שעברה."
              if amt is not None else "המחיר נשאר כמו שנה שעברה.")
-    trust = f"\n\n{WINNER_WA_TRUST}" if cust['brand'] == 'ווינר' else ''
+    winner_upd = f"\n\n{WINNER_EMAIL_UPDATE}" if cust['brand'] == 'ווינר' else ''
     return (f"שלום, {cust['name']}\n"
             f"הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.\n"
             f"{price}\n\n"
             f"לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו):\n{link}\n\n"
-            f"—\nשרון דר, מנהל מכירות אחריות מקצועית\nקבוצת אופיר — אופיר, גאיה, ווינר\n073-3915555"
-            f"{trust}")
+            f"—\nשרון דר\nמנהל מכירות אחריות מקצועית\n{_agency_name(cust['brand'])}"
+            f"{winner_upd}")
 
 def _wa_api_authed():
     tok = os.environ.get('WA_API_TOKEN', '')
