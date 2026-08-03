@@ -5656,6 +5656,12 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
                                              "ltrim(COALESCE(id_number,''),'0')=? AND COALESCE(occupation,'')=''",
                                              (_occ, _zid))
                                 conn.commit()
+                        # A scanned policy fulfils any pending website form for that ת"ז → resolve it
+                        # (drops off /admin/other-forms). Ongoing counterpart of /api/resolve-forms-with-policy.
+                        _pid = normalize_id_number(fields.get('insured_id') or '').lstrip('0')
+                        if _pid:
+                            _resolve_form_queue(conn, _pid)
+                            conn.commit()
 
             if saved_any:
                 processed += 1
