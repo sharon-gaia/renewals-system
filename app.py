@@ -1169,6 +1169,24 @@ def api_fill_occupations_status():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_occ_fill_state)
 
+@app.route('/api/campaign/wrong-sends')
+def api_campaign_wrong_sends():
+    """New-business/lead customers that received the renewal campaign email today (a mistake
+    — they should have been excluded). Token-authed diagnostic."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'count': 0, 'items': []})
+    conn = get_db()
+    today = datetime.date.today().isoformat()
+    rows = conn.execute(
+        "SELECT name, id_number, brand, email, status, email_sent_date FROM customers "
+        "WHERE month_id=? AND status IN ('הופק','ממתין להפקה') AND email_sent_date=? "
+        "ORDER BY brand, name", (month['id'], today)).fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
+
 @app.route('/api/occ-debug')
 def api_occ_debug():
     """Dump per-page text of one active-month stored PDF, so we can locate the occupation."""
@@ -3137,6 +3155,9 @@ CAMPAIGN_STOP_STATUSES = {
     'חודש', 'טופס התקבל', 'הלקוח אישר', 'ביקשו לחדש לבד',
     'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'פרוייקט הסתיים',
     'דורש בירור', 'ממתין לאישור מיילדות', 'המשך טיפול בוואטסאפ', 'ממתין לחידוש',
+    # New-business statuses — a fresh purchase / a lead awaiting issuance is NOT a renewal,
+    # so it must never receive the renewal-reminder campaign.
+    'הופק', 'ממתין להפקה',
 }
 
 CAMPAIGN_CROSS_SELL = """
