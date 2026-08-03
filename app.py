@@ -1169,6 +1169,26 @@ def api_fill_occupations_status():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_occ_fill_state)
 
+@app.route('/api/customer-lookup')
+def api_customer_lookup():
+    """Diagnostic: every customer row for a ת"ז across months + the insured master, so we can
+    see why someone does/doesn't appear in a month or the campaign. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    q = re.sub(r'\D', '', request.args.get('q', '')).lstrip('0')
+    if not q:
+        return jsonify({'error': 'need q'}), 400
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT c.id, m.name AS month, m.is_active, c.name, c.id_number, c.brand, c.status, "
+        "c.email, c.phone, c.is_midwife, c.is_vip, c.email_sent_date, c.import_source, c.policy_number "
+        "FROM customers c JOIN months m ON m.id=c.month_id "
+        "WHERE ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY m.id DESC", (q,)).fetchall()
+    ins = conn.execute("SELECT name, brand, status, email, phone FROM insureds "
+                       "WHERE ltrim(COALESCE(id_number,''),'0')=?", (q,)).fetchone()
+    conn.close()
+    return jsonify({'customers': [dict(r) for r in rows], 'insured': (dict(ins) if ins else None)})
+
 @app.route('/api/campaign/wrong-sends')
 def api_campaign_wrong_sends():
     """New-business/lead customers that received the renewal campaign email today (a mistake
