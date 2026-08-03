@@ -1169,6 +1169,26 @@ def api_fill_occupations_status():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_occ_fill_state)
 
+@app.route('/api/queue-monitor')
+def api_queue_monitor():
+    """Work-queue watchdog: run a fresh renewal-form scan and report how many are now in the
+    queue + how many renewal requests couldn't be matched (a gap that needs attention).
+    The local sender polls this on a schedule and WhatsApps Sharon. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    try:
+        scanned, unmatched = check_renewal_forms(days_back=3)
+    except Exception as e:
+        return jsonify({'error': str(e)})
+    month = active_month()
+    conn = get_db()
+    in_queue = conn.execute(
+        "SELECT COUNT(*) FROM customers WHERE month_id=? AND status='טופס התקבל'",
+        (month['id'],)).fetchone()[0] if month else 0
+    conn.close()
+    return jsonify({'month': month['name'] if month else None,
+                    'scanned_now': scanned, 'unmatched': unmatched, 'in_queue': in_queue})
+
 @app.route('/api/scan-bounces')
 def api_scan_bounces():
     """Read Delivery-Status-Notification (Failure) bounce emails, extract the failed recipient
