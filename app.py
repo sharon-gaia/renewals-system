@@ -407,7 +407,7 @@ def promote_customers_to_insureds(conn, month_id, brands=None):
         idn = normalize_id_number(cst['id_number'])
         if not idn:
             continue
-        status = 'פעיל' if cst['status'] == 'חודש' else 'לא פעיל'
+        status = 'פעיל' if cst['status'] in ('חודש', 'הופק') else 'לא פעיל'
         existing = conn.execute("SELECT * FROM insureds WHERE id_number=?", (idn,)).fetchone()
         if existing:
             # Fill blanks and set renewal-based status; never wipe existing activity.
@@ -468,6 +468,41 @@ def promote_customers_to_insureds(conn, month_id, brands=None):
         promoted += 1
     conn.commit()
     return promoted
+
+def _sync_customer_to_insured(conn, cid, active=True):
+    """Upsert one customer into the insureds master (כל הלקוחות) — used when a renewal
+    ('חודש') or a new-business issuance ('הופק') should make the person active there.
+    Non-destructive: fills blanks only, never wipes curated master data."""
+    c = conn.execute("SELECT * FROM customers WHERE id=?", (cid,)).fetchone()
+    if not c:
+        return
+    idn = normalize_id_number(c['id_number'])
+    if not idn:
+        return
+    ck = c.keys()
+    def cv(k):
+        return c[k] if k in ck else None
+    now = datetime.datetime.now().isoformat()
+    status = 'פעיל' if active else 'לא פעיל'
+    ex = conn.execute("SELECT id FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                      (idn.lstrip('0'),)).fetchone()
+    if ex:
+        conn.execute(
+            """UPDATE insureds SET name=COALESCE(NULLIF(name,''),?), phone=COALESCE(NULLIF(phone,''),?),
+               brand=COALESCE(NULLIF(brand,''),?), email=COALESCE(NULLIF(email,''),?),
+               address=COALESCE(NULLIF(address,''),?), occupation=COALESCE(NULLIF(occupation,''),?),
+               policy_number=COALESCE(NULLIF(policy_number,''),?), status=?, status_override=1, updated_at=?
+               WHERE id=?""",
+            (cv('name'), cv('phone'), cv('brand'), cv('email'), cv('address'), cv('occupation'),
+             cv('policy_number'), status, now, ex['id']))
+    else:
+        wa_source = cv('whatsapp_source') or ('ווינר' if cv('brand') in ('ווינר', 'אופיר') else None)
+        conn.execute(
+            """INSERT INTO insureds (id_number, name, phone, brand, whatsapp_source, email, address,
+               occupation, policy_number, status, status_override, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (idn, cv('name'), cv('phone'), cv('brand'), wa_source, cv('email'), cv('address'),
+             cv('occupation'), cv('policy_number'), status, 1, now, now))
 
 # ── DB helpers ──────────────────────────────────────────────
 
@@ -1508,15 +1543,11 @@ def update_customer(cid):
                 vals.append(agent)
         vals.append(cid)
         conn.execute(f"UPDATE customers SET {sets} WHERE id=?", vals)
-        # A renewal ('חודש') reactivates the person in the master (כל הלקוחות) — even if a
-        # previous month archived them as 'לא פעיל', a late renewal makes them active again.
-        if data.get('status') == 'חודש':
-            idn = normalize_id_number(data.get('id_number') or (crow['id_number'] if crow else ''))
-            if idn:
-                conn.execute(
-                    "UPDATE insureds SET status='פעיל', status_override=1, updated_at=? "
-                    "WHERE ltrim(id_number,'0')=?",
-                    (datetime.datetime.now().isoformat(), idn.lstrip('0')))
+        # 'חודש' (renewal) and 'הופק' (new-business issuance) both make the person active in
+        # the master (כל הלקוחות): a late renewal/issue reactivates even a 'לא פעיל' record,
+        # and a brand-new issued customer is inserted into the master.
+        if data.get('status') in ('חודש', 'הופק'):
+            _sync_customer_to_insured(conn, cid, active=True)
     # Write the audit trail for any audited field that actually changed.
     if before:
         now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -3546,6 +3577,13 @@ def _policy_queue_items(conn, brand_key):
             key = (normalize_id_number(r['insured_id']) or '').lstrip('0')
             if not key or key in seen_new:
                 continue
+            # Backlog guard: a website-form lead received on/before 1/8 may already have been
+            # issued + sent manually — skip auto-send so the customer isn't messaged twice.
+            lead = conn.execute(
+                "SELECT form_received_at FROM customers WHERE import_source='join_form' "
+                "AND ltrim(COALESCE(id_number,''),'0')=? ORDER BY id DESC LIMIT 1", (key,)).fetchone()
+            if lead and (lead['form_received_at'] or '')[:10] <= '2026-08-01':
+                continue
             real_phone = _policy_to972(r['phone_mobile'])
             if not real_phone:
                 continue
@@ -4827,13 +4865,15 @@ def _ensure_new_customer(conn, pr):
                 "UPDATE customers SET policy_number=COALESCE(NULLIF(policy_number,''),?), "
                 "status='הופק', status_changed_at=? WHERE id=?",
                 (pr['policy_number'], datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), existing['id']))
+            _sync_customer_to_insured(conn, existing['id'], active=True)
         return
-    conn.execute(
+    cur = conn.execute(
         """INSERT INTO customers (month_id, policy_number, name, id_number, phone, email, brand,
                                   status, import_source)
            VALUES (?,?,?,?,?,?,?,?,?)""",
         (month['id'], pr['policy_number'], (pr['insured_name'] or ''), idn,
          re.sub(r'\D', '', str(pr['phone_mobile'] or '')), (pr['email'] or ''), brand, 'הופק', 'new_policy'))
+    _sync_customer_to_insured(conn, cur.lastrowid, active=True)
 
 POLICY_EMAIL_SUBJECT = "הפוליסה המקצועית שלך"
 POLICY_EMAIL_SIGN = ("—\nשרון דר\nמנהל תחום אחריות מקצועית\nגאיה, ווינר ואופיר")
