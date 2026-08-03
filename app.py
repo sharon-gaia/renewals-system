@@ -4516,6 +4516,7 @@ def api_policy_scan():
     def _scan_all():
         check_policy_documents()
         check_join_forms()
+        check_renewal_forms()
     threading.Thread(target=_scan_all, daemon=True).start()
     return jsonify({'ok': True, 'scanning': True})
 
@@ -5592,6 +5593,102 @@ def _check_join_forms_impl(days_back=14):
         print(f'[join-forms] שגיאה: {e}')
     return processed
 
+# ── Renewal-request forms (existing customer asks to renew via the website) ───
+# Same sender/format as the join forms, but a different subject ("… חידוש פוליסה").
+# A match to an active-month customer marks them 'טופס התקבל' → they appear in the work queue.
+RENEWAL_FORM_SUBJECT_MARK = 'חידוש פוליסה'
+_renewal_form_lock = threading.Lock()
+
+def _ingest_renewal_form(conn, subject, html, received_at):
+    """Mark an existing active-month customer 'טופס התקבל' from a website renewal request.
+    Returns (ת"ז, matched?). Never downgrades a customer who already renewed/issued."""
+    f = parse_join_form(html)
+    idn = normalize_id_number(f.get('מספר ת.ז') or f.get('ת.ז המצהיר') or '')
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not idn or not month:
+        return (idn or '', False)
+    row = conn.execute(
+        "SELECT id, status FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
+        (month['id'], idn.lstrip('0'))).fetchone()
+    if not row:
+        return (idn, False)
+    if (row['status'] or '') in ('חודש', 'הופק'):
+        return (idn, True)
+    conn.execute(
+        "UPDATE customers SET status='טופס התקבל', form_received_at=?, "
+        "email=COALESCE(NULLIF(email,''),?), status_changed_at=? WHERE id=?",
+        (received_at, (f.get('אימייל') or ''),
+         datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), row['id']))
+    log_event(conn, event_key(idn, 'cust-%d' % row['id']),
+              "טופס בקשת חידוש התקבל מהאתר", 'system', kind='renewal_form')
+    return (idn, True)
+
+def check_renewal_forms(days_back=14):
+    if not _renewal_form_lock.acquire(blocking=False):
+        return (0, 0)
+    try:
+        return _check_renewal_forms_impl(days_back)
+    finally:
+        _renewal_form_lock.release()
+
+def _check_renewal_forms_impl(days_back=14):
+    """Returns (processed, unmatched) — unmatched are renewal requests whose ת"ז isn't an
+    active-month customer (surfaced by the monitor)."""
+    cfg = EMAIL_CONFIG
+    if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
+        return (0, 0)
+    from email.utils import parsedate_to_datetime
+    processed = unmatched = 0
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'FROM "{JOIN_FORM_SENDER}" SINCE {since_date}')
+        if status != 'OK':
+            mail.logout(); return (0, 0)
+        conn = get_db()
+        for mid in data[0].split():
+            _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hdr_data[0][1])
+            message_id = hdr.get('Message-ID', '').strip()
+            subject = decode_str(hdr.get('Subject', ''))
+            if RENEWAL_FORM_SUBJECT_MARK not in subject:
+                continue
+            if message_id and conn.execute(
+                    'SELECT 1 FROM processed_leads WHERE message_id=?', (message_id,)).fetchone():
+                continue
+            try:
+                received_at = parsedate_to_datetime(hdr.get('Date', '')).astimezone().strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                received_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+            _, full_data = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(full_data[0][1])
+            html = None
+            for part in msg.walk():
+                if part.get_content_type() == 'text/html' and 'attachment' not in str(part.get('Content-Disposition', '')):
+                    try:
+                        html = part.get_content()
+                    except Exception:
+                        pl = part.get_payload(decode=True); html = pl.decode('utf-8', 'replace') if pl else None
+                    break
+            if not html:
+                continue
+            idn, matched = _ingest_renewal_form(conn, subject, html, received_at)
+            if message_id:
+                conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
+                             (message_id, datetime.datetime.now().isoformat()))
+            conn.commit()
+            processed += 1
+            if not matched:
+                unmatched += 1
+            print(f'[renewal-forms] {"נקלט" if matched else "לא תואם"}: {idn} ({subject})')
+        conn.close()
+        mail.logout()
+    except Exception as e:
+        print(f'[renewal-forms] שגיאה: {e}')
+    return (processed, unmatched)
+
 def email_poll_thread():
     """Background thread: check inbox every N seconds."""
     while True:
@@ -5614,6 +5711,12 @@ def email_poll_thread():
                 print(f'[join-forms] נקלטו {n3} טפסי הצטרפות')
         except Exception as e:
             print(f'[join-forms] שגיאת thread: {e}')
+        try:
+            rp, ru = check_renewal_forms()
+            if rp:
+                print(f'[renewal-forms] עובדו {rp} טפסי חידוש ({ru} לא תואמים)')
+        except Exception as e:
+            print(f'[renewal-forms] שגיאת thread: {e}')
 
 # ── Admin email trigger ──────────────────────────────────────
 
@@ -5646,6 +5749,7 @@ def refresh_data():
             check_email_inbox()
             check_policy_documents()
             check_join_forms()
+            check_renewal_forms()
             conn = get_db()
             rebuild_insureds(conn)
             recompute_insured_statuses(conn)
