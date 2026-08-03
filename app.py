@@ -504,6 +504,16 @@ def _sync_customer_to_insured(conn, cid, active=True):
             (idn, cv('name'), cv('phone'), cv('brand'), wa_source, cv('email'), cv('address'),
              cv('occupation'), cv('policy_number'), status, 1, now, now))
 
+def _resolve_form_queue(conn, idn):
+    """When a customer is done (issued 'הופק' / renewed 'חודש'), mark their pending website-form
+    submissions 'טופל' so they drop off /admin/other-forms — no duplicate bookkeeping."""
+    z = (idn or '').lstrip('0')
+    if not z:
+        return
+    conn.execute("UPDATE unmatched_submissions SET status='טופל', handled_at=? "
+                 "WHERE ltrim(COALESCE(id_number,''),'0')=? AND status IN ('ממתין','בטיפול')",
+                 (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), z))
+
 # ── DB helpers ──────────────────────────────────────────────
 
 def get_db():
@@ -1168,6 +1178,22 @@ def api_fill_occupations_status():
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_occ_fill_state)
+
+@app.route('/api/resolve-issued-forms', methods=['POST'])
+def api_resolve_issued_forms():
+    """One-time backfill: resolve website-form submissions whose ת"ז is already an issued
+    ('הופק') / renewed ('חודש') customer, so they drop off /admin/other-forms. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    n = conn.execute(
+        "UPDATE unmatched_submissions SET status='טופל', handled_at=? "
+        "WHERE status IN ('ממתין','בטיפול') AND ltrim(COALESCE(id_number,''),'0') IN "
+        "(SELECT ltrim(COALESCE(id_number,''),'0') FROM customers WHERE status IN ('הופק','חודש'))",
+        (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),)).rowcount
+    conn.commit()
+    conn.close()
+    return jsonify({'resolved': n})
 
 @app.route('/api/queue-monitor')
 def api_queue_monitor():
@@ -1865,6 +1891,7 @@ def update_customer(cid):
         # and a brand-new issued customer is inserted into the master.
         if data.get('status') in ('חודש', 'הופק'):
             _sync_customer_to_insured(conn, cid, active=True)
+            _resolve_form_queue(conn, (crow['id_number'] if crow else '') or data.get('id_number', ''))
     # Write the audit trail for any audited field that actually changed.
     if before:
         now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -5217,6 +5244,7 @@ def _ensure_new_customer(conn, pr):
                 "status='הופק', status_changed_at=? WHERE id=?",
                 (pr['policy_number'], datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), existing['id']))
             _sync_customer_to_insured(conn, existing['id'], active=True)
+            _resolve_form_queue(conn, idn)
         return
     cur = conn.execute(
         """INSERT INTO customers (month_id, policy_number, name, id_number, phone, email, brand,
@@ -5225,6 +5253,7 @@ def _ensure_new_customer(conn, pr):
         (month['id'], pr['policy_number'], (pr['insured_name'] or ''), idn,
          re.sub(r'\D', '', str(pr['phone_mobile'] or '')), (pr['email'] or ''), brand, 'הופק', 'new_policy'))
     _sync_customer_to_insured(conn, cur.lastrowid, active=True)
+    _resolve_form_queue(conn, idn)
 
 POLICY_EMAIL_SUBJECT = "הפוליסה המקצועית שלך"
 POLICY_EMAIL_SIGN = ("—\nשרון דר\nמנהל תחום אחריות מקצועית\nגאיה, ווינר ואופיר")
