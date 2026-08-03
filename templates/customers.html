@@ -120,6 +120,12 @@
         {% if c.form_comments %}<div><strong>הערות:</strong> {{ c.form_comments }}</div>{% endif %}
       </div>
       {% endif %}
+      {% if c.status == 'ממתין להפקה' %}
+      <div class="mt-1 p-1 rounded small" style="background:#fff3cd; font-size:0.78rem; line-height:1.5;">
+        {% if c.form_received_at %}<div><strong>נוצר:</strong> {{ c.form_received_at }}</div>{% endif %}
+        {% if c.occupation %}<div><strong>עיסוק:</strong> {{ c.occupation }}</div>{% endif %}
+      </div>
+      {% endif %}
     </td>
     <td class="px-3 d-none d-lg-table-cell">
       <small>{{ c.whatsapp_sent_date | fdate }}</small>
