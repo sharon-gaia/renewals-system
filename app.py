@@ -1339,7 +1339,8 @@ def api_customer_lookup():
     conn = get_db()
     rows = conn.execute(
         "SELECT c.id, m.name AS month, m.is_active, c.name, c.id_number, c.brand, c.status, "
-        "c.email, c.phone, c.is_midwife, c.is_vip, c.email_sent_date, c.import_source, c.policy_number "
+        "c.email, c.phone, c.is_midwife, c.is_vip, c.email_sent_date, c.import_source, c.policy_number, "
+        "c.form_received_at "
         "FROM customers c JOIN months m ON m.id=c.month_id "
         "WHERE ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY m.id DESC", (q,)).fetchall()
     ins = conn.execute("SELECT name, brand, status, email, phone FROM insureds "
