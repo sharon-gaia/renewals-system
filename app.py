@@ -1295,6 +1295,34 @@ def api_dedupe_forms():
     conn.close()
     return jsonify({'resolved': n})
 
+@app.route('/api/brand-mismatches')
+def api_brand_mismatches():
+    """Active-month customers whose brand differs between the monthly row and the insureds master,
+    with the brand implied by the latest policy's agent number (the source of truth). Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'mismatches': 0, 'items': []})
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT c.id, c.name, c.id_number, c.brand AS cust_brand, i.brand AS master_brand "
+        "FROM customers c JOIN insureds i "
+        "ON ltrim(COALESCE(i.id_number,''),'0')=ltrim(COALESCE(c.id_number,''),'0') "
+        "WHERE c.month_id=? AND COALESCE(c.brand,'')!='' AND COALESCE(i.brand,'')!='' "
+        "AND c.brand!=i.brand ORDER BY c.name", (month['id'],)).fetchall()
+    out = []
+    for r in rows:
+        z = (r['id_number'] or '').lstrip('0')
+        ag = conn.execute("SELECT pr.agent_number FROM policy_records pr "
+                          "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? AND COALESCE(pr.agent_number,'')!='' "
+                          "ORDER BY pr.id DESC LIMIT 1", (z,)).fetchone()
+        pol_brand = NEW_AGENT_BRAND.get(re.sub(r'\D', '', str(ag['agent_number'])) if ag else '', '')
+        out.append({'name': r['name'], 'id_number': z, 'customer_row': r['cust_brand'],
+                    'master': r['master_brand'], 'policy_truth': pol_brand})
+    conn.close()
+    return jsonify({'mismatches': len(out), 'items': out})
+
 @app.route('/api/duplicates')
 def api_duplicates():
     """Customers sharing the same ת"ז in the active month (data-integrity check). Token-authed."""
