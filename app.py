@@ -1227,6 +1227,42 @@ def api_policy_pdf_lines():
         return jsonify({'error': 'no file'})
     return jsonify({'lines': _policy_pdf_lines(d['filepath'], limit=90)})
 
+@app.route('/api/resolve-forms-with-policy', methods=['POST'])
+def api_resolve_forms_with_policy():
+    """Forms in /admin/other-forms whose ת"ז had a policy ISSUED on/after the form date → the
+    request was fulfilled → mark 'טופל', drop from the report, document it in the customer file.
+    Runs as a backfill + is safe to re-run. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    forms = conn.execute(
+        "SELECT id AS uid, id_number, subject, received_at FROM unmatched_submissions "
+        "WHERE status IN ('ממתין','בטיפול') AND COALESCE(id_number,'')!=''").fetchall()
+    resolved = []
+    for u in forms:
+        z = (u['id_number'] or '').lstrip('0')
+        if not z:
+            continue
+        pol = conn.execute(
+            "SELECT MAX(COALESCE(pd.received_at, pr.doc_date)) AS prd, MAX(pr.policy_number) AS pn "
+            "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=?", (z,)).fetchone()
+        prd = pol['prd'] if pol else None
+        if prd and (not u['received_at'] or prd[:10] >= (u['received_at'] or '')[:10]):
+            conn.execute("UPDATE unmatched_submissions SET status='טופל', handled_at=? WHERE id=?",
+                         (now, u['uid']))
+            cust = conn.execute("SELECT id FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                                "ORDER BY id DESC LIMIT 1", (z,)).fetchone()
+            if cust:
+                log_event(conn, event_key(u['id_number'], 'cust-%d' % cust['id']),
+                          f"טופס טופל — הופקה פוליסה {pol['pn'] or ''} ({u['subject'] or ''})",
+                          'system', kind='form_linked')
+            resolved.append({'id_number': z, 'policy': pol['pn'], 'subject': u['subject']})
+    conn.commit()
+    conn.close()
+    return jsonify({'resolved': len(resolved), 'items': resolved})
+
 @app.route('/api/dedupe-forms', methods=['POST'])
 def api_dedupe_forms():
     """One-time dedupe: any website-form submission whose ת"ז is already an active-month customer
