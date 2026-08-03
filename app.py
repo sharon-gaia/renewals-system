@@ -1345,8 +1345,12 @@ def api_customer_lookup():
         "WHERE ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY m.id DESC", (q,)).fetchall()
     ins = conn.execute("SELECT name, brand, status, email, phone FROM insureds "
                        "WHERE ltrim(COALESCE(id_number,''),'0')=?", (q,)).fetchone()
+    unm = conn.execute("SELECT id, name, id_number, status, subject, received_at "
+                       "FROM unmatched_submissions WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                       (q,)).fetchall()
     conn.close()
-    return jsonify({'customers': [dict(r) for r in rows], 'insured': (dict(ins) if ins else None)})
+    return jsonify({'customers': [dict(r) for r in rows], 'insured': (dict(ins) if ins else None),
+                    'unmatched_submissions': [dict(r) for r in unm]})
 
 @app.route('/api/campaign/wrong-sends')
 def api_campaign_wrong_sends():
