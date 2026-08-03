@@ -5640,7 +5640,7 @@ def label_sent_policy_emails(limit=None):
                         allbox = mm[-1]; break
         except Exception:
             pass
-        mail.select(allbox or 'INBOX')
+        mail.select(('"%s"' % allbox) if allbox else 'INBOX')
         found = not_found = 0
         misses = []
         for r in rows:
