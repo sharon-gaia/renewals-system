@@ -2790,9 +2790,10 @@ def performance():
             "SELECT "
             "SUM((CASE WHEN call_by_1=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_2=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_3=? THEN 1 ELSE 0 END)) AS calls, "
             f"COUNT(DISTINCT CASE WHEN handled_by=? THEN {key} END) AS touched, "
-            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS renewals "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS renewals, "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS issued "
             "FROM customers WHERE month_id=?",
-            [nm, nm, nm, nm, nm, 'חודש', mid]
+            [nm, nm, nm, nm, nm, 'חודש', nm, 'הופק', mid]
         ).fetchone()
         # Escalations raised by this person (customer card or customer file), which are
         # the queue-* items — not the website-form queue they merely handled.
@@ -2801,11 +2802,12 @@ def performance():
             "AND (message_id LIKE 'queue-cid-%' OR message_id LIKE 'queue-iid-%')", (nm,)
         ).fetchone()[0]
         calls, touched, renewals = q['calls'] or 0, q['touched'] or 0, q['renewals'] or 0
+        issued = q['issued'] or 0
         rows.append({'name': nm, 'role': role_labels.get(a['role'], a['role']),
                      'calls': calls, 'touched': touched, 'renewals': renewals,
-                     'escalations': escalations,
+                     'issued': issued, 'escalations': escalations,
                      'rate': round(renewals / touched * 100, 1) if touched else 0})
-    rows.sort(key=lambda r: (r['renewals'], r['calls']), reverse=True)
+    rows.sort(key=lambda r: (r['renewals'], r['issued'], r['calls']), reverse=True)
     conn.close()
     return render_template('performance.html', rows=rows, month=month, show_role=is_super)
 
