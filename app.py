@@ -1189,6 +1189,58 @@ def api_queue_monitor():
     return jsonify({'month': month['name'] if month else None,
                     'scanned_now': scanned, 'unmatched': unmatched, 'in_queue': in_queue})
 
+@app.route('/api/scan-email-replies')
+def api_scan_email_replies():
+    """Customers who REPLIED to the campaign email (their address appears as an inbox sender)
+    → mark 'נוצר קשר עם לקוח'. Default is a dry run; apply=1 writes. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 2))
+    apply = request.args.get('apply') == '1'
+    month = active_month()
+    if not month:
+        return jsonify({'error': 'no active month'})
+    conn = get_db()
+    recip = {(r['email'] or '').strip().lower(): dict(r) for r in conn.execute(
+        "SELECT id, name, id_number, email, status FROM customers "
+        "WHERE month_id=? AND COALESCE(email,'') LIKE '%@%'", (month['id'],)).fetchall()}
+    senders = set()
+    cfg = EMAIL_CONFIG
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'SINCE {since}')
+        ids = data[0].split() if status == 'OK' else []
+        for i in range(0, len(ids), 50):
+            _, fetched = mail.fetch(b','.join(ids[i:i + 50]), '(BODY.PEEK[HEADER.FIELDS (FROM)])')
+            for part in fetched:
+                if isinstance(part, tuple):
+                    m = re.search(r'[\w.+-]+@[\w.-]+\.[\w.]+', part[1].decode('utf-8', 'replace'))
+                    if m:
+                        senders.add(m.group(0).lower())
+        mail.logout()
+    except Exception as e:
+        conn.close()
+        return jsonify({'error': str(e)})
+    KEEP = ('חודש', 'הופק', 'ממתין להפקה', 'טופס התקבל', 'לא רוצים לחדש', 'לא מחדש', 'בוטל')
+    results = []
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    for em in sorted(senders & set(recip.keys())):
+        r = recip[em]
+        results.append({'email': em, 'name': r['name'], 'current_status': r['status']})
+        if apply and (r['status'] or '') not in KEEP:
+            conn.execute("UPDATE customers SET status='נוצר קשר עם לקוח', status_changed_at=? WHERE id=?",
+                         (now, r['id']))
+            log_event(conn, event_key(r['id_number'], 'cust-%d' % r['id']),
+                      "נוצר קשר — הלקוח השיב למייל החידוש", 'system', kind='status')
+    if apply:
+        conn.commit()
+    conn.close()
+    return jsonify({'inbox_senders': len(senders), 'matched': len(results),
+                    'applied': apply, 'results': results})
+
 @app.route('/api/scan-bounces')
 def api_scan_bounces():
     """Read Delivery-Status-Notification (Failure) bounce emails, extract the failed recipient
@@ -3284,6 +3336,9 @@ CAMPAIGN_STOP_STATUSES = {
     # New-business statuses — a fresh purchase / a lead awaiting issuance is NOT a renewal,
     # so it must never receive the renewal-reminder campaign.
     'הופק', 'ממתין להפקה',
+    # Contact already made (incl. customers who replied to the campaign email) — don't also
+    # hit them with the (WhatsApp) reminder.
+    'נוצר קשר עם לקוח',
 }
 
 CAMPAIGN_CROSS_SELL = """
