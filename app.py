@@ -1098,9 +1098,17 @@ def _run_fill_occupations(month_id, overwrite):
     st = _occ_fill_state
     try:
         conn = get_db()
+        # Diagnostics: how many stored PDFs exist at all, and on disk.
+        st['docs_with_file'] = conn.execute(
+            "SELECT COUNT(*) FROM policy_documents WHERE COALESCE(filepath,'')!=''").fetchone()[0]
+        # Match a stored policy PDF to each active-month customer BY ת"ז (a doc's customer_id
+        # may point at a previous month's row), via the parsed insured_id on policy_records.
         rows = conn.execute(
             """SELECT c.id AS cid, c.id_number, c.occupation, pd.filepath
-               FROM customers c JOIN policy_documents pd ON pd.customer_id = c.id
+               FROM customers c
+               JOIN policy_records pr
+                 ON ltrim(COALESCE(pr.insured_id,''),'0') = ltrim(COALESCE(c.id_number,''),'0')
+               JOIN policy_documents pd ON pd.id = pr.policy_document_id
                WHERE c.month_id=? AND COALESCE(pd.filepath,'')!=''
                ORDER BY c.id, pd.id DESC""", (month_id,)).fetchall()
         best = {}
