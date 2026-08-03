@@ -1196,10 +1196,12 @@ def api_occ_debug():
             out['page_count'] = len(pdf.pages)
             for i, page in enumerate(pdf.pages):
                 t = page.extract_text() or ''
+                bidi = get_display(t)
+                hit = ('עיסוק' in bidi) or ('הסמכה' in bidi)
                 out['pages'].append({
                     'page': i + 1,
-                    'has_עיסוק_raw': 'עיסוק' in t, 'has_הסמכה_raw': 'הסמכה' in t,
-                    'raw': t[:900], 'bidi': get_display(t)[:900]})
+                    'has_עיסוק_bidi': 'עיסוק' in bidi, 'has_הסמכה_bidi': 'הסמכה' in bidi,
+                    'bidi': bidi if hit else bidi[:200]})
     except Exception as e:
         out['error'] = str(e)
     return jsonify(out)
