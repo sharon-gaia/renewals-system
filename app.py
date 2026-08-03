@@ -111,6 +111,7 @@ GW_STATUS_OPTIONS = [
     ('', 'ממתין לטיפול'),
     ('ממתין להפקה', '📝 ממתין להפקה (טופס חדש)'),
     ('טופס התקבל', '📋 טופס התקבל'),
+    ('הופק', 'הופק ✓'),
     ('חודש', 'חודש ✓'),
     ('נוצר קשר עם לקוח', 'נוצר קשר עם לקוח'),
     ('ממתין לחידוש', 'ממתין לחידוש'),
@@ -1243,7 +1244,9 @@ def index():
             they're counted separately (pending_issue) and excluded from the renewal
             total, the buckets, and the renewal-percentage denominator."""
             pending_issue = sum(1 for r in subset if r['status'] == 'ממתין להפקה')
-            core = [r for r in subset if r['status'] != 'ממתין להפקה']
+            # New-business statuses — a lead awaiting issuance and an issued policy ("הופק") —
+            # are not renewals, so they're kept out of the renewal total/buckets/%.
+            core = [r for r in subset if r['status'] not in ('ממתין להפקה', 'הופק')]
             t = len(core)
             rnw = sum(1 for r in core if r['status'] == 'חודש')
             no_renew = sum(1 for r in core if r['status'] in NO_RENEW)
@@ -4808,7 +4811,8 @@ LEAD_STATUS = 'ממתין להפקה'
 def _ensure_new_customer(conn, pr):
     """Create a customers record for a new-business policy (so it's serviceable). If a
     pending-issuance lead (from a website join form) already exists for this ת"ז, upgrade
-    it in place — fill the policy number and clear the wait status — instead of duplicating."""
+    it in place — fill the policy number and mark it "הופק" (issued) — instead of duplicating.
+    "הופק" drops the record off the work queue and out of the renewal counts."""
     idn = normalize_id_number(pr['insured_id'])
     month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
     if not idn or not month:
@@ -4821,7 +4825,7 @@ def _ensure_new_customer(conn, pr):
         if (existing['status'] or '') == LEAD_STATUS:
             conn.execute(
                 "UPDATE customers SET policy_number=COALESCE(NULLIF(policy_number,''),?), "
-                "status='', status_changed_at=? WHERE id=?",
+                "status='הופק', status_changed_at=? WHERE id=?",
                 (pr['policy_number'], datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), existing['id']))
         return
     conn.execute(
@@ -4829,7 +4833,7 @@ def _ensure_new_customer(conn, pr):
                                   status, import_source)
            VALUES (?,?,?,?,?,?,?,?,?)""",
         (month['id'], pr['policy_number'], (pr['insured_name'] or ''), idn,
-         re.sub(r'\D', '', str(pr['phone_mobile'] or '')), (pr['email'] or ''), brand, '', 'new_policy'))
+         re.sub(r'\D', '', str(pr['phone_mobile'] or '')), (pr['email'] or ''), brand, 'הופק', 'new_policy'))
 
 POLICY_EMAIL_SUBJECT = "הפוליסה המקצועית שלך"
 POLICY_EMAIL_SIGN = ("—\nשרון דר\nמנהל תחום אחריות מקצועית\nגאיה, ווינר ואופיר")
