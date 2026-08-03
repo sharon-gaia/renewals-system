@@ -504,15 +504,19 @@ def _sync_customer_to_insured(conn, cid, active=True):
             (idn, cv('name'), cv('phone'), cv('brand'), wa_source, cv('email'), cv('address'),
              cv('occupation'), cv('policy_number'), status, 1, now, now))
 
-def _resolve_form_queue(conn, idn):
-    """When a customer is done (issued 'הופק' / renewed 'חודש'), mark their pending website-form
-    submissions 'טופל' so they drop off /admin/other-forms — no duplicate bookkeeping."""
+def _resolve_form_queue(conn, idn, escalations=False):
+    """Mark this ת"ז's website-form submissions 'טופל' (drop off /admin/other-forms). Called
+    when a lead is ingested (dedupe) and when a customer is issued/renewed. With escalations=True
+    (issuance) also close the person's 'דורש בירור' admin-queue escalations."""
     z = (idn or '').lstrip('0')
     if not z:
         return
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     conn.execute("UPDATE unmatched_submissions SET status='טופל', handled_at=? "
-                 "WHERE ltrim(COALESCE(id_number,''),'0')=? AND status IN ('ממתין','בטיפול')",
-                 (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), z))
+                 "WHERE ltrim(COALESCE(id_number,''),'0')=? AND status IN ('ממתין','בטיפול')", (now, z))
+    if escalations:
+        conn.execute("UPDATE unmatched_submissions SET status='resolved', handled_at=? "
+                     "WHERE ltrim(COALESCE(id_number,''),'0')=? AND status='pending'", (now, z))
 
 # ── DB helpers ──────────────────────────────────────────────
 
@@ -1891,7 +1895,7 @@ def update_customer(cid):
         # and a brand-new issued customer is inserted into the master.
         if data.get('status') in ('חודש', 'הופק'):
             _sync_customer_to_insured(conn, cid, active=True)
-            _resolve_form_queue(conn, (crow['id_number'] if crow else '') or data.get('id_number', ''))
+            _resolve_form_queue(conn, (crow['id_number'] if crow else '') or data.get('id_number', ''), escalations=True)
     # Write the audit trail for any audited field that actually changed.
     if before:
         now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -3962,15 +3966,15 @@ def _policy_queue_items(conn, brand_key):
             if lead and (lead['form_received_at'] or '')[:10] <= '2026-08-01':
                 continue
             real_phone = _policy_to972(r['phone_mobile'])
-            if not real_phone:
-                continue
+            # A no-phone new policy is still queued (phone='') so the local sender forwards it to
+            # Sharon (rule: issued-but-undeliverable → me) rather than dropping it silently.
             seen_new.add(key)
             items.append({
                 'doc_id': r['doc_id'],
                 'name': r['insured_name'] or '',
                 'policy_number': r['policy_number'],
                 'brand': brand_key,
-                'phone': _policy_to972(POLICY_TEST_PHONE) if new_test else real_phone,
+                'phone': _policy_to972(POLICY_TEST_PHONE) if new_test else (real_phone or ''),
                 'email': '',
                 'whatsapp_pending': True,
                 'email_pending': False,
@@ -5244,7 +5248,7 @@ def _ensure_new_customer(conn, pr):
                 "status='הופק', status_changed_at=? WHERE id=?",
                 (pr['policy_number'], datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), existing['id']))
             _sync_customer_to_insured(conn, existing['id'], active=True)
-            _resolve_form_queue(conn, idn)
+            _resolve_form_queue(conn, idn, escalations=True)
         return
     cur = conn.execute(
         """INSERT INTO customers (month_id, policy_number, name, id_number, phone, email, brand,
@@ -5253,7 +5257,7 @@ def _ensure_new_customer(conn, pr):
         (month['id'], pr['policy_number'], (pr['insured_name'] or ''), idn,
          re.sub(r'\D', '', str(pr['phone_mobile'] or '')), (pr['email'] or ''), brand, 'הופק', 'new_policy'))
     _sync_customer_to_insured(conn, cur.lastrowid, active=True)
-    _resolve_form_queue(conn, idn)
+    _resolve_form_queue(conn, idn, escalations=True)
 
 POLICY_EMAIL_SUBJECT = "הפוליסה המקצועית שלך"
 POLICY_EMAIL_SIGN = ("—\nשרון דר\nמנהל תחום אחריות מקצועית\nגאיה, ווינר ואופיר")
@@ -5619,6 +5623,7 @@ def _ingest_join_form(conn, subject, html, received_at, attach_path=None):
     log_event(conn, event_key(idn, 'cust-%d' % cid),
               f"טופס הצטרפות התקבל ({brand or '—'}) · עיסוק: {occupation or '—'}{card_note}",
               'system', kind='join_form')
+    _resolve_form_queue(conn, idn)  # dedupe — the lead is tracked as a customer, not a raw form
     return idn
 
 _join_form_lock = threading.Lock()
