@@ -5607,6 +5607,19 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
                              datetime.datetime.now().isoformat())
                         )
                         conn.commit()
+                        # Auto-fill עיסוק from the just-stored PDF onto the customer + insured
+                        # (empty-occupation rows only, matched by ת"ז) — no manual batch needed.
+                        if keep_pdf and filepath and os.path.exists(filepath):
+                            _occ = extract_insured_occupation(filepath)
+                            _zid = normalize_id_number(fields.get('insured_id') or '').lstrip('0')
+                            if _occ and _zid:
+                                conn.execute("UPDATE customers SET occupation=? WHERE "
+                                             "ltrim(COALESCE(id_number,''),'0')=? AND COALESCE(occupation,'')=''",
+                                             (_occ, _zid))
+                                conn.execute("UPDATE insureds SET occupation=? WHERE "
+                                             "ltrim(COALESCE(id_number,''),'0')=? AND COALESCE(occupation,'')=''",
+                                             (_occ, _zid))
+                                conn.commit()
 
             if saved_any:
                 processed += 1
