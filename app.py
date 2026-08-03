@@ -3232,14 +3232,23 @@ def _price_line(is_midwife, premium):
         return 'המחיר נשאר כמו שנה שעברה.'
     return f'המחיר לשנה הקרובה: <strong>{amt:,} ₪</strong> — ללא שינוי מהשנה שעברה.'
 
+EMAIL_LOGO = {
+    'גאיה': 'https://gaia-ins.co.il/logo.png',
+    'ווינר': 'https://winner-ins.co.il/logo-mark.png',
+}
+
 def render_renewal_email(cust, month_name):
     import html as _html
     link, label = renewal_link(cust['brand'], cust['is_midwife'])
     name = _html.escape(str(cust['name'] or ''))
+    logo = EMAIL_LOGO.get(cust['brand'], '')
+    logo_html = (f'<div style="margin-bottom:12px"><img src="{logo}" alt="" '
+                 f'style="height:56px;width:auto;border:0"></div>') if logo else ''
     return (f'<table dir="rtl" width="100%" cellpadding="0" cellspacing="0" style="direction:rtl">'
             f'<tr><td align="right" style="padding:0">'
             f'<div style="display:inline-block;max-width:640px;text-align:right;direction:rtl;'
             f'font-family:Arial,sans-serif;font-size:15px;line-height:1.7;color:#222">'
+            f'{logo_html}'
             f'<p>שלום, {name}</p>'
             f'<p>הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.</p>'
             f'<p>{_price_line(cust["is_midwife"], cust["premium_last_year"])}</p>'
