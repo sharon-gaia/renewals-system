@@ -1169,6 +1169,46 @@ def api_fill_occupations_status():
         return jsonify({'error': 'unauthorized'}), 403
     return jsonify(_occ_fill_state)
 
+@app.route('/api/inbox-forms')
+def api_inbox_forms():
+    """Diagnostic: recent website-form emails (onboarding@resend.dev) in the inbox — subjects +
+    dates, and whether a given ת"ז appears in the body. Shows if renewal-request forms arrive
+    and how they're titled. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 7))
+    want_id = re.sub(r'\D', '', request.args.get('id', '')).lstrip('0')
+    cfg = EMAIL_CONFIG
+    out = []
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'FROM "{JOIN_FORM_SENDER}" SINCE {since}')
+        for mid in (data[0].split() if status == 'OK' else []):
+            _, hd = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hd[0][1])
+            item = {'subject': decode_str(hdr.get('Subject', '')), 'date': hdr.get('Date', '')}
+            if want_id:
+                _, fd = mail.fetch(mid, '(BODY.PEEK[])')
+                msg = email_lib.message_from_bytes(fd[0][1])
+                body = ''
+                for part in msg.walk():
+                    if part.get_content_type() == 'text/html':
+                        try:
+                            body = part.get_content()
+                        except Exception:
+                            pl = part.get_payload(decode=True); body = pl.decode('utf-8', 'replace') if pl else ''
+                        break
+                digits = re.sub(r'\D', '', body)
+                item['has_id'] = (want_id in digits) or (want_id.zfill(9) in digits)
+            out.append(item)
+        mail.logout()
+    except Exception as e:
+        return jsonify({'error': str(e)})
+    return jsonify({'count': len(out), 'items': out})
+
 @app.route('/api/customer-lookup')
 def api_customer_lookup():
     """Diagnostic: every customer row for a ת"ז across months + the insured master, so we can
