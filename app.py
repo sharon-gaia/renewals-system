@@ -1087,6 +1087,84 @@ def extract_insured_occupation(pdf_path):
             uniq.append(o)
     return ', '.join(uniq)
 
+# ── Bulk occupation fill (server-side, from the stored Harel policy PDFs) ─────
+# The PDFs already live on the Railway volume, so extraction runs on the server —
+# no OneDrive on-demand hydration (which crashed the earlier local batch).
+_occ_fill_state = {'running': False, 'done': False, 'total': 0, 'scanned': 0,
+                   'filled': 0, 'no_file': 0, 'no_occ': 0, 'error': None,
+                   'started_at': None, 'finished_at': None}
+
+def _run_fill_occupations(month_id, overwrite):
+    st = _occ_fill_state
+    try:
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT c.id AS cid, c.id_number, c.occupation, pd.filepath
+               FROM customers c JOIN policy_documents pd ON pd.customer_id = c.id
+               WHERE c.month_id=? AND COALESCE(pd.filepath,'')!=''
+               ORDER BY c.id, pd.id DESC""", (month_id,)).fetchall()
+        best = {}
+        for r in rows:                       # newest stored PDF per customer
+            if r['cid'] not in best:
+                best[r['cid']] = r
+        st['total'] = len(best)
+        for cid, r in best.items():
+            if (r['occupation'] or '') and not overwrite:
+                continue
+            fp = r['filepath']
+            if not fp or not os.path.exists(fp):
+                st['no_file'] += 1
+                continue
+            st['scanned'] += 1
+            occ = extract_insured_occupation(fp)
+            if not occ:
+                st['no_occ'] += 1
+                continue
+            conn.execute("UPDATE customers SET occupation=? WHERE id=?", (occ, cid))
+            idn = normalize_id_number(r['id_number'])
+            if idn:
+                conn.execute(
+                    "UPDATE insureds SET occupation=COALESCE(NULLIF(occupation,''),?) "
+                    "WHERE ltrim(COALESCE(id_number,''),'0')=?", (occ, idn.lstrip('0')))
+            st['filled'] += 1
+            if st['filled'] % 10 == 0:
+                conn.commit()
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        st['error'] = str(e)
+    finally:
+        st['running'] = False
+        st['done'] = True
+        st['finished_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+
+@app.route('/api/fill-occupations', methods=['POST'])
+def api_fill_occupations():
+    """Extract 'עיסוק המבוטח' from each stored policy PDF of the active month and fill the
+    occupation field (customers + insureds master). Runs in a background thread (token)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    if _occ_fill_state.get('running'):
+        return jsonify({'error': 'already running', 'state': _occ_fill_state}), 409
+    month = active_month()
+    if not month:
+        return jsonify({'error': 'no active month'}), 400
+    overwrite = bool((request.get_json(silent=True) or {}).get('overwrite'))
+    for k in ('total', 'scanned', 'filled', 'no_file', 'no_occ'):
+        _occ_fill_state[k] = 0
+    _occ_fill_state.update({'running': True, 'done': False, 'error': None,
+                            'started_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+                            'finished_at': None})
+    threading.Thread(target=_run_fill_occupations, args=(month['id'], overwrite),
+                     daemon=True).start()
+    return jsonify({'ok': True, 'started': True})
+
+@app.route('/api/fill-occupations-status')
+def api_fill_occupations_status():
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    return jsonify(_occ_fill_state)
+
 # ── Routes ──────────────────────────────────────────────────
 
 @app.route('/login', methods=['GET', 'POST'])
