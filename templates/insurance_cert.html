@@ -81,7 +81,7 @@
           <div class="lbl underline">אופי העסקה:</div>
           <div class="opts">
             {% for o in DEAL_OPTS %}
-            <div class="opt {{ 'on' if o == MARK_DEAL }}"><span class="opt-txt">{{ o }}</span><span class="cb">{{ '✕' if o == MARK_DEAL }}</span></div>
+            <div class="opt {{ 'on' if o == MARK_DEAL }}"><span class="cb">{{ '✕' if o == MARK_DEAL }}</span><span class="opt-txt">{{ o }}</span></div>
             {% endfor %}
           </div>
           <div class="lbl underline occ-head">העיסוק המבוטח:</div>
@@ -90,7 +90,7 @@
         <td class="party status-cell" rowspan="3">
           <div class="opts">
             {% for o in STATUS_OPTS %}
-            <div class="opt {{ 'on' if o == MARK_STATUS }}"><span class="opt-txt">{{ o }}</span><span class="cb">{{ '✕' if o == MARK_STATUS }}</span></div>
+            <div class="opt {{ 'on' if o == MARK_STATUS }}"><span class="cb">{{ '✕' if o == MARK_STATUS }}</span><span class="opt-txt">{{ o }}</span></div>
             {% endfor %}
           </div>
         </td>
@@ -121,14 +121,14 @@
   <table class="cert-table coverage">
     <thead>
       <tr>
-        <th rowspan="2" style="width:13%">סוג הביטוח חלוקה לפי גבולות אחריות או סכומי ביטוח</th>
-        <th rowspan="2" style="width:11%">מספר הפוליסה</th>
+        <th rowspan="2" style="width:12%">סוג הביטוח חלוקה לפי גבולות אחריות או סכומי ביטוח</th>
+        <th rowspan="2" style="width:13%">מספר הפוליסה</th>
         <th rowspan="2" style="width:8%">נוסח ומהדורת פוליסה***</th>
-        <th rowspan="2" style="width:9%">תאריך תחילה <span class="th-sub">(ניתן להזין תאריך רטרואקטיבי)</span></th>
-        <th rowspan="2" style="width:8%">תאריך סיום</th>
+        <th rowspan="2" style="width:10%">תאריך תחילה <span class="th-sub">(ניתן להזין תאריך רטרואקטיבי)</span></th>
+        <th rowspan="2" style="width:10%">תאריך סיום</th>
         <th colspan="2" style="width:18%">גבול אחריות לכלל פעילות המבוטח / סכום ביטוח</th>
         <th rowspan="2" style="width:5%">מטבע</th>
-        <th rowspan="2" style="width:20%">כיסויים נוספים בתוקף וביטול חריגים****</th>
+        <th rowspan="2" style="width:16%">כיסויים נוספים בתוקף וביטול חריגים****</th>
       </tr>
       <tr>
         <th class="sub" style="width:11%">לתקופה</th>
@@ -262,10 +262,10 @@
   .parties .occ-head{margin-top:11px;}
   .parties .deal-cell,.parties .status-cell{vertical-align:top;}
 
-  /* תיבות סימון — כמו במקור: הטקסט מיושר לימין, התיבה בטור משמאלו
-     (grid: עמודה 1 = טקסט בצד ימין ב-RTL, עמודה 2 = תיבה משמאל) */
+  /* תיבות סימון — כמו במקור: התיבה בצד ימין, הטקסט משמאלה
+     (grid: עמודה 1 = תיבה בצד ימין ב-RTL, עמודה 2 = טקסט משמאל) */
   .opts{margin-top:2px;}
-  .opt{display:grid; grid-template-columns:1fr auto; align-items:center; gap:10px;
+  .opt{display:grid; grid-template-columns:auto 1fr; align-items:center; gap:10px;
        font-size:10.5pt; margin-bottom:5px;}
   .opt .opt-txt{text-align:right;}
   .opt .cb{width:14px; height:14px; line-height:13px; text-align:center;
@@ -273,8 +273,11 @@
   .opt.on .opt-txt{font-weight:700;}
 
   .cover-title{font-weight:700; margin:10px 0 4px; font-size:13pt;}
-  .coverage th,.coverage td{padding:6px 8px;}
-  .coverage td{font-size:11pt;}
+  /* ריווח פנימי קטן + גופן מותאם כך שהמספרים (LTR) לא יגלשו ויחצו את הקווים האנכיים */
+  .coverage th,.coverage td{padding:6px 3px;}
+  .coverage td{font-size:9.5pt;}
+  .coverage tbody td .f, .coverage tbody td{white-space:nowrap;}
+  .coverage td.rtl{white-space:normal;}
   /* מרכוז אנכי — הערכים החד-שורתיים (מספר פוליסה, תאריכים, סכום) במרכז התא */
   .coverage tbody td{height:76px; vertical-align:middle; line-height:1.45;}
   .coverage td.rtl{text-align:right;}
