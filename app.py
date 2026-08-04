@@ -5595,7 +5595,7 @@ def parse_harel_policy_pdf(source):
 
     return result
 
-POLICY_SENT_LABEL = 'טופל-שליחה-אוטומטית'
+POLICY_SENT_LABEL = 'טופל/שליחה אוטומטית'  # matches Sharon's Gmail filter label (nested: טופל → שליחה אוטומטית)
 
 def _imap_utf7(s):
     """Encode a string to IMAP modified UTF-7 (RFC 3501) — for Gmail label/folder names."""
@@ -5649,7 +5649,7 @@ def api_label_email():
         return jsonify({'error': 'no message_id'})
     return jsonify({'labelled': _label_email(r['message_id'])})
 
-GMAIL_SENT_LABEL = 'טופל-שליחה-אוטומטית'
+GMAIL_SENT_LABEL = POLICY_SENT_LABEL  # single source of truth — keep both labelers on the same name
 _gmail_label_lock = threading.Lock()
 
 def _imap_utf7(s):
