@@ -276,8 +276,9 @@
   /* ריווח פנימי קטן + גופן מותאם כך שהמספרים (LTR) לא יגלשו ויחצו את הקווים האנכיים */
   .coverage th,.coverage td{padding:6px 3px;}
   .coverage td{font-size:9.5pt;}
-  .coverage tbody td .f, .coverage tbody td{white-space:nowrap;}
-  .coverage td.rtl{white-space:normal;}
+  /* מספרים חד-שורתיים (תאריכים/סכום/פוליסה) — לא נשברים; אבל תאי הטקסט (סוג/קודים) כן נשברים */
+  .coverage tbody td{white-space:nowrap;}
+  .coverage td.rtl, .coverage td.rtl .f{white-space:normal;}
   /* מרכוז אנכי — הערכים החד-שורתיים (מספר פוליסה, תאריכים, סכום) במרכז התא */
   .coverage tbody td{height:76px; vertical-align:middle; line-height:1.45;}
   .coverage td.rtl{text-align:right;}
