@@ -2413,7 +2413,7 @@ def insurance_cert():
         'codes_main':    C['codes_main'],
         'codes_supp':    C['codes_supp'],
         'discovery_codes': C['discovery_codes'],
-        'retro_date':    period_start,
+        'retro_date':    '',   # ריק כברירת מחדל — ממולא ידנית (הרטרו האמיתי שונה מתאריך התחלה)
         'insurer':       C['insurer'],
     }
     # Warn about anything the operator must fill by hand before signing.
