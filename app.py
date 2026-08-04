@@ -22,6 +22,7 @@ from email.header import decode_header
 import threading
 import time
 import re
+import codecs
 import secrets
 import pyotp
 import pdfplumber
@@ -4709,8 +4710,7 @@ def api_policy_inbox_search():
                 h = _email.message_from_bytes(hd[0][1])
                 out['matches'].append({'from': decode_str(h.get('From', '')),
                                        'subject': decode_str(h.get('Subject', '')), 'date': h.get('Date', '')})
-        _, data = mail.search(None, f'(SINCE {since} FROM "ComposeDoc@harel-ins.co.il")')
-        ids = data[0].split() if data and data[0] else []
+        ids = _search_policy_emails(mail, since)
         out['composedoc_count'] = len(ids)
         for mid in ids[-6:]:
             _, hd = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
@@ -4739,8 +4739,7 @@ def api_policy_inspect_email():
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
-        _, dta = mail.search(None, f'(SINCE {since} FROM "ComposeDoc@harel-ins.co.il")')
-        ids = dta[0].split() if dta and dta[0] else []
+        ids = _search_policy_emails(mail, since)
         for mid in ids[-10:]:
             _, full = mail.fetch(mid, '(BODY.PEEK[])')
             msg = _email.message_from_bytes(full[0][1])
@@ -4781,8 +4780,7 @@ def api_policy_pdf_text():
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
-        _, dta = mail.search(None, f'(SINCE {since} FROM "ComposeDoc@harel-ins.co.il")')
-        ids = dta[0].split() if dta and dta[0] else []
+        ids = _search_policy_emails(mail, since)
         for mid in reversed(ids):
             _, full = mail.fetch(mid, '(BODY.PEEK[])')
             msg = _email.message_from_bytes(full[0][1])
@@ -5741,6 +5739,35 @@ def api_gmail_label_sent():
 
 _policy_check_lock = threading.Lock()
 
+# Policy-PDF email senders. Harel sends directly (ComposeDoc); the Ofir agency relays some
+# renewals from its own address — the attached PDF is still the Harel form (881… numbers),
+# so the same parser handles both. Add new relays here to bring them into the scan.
+POLICY_EMAIL_SENDERS = ['ComposeDoc@harel-ins.co.il', 'ofirco@ofir-insurance.co.il']
+
+# Some Ofir relay emails declare the Hebrew charset 'iso-8859-8-i' (logical order), which
+# Python's codec registry doesn't know — decoding headers/parts would raise. Alias it to
+# 'iso-8859-8' so subjects and PDFs from those emails parse instead of crashing the scan.
+def _iso88598i(name):
+    if name.replace('_', '-').lower() == 'iso-8859-8-i':
+        return codecs.lookup('iso-8859-8')
+    return None
+codecs.register(_iso88598i)
+
+def _search_policy_emails(mail, since_date, extra=''):
+    """Search INBOX for policy emails from ANY known policy sender (Harel + Ofir relay),
+    returning de-duplicated message sequence numbers (oldest→newest). `extra` appends extra
+    IMAP criteria (e.g. a SUBJECT filter)."""
+    seen = {}
+    for sender in POLICY_EMAIL_SENDERS:
+        crit = f'FROM "{sender}" SINCE {since_date}'
+        if extra:
+            crit = f'{crit} {extra}'
+        status, data = mail.search(None, crit)
+        if status == 'OK' and data and data[0]:
+            for n in data[0].split():
+                seen[int(n)] = n
+    return [seen[k] for k in sorted(seen)]
+
 def check_policy_documents(days_back=30, keep_pdf=True):
     """Connect to IMAP, look for confirmed-policy emails (Harel ComposeDoc), extract the
     data, and (optionally) save the PDF. `days_back` widens the scan for backfills;
@@ -5766,13 +5793,10 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
         mail.select('INBOX')
 
         since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
-        status, data = mail.search(None, f'FROM "ComposeDoc@harel-ins.co.il" SINCE {since_date}')
-        if status != 'OK':
-            mail.logout()
-            return 0
+        mids = _search_policy_emails(mail, since_date)
 
         conn = get_db()
-        for mid in data[0].split():
+        for mid in mids:
             _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
             hdr = email_lib.message_from_bytes(hdr_data[0][1])
             message_id = hdr.get('Message-ID', '').strip()
