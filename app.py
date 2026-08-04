@@ -1323,6 +1323,41 @@ def api_brand_mismatches():
     conn.close()
     return jsonify({'mismatches': len(out), 'items': out})
 
+@app.route('/api/fix-brand-mismatches', methods=['POST'])
+def api_fix_brand_mismatches():
+    """Align brand (customer rows + insureds master, by ת"ז) to the latest policy's agent number
+    for active-month mismatches. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'fixed': 0, 'items': []})
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT c.id, c.name, c.id_number, c.brand AS cust_brand FROM customers c JOIN insureds i "
+        "ON ltrim(COALESCE(i.id_number,''),'0')=ltrim(COALESCE(c.id_number,''),'0') "
+        "WHERE c.month_id=? AND COALESCE(c.brand,'')!='' AND COALESCE(i.brand,'')!='' "
+        "AND c.brand!=i.brand ORDER BY c.name", (month['id'],)).fetchall()
+    fixed = []
+    for r in rows:
+        z = (r['id_number'] or '').lstrip('0')
+        if not z:
+            continue
+        ag = conn.execute("SELECT pr.agent_number FROM policy_records pr "
+                          "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? AND COALESCE(pr.agent_number,'')!='' "
+                          "ORDER BY pr.id DESC LIMIT 1", (z,)).fetchone()
+        pol_brand = NEW_AGENT_BRAND.get(re.sub(r'\D', '', str(ag['agent_number'])) if ag else '', '')
+        if not pol_brand or pol_brand == r['cust_brand']:
+            continue
+        conn.execute("UPDATE customers SET brand=? WHERE ltrim(COALESCE(id_number,''),'0')=?", (pol_brand, z))
+        conn.execute("UPDATE insureds SET brand=? WHERE ltrim(COALESCE(id_number,''),'0')=?", (pol_brand, z))
+        log_event(conn, event_key(r['id_number'], 'cust-%d' % r['id']),
+                  f"מותג יושר לפי הפוליסה: {r['cust_brand']} → {pol_brand}", 'system', kind='brand_fix')
+        fixed.append({'name': r['name'], 'from': r['cust_brand'], 'to': pol_brand})
+    conn.commit()
+    conn.close()
+    return jsonify({'fixed': len(fixed), 'items': fixed})
+
 @app.route('/api/duplicates')
 def api_duplicates():
     """Customers sharing the same ת"ז in the active month (data-integrity check). Token-authed."""
@@ -5839,6 +5874,16 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
                         _pid = normalize_id_number(fields.get('insured_id') or '').lstrip('0')
                         if _pid:
                             _resolve_form_queue(conn, _pid)
+                            # Align the person's brand to the policy's agent number (source of truth) —
+                            # fixes cases where a website-form prefix set the wrong brand.
+                            _pbrand = NEW_AGENT_BRAND.get(re.sub(r'\D', '', str(fields.get('agent_number') or '')), '')
+                            if _pbrand:
+                                conn.execute("UPDATE customers SET brand=? WHERE "
+                                             "ltrim(COALESCE(id_number,''),'0')=? AND COALESCE(brand,'')!=?",
+                                             (_pbrand, _pid, _pbrand))
+                                conn.execute("UPDATE insureds SET brand=? WHERE "
+                                             "ltrim(COALESCE(id_number,''),'0')=? AND COALESCE(brand,'')!=?",
+                                             (_pbrand, _pid, _pbrand))
                             conn.commit()
 
             if saved_any:
