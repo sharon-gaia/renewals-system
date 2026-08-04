@@ -2385,6 +2385,17 @@ def insurance_cert():
     # falling back to on-the-fly extraction from the stored policy PDF.
     occ_col = ins['occupation'] if (ins and 'occupation' in ins.keys()) else ''
     occupation   = pick(occ_col, extract_insured_occupation(pr['doc_filepath']) if pr else '')
+    customer_phone = pick(ins['phone'] if ins else '', pr['phone_mobile'] if pr else '')
+
+    # WhatsApp link to the customer (the PDF itself is attached manually — web WhatsApp
+    # can't auto-attach a file). Opens the customer's chat with a pre-filled message.
+    wa_link = None
+    _p = re.sub(r'\D', '', str(customer_phone or ''))
+    if _p:
+        from urllib.parse import quote
+        _p = ('972' + _p[1:]) if _p.startswith('0') else ('972' + _p)
+        _msg = f"שלום {ins_name}, מצורף אישור קיום ביטוחים עבור {company['name']}."
+        wa_link = f"https://wa.me/{_p}?text={quote(_msg)}"
 
     C = CERT_CONSTANTS
     cert = {
@@ -2422,7 +2433,32 @@ def insurance_cert():
                 ('מספר פוליסה', policy_num), ('תקופת ביטוח', period_start and period_end),
                 ('עיסוק המבוטח', occupation)] if not val]
     return render_template('insurance_cert.html', cert=cert, company=company,
-                           missing=missing, matched_master=bool(ins))
+                           missing=missing, matched_master=bool(ins), wa_link=wa_link)
+
+
+@app.route('/admin/insurance-cert/log', methods=['POST'])
+@login_required
+@admin_required
+def insurance_cert_log():
+    """Record in the customer's file (client_events, keyed by ת.ז) that a certificate was
+    printed / sent — called by the print & WhatsApp buttons on the certificate page."""
+    if not can_issue_cert():
+        return jsonify({'ok': False}), 403
+    data = request.get_json(silent=True) or {}
+    norm = re.sub(r'\D', '', str(data.get('id_number', ''))).lstrip('0')
+    if not norm:
+        return jsonify({'ok': False, 'error': 'no id'}), 400
+    company = (data.get('company') or '').strip()
+    cert_number = (data.get('cert_number') or '').strip()
+    verb = {'print': 'הופק והודפס', 'whatsapp': 'נשלח בוואטסאפ'}.get(data.get('action'), 'הופק')
+    note = f"אישור קיום ביטוח {verb}" + (f" — {company}" if company else '') \
+           + (f" (מס' {cert_number})" if cert_number else '')
+    who = session.get('display_name') or session.get('username') or 'מערכת'
+    conn = get_db()
+    log_event(conn, norm, note, who, kind='cert')
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
 
 
 @app.route('/admin/other-forms/<int:sid>/file', methods=['POST'])

@@ -14,13 +14,25 @@
   <a href="{{ url_for('insurance_cert') }}" class="btn btn-outline-secondary btn-sm">
     <i class="bi bi-arrow-right me-1"></i>אישור חדש
   </a>
-  <button onclick="window.print()" class="btn btn-primary btn-sm">
+  <button onclick="certPrint()" class="btn btn-primary btn-sm">
     <i class="bi bi-printer me-1"></i>הדפס / שמור כ‑PDF
   </button>
+  {% if wa_link %}
+  <button onclick="certWhatsApp()" class="btn btn-success btn-sm">
+    <i class="bi bi-whatsapp me-1"></i>שלח בוואטסאפ
+  </button>
+  {% endif %}
   <span class="text-muted small ms-2">
     <i class="bi bi-pencil-square me-1"></i>ניתן ללחוץ ולערוך כל שדה מודגש, וללחוץ על תיבת סימון כדי לסמן/לבטל X
   </span>
 </div>
+{% if wa_link %}
+<div class="no-print alert alert-light border py-2 small">
+  <i class="bi bi-whatsapp text-success me-1"></i>
+  "שלח בוואטסאפ" יפתח את הצ'אט עם הלקוח והודעה מוכנה — <strong>יש לצרף את קובץ ה‑PDF ששמרת</strong>
+  (וואטסאפ ווב לא מאפשר צירוף אוטומטי). כל הפקה/הדפסה/שליחה מתועדת בתיק הלקוח.
+</div>
+{% endif %}
 
 {% if missing %}
 <div class="no-print alert alert-warning py-2 small">
@@ -335,5 +347,29 @@
       box.closest('.opt').classList.toggle('on', !on);
     });
   });
+
+  // ── תיעוד בתיק הלקוח + שליחה בוואטסאפ ──
+  var CERT_META = {
+    id_number:   {{ (cert.ins_id or '') | tojson }},
+    company:     {{ company.name | tojson }},
+    cert_number: {{ (cert.cert_number or '') | tojson }}
+  };
+  var WA_LINK = {{ (wa_link or '') | tojson }};
+
+  function logCert(action){
+    // תיעוד "לשלוח ולשכוח" — לא חוסם את ההדפסה/שליחה גם אם נכשל.
+    try{
+      fetch("{{ url_for('insurance_cert_log') }}", {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(Object.assign({action:action}, CERT_META)),
+        keepalive:true
+      }).catch(function(){});
+    }catch(e){}
+  }
+  function certPrint(){ logCert('print'); setTimeout(function(){ window.print(); }, 150); }
+  function certWhatsApp(){
+    logCert('whatsapp');
+    if(WA_LINK){ window.open(WA_LINK, '_blank'); }
+  }
 </script>
 {% endblock %}
