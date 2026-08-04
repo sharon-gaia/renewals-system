@@ -119,18 +119,18 @@
   <table class="cert-table coverage">
     <thead>
       <tr>
-        <th rowspan="2" style="width:14%">סוג הביטוח חלוקה לפי גבולות אחריות או סכומי ביטוח</th>
+        <th rowspan="2" style="width:13%">סוג הביטוח חלוקה לפי גבולות אחריות או סכומי ביטוח</th>
         <th rowspan="2" style="width:11%">מספר הפוליסה</th>
         <th rowspan="2" style="width:8%">נוסח ומהדורת פוליסה***</th>
         <th rowspan="2" style="width:9%">תאריך תחילה <span class="th-sub">(ניתן להזין תאריך רטרואקטיבי)</span></th>
         <th rowspan="2" style="width:8%">תאריך סיום</th>
-        <th colspan="2" style="width:16%">גבול אחריות לכלל פעילות המבוטח / סכום ביטוח</th>
-        <th rowspan="2" style="width:6%">מטבע</th>
-        <th rowspan="2" style="width:22%">כיסויים נוספים בתוקף וביטול חריגים****</th>
+        <th colspan="2" style="width:18%">גבול אחריות לכלל פעילות המבוטח / סכום ביטוח</th>
+        <th rowspan="2" style="width:5%">מטבע</th>
+        <th rowspan="2" style="width:20%">כיסויים נוספים בתוקף וביטול חריגים****</th>
       </tr>
       <tr>
-        <th class="sub">למקרה*</th>
-        <th class="sub">לתקופה</th>
+        <th class="sub" style="width:11%">לתקופה</th>
+        <th class="sub" style="width:7%">למקרה*</th>
       </tr>
     </thead>
     <tbody>
@@ -140,23 +140,23 @@
         <td><span class="f">{{ cert.form_edition }}</span></td>
         <td><span class="f">{{ cert.period_start }}</span></td>
         <td><span class="f">{{ cert.period_end }}</span></td>
+        <td class="mid"><span class="f">{{ cert.amount }}</span></td>
         <td></td>
-        <td><span class="f">{{ cert.amount }}</span></td>
-        <td>{{ cert.currency }}</td>
+        <td class="mid">{{ cert.currency }}</td>
         <td class="rtl"><span class="f">{{ cert.codes_main }}</span></td>
       </tr>
       <tr>
         <td class="rtl">אחריות מקצועית רפואה משלימה</td>
         <td><span class="f">{{ cert.policy_number }}</span></td>
         <td><span class="f">{{ cert.form_edition }}</span></td>
-        <td>
-          <div><span class="f">{{ cert.period_start }}</span></div>
+        <td class="retro-cell">
+          <div class="rstart"><span class="f">{{ cert.period_start }}</span></div>
           <div class="retro">תאריך רטרו: <span class="f">{{ cert.retro_date }}</span></div>
         </td>
         <td><span class="f">{{ cert.period_end }}</span></td>
+        <td class="mid"><span class="f">{{ cert.amount }}</span></td>
         <td></td>
-        <td><span class="f">{{ cert.amount }}</span></td>
-        <td>{{ cert.currency }}</td>
+        <td class="mid">{{ cert.currency }}</td>
         <td class="rtl">
           <div><span class="f">{{ cert.codes_supp }}</span></div>
           <div class="disc">תקופת גילוי<br><span class="f">{{ cert.discovery_codes }}</span></div>
@@ -264,12 +264,15 @@
   .opt.on .opt-txt{font-weight:700;}
 
   .cover-title{font-weight:700; margin:10px 0 4px; font-size:13pt;}
-  .coverage th,.coverage td{padding:5px 7px;}
+  .coverage th,.coverage td{padding:6px 8px;}
   .coverage td{font-size:11pt;}
-  .coverage tbody td{min-height:78px; vertical-align:top; line-height:1.5;}
+  /* מרכוז אנכי — הערכים החד-שורתיים (מספר פוליסה, תאריכים, סכום) במרכז התא */
+  .coverage tbody td{height:92px; vertical-align:middle; line-height:1.5;}
   .coverage td.rtl{text-align:right;}
-  .coverage .retro{margin-top:16px; font-size:10pt; text-align:right;}
-  .coverage .disc{margin-top:8px; font-size:10pt;}
+  .coverage td.retro-cell{vertical-align:top; text-align:center;}
+  /* תאריך רטרו — קו אפור מעליו, מופרד מתאריך התחילה */
+  .coverage .retro{margin-top:28px; border-top:1px solid #999; padding-top:8px; font-size:10pt; text-align:center;}
+  .coverage .disc{margin-top:10px; font-size:10pt;}
 
   .cert-footnote{font-size:9pt; margin-top:8px;}
   .cert-footnote.small2{margin-top:14px; line-height:1.6;}
