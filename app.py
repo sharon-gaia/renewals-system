@@ -3066,6 +3066,71 @@ def performance():
     conn.close()
     return render_template('performance.html', rows=rows, month=month, show_role=is_super)
 
+@app.route('/api/campaign/brand-audit')
+def api_campaign_brand_audit():
+    """Read-only: the WhatsApp-eligible customers of a brand in the active month, with the fields
+    needed to audit premiums/midwife/policy. ?brand=ווינר|גאיה. Token."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', 'ווינר')
+    month = active_month()
+    if not month:
+        return jsonify({'count': 0, 'items': []})
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    items = []
+    for r in buckets['whatsapp']:
+        if r['brand'] != brand:
+            continue
+        z = re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0')
+        pol = conn.execute(
+            "SELECT pr.policy_number, pr.doc_type_label, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at "
+            "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? ORDER BY pd.id DESC LIMIT 1", (z,)).fetchone()
+        items.append({'id': r['id'], 'name': r['name'], 'id_number': r['id_number'],
+                      'status': r['status'], 'premium_last_year': r['premium_last_year'],
+                      'is_midwife': r['is_midwife'],
+                      'policy': (dict(pol) if pol else None)})
+    conn.close()
+    return jsonify({'month': month['name'], 'brand': brand, 'count': len(items), 'items': items})
+
+@app.route('/api/customer-update', methods=['POST'])
+def api_customer_update():
+    """Token: bulk-update whitelisted customer fields by customer id. Body {updates:[{id,
+    premium_last_year?, is_midwife?, status?}]}. Status changes are logged to the timeline."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    ups = (request.get_json(silent=True) or {}).get('updates') or []
+    allowed = ('premium_last_year', 'is_midwife', 'status')
+    conn = get_db()
+    done = []
+    for u in ups:
+        cid = u.get('id')
+        if not cid:
+            continue
+        cur = conn.execute("SELECT id_number, status FROM customers WHERE id=?", (cid,)).fetchone()
+        if not cur:
+            continue
+        sets, vals = [], []
+        for k in allowed:
+            if k in u:
+                sets.append(f"{k}=?")
+                vals.append(u[k])
+        if not sets:
+            continue
+        vals.append(cid)
+        conn.execute(f"UPDATE customers SET {','.join(sets)} WHERE id=?", vals)
+        if 'status' in u and u['status'] != (cur['status'] or ''):
+            try:
+                idk = event_key(normalize_id_number(cur['id_number'] or ''), f"upd-{cid}")
+                log_event(conn, idk, f"סטטוס עודכן ל-{u['status']} (עדכון מרוכז)", 'system', kind='status')
+            except Exception:
+                pass
+        done.append(cid)
+    conn.commit()
+    conn.close()
+    return jsonify({'updated': len(done), 'ids': done})
+
 @app.route('/api/rep-performance')
 def api_rep_performance():
     """Token-authed: per-rep (role='agent') performance for the ACTIVE month + a ready-to-send
