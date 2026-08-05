@@ -3933,6 +3933,49 @@ def api_brand_census():
     conn.close()
     return jsonify({'months': out})
 
+@app.route('/api/ofir-test-copy', methods=['POST'])
+def api_ofir_test_copy():
+    """Token-authed: make an INERT practice copy of the Ofir book into the ACTIVE month.
+    Copied rows are tagged import_source='test_ofir' → excluded from policy auto-delivery
+    (_policy_queue_items), and Ofir is already out of the campaign by brand — so these rows
+    NEVER send WhatsApp/email or start any process; they're only a customer-file to practice on.
+    A ת"ז that already exists in the active month (a REAL customer) is skipped, so reps never
+    practice on a live customer. {clear:true} deletes all test_ofir rows — run it before the
+    September load so the practice data doesn't persist."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    conn = get_db()
+    if data.get('clear'):
+        n = conn.execute("SELECT COUNT(*) c FROM customers WHERE import_source='test_ofir'").fetchone()['c']
+        conn.execute("DELETE FROM customers WHERE import_source='test_ofir'")
+        conn.commit()
+        conn.close()
+        return jsonify({'cleared': n})
+    active = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    src = conn.execute("SELECT id, name FROM months WHERE is_active=0 ORDER BY id DESC LIMIT 1").fetchone()
+    if not active or not src:
+        conn.close()
+        return jsonify({'error': 'need an active + an archived month'}), 400
+    aug_id, jul_id = active['id'], src['id']
+    cols = [r['name'] for r in conn.execute("PRAGMA table_info(customers)").fetchall() if r['name'] != 'id']
+    exprs = [str(int(aug_id)) if c == 'month_id'
+             else ("'test_ofir'" if c == 'import_source' else '"%s"' % c) for c in cols]
+    src_ofir = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=? AND brand='אופיר'",
+                            (jul_id,)).fetchone()['c']
+    before = conn.execute("SELECT COUNT(*) c FROM customers WHERE import_source='test_ofir'").fetchone()['c']
+    conn.execute(
+        f"INSERT INTO customers ({','.join(cols)}) SELECT {','.join(exprs)} FROM customers "
+        "WHERE month_id=? AND brand='אופיר' AND ltrim(COALESCE(id_number,''),'0') NOT IN "
+        "(SELECT ltrim(COALESCE(id_number,''),'0') FROM customers WHERE month_id=?)",
+        (jul_id, aug_id))
+    conn.commit()
+    after = conn.execute("SELECT COUNT(*) c FROM customers WHERE import_source='test_ofir'").fetchone()['c']
+    conn.close()
+    return jsonify({'ok': True, 'source_month': src['name'], 'active_month': active['name'],
+                    'source_ofir': src_ofir, 'copied': after - before,
+                    'skipped_already_in_active': src_ofir - (after - before), 'test_ofir_total': after})
+
 @app.route('/api/set-occupations', methods=['POST'])
 def api_set_occupations():
     """Token-authed bulk fill of the occupation column (עיסוק המבוטח, extracted locally from
@@ -4122,7 +4165,9 @@ def _policy_queue_items(conn, brand_key):
     # Match renewed customers across ALL months (not just the active one) so a late renewer
     # from a previous month still gets their policy — the ±48h fresh-PDF window bounds it.
     # Most-recent month wins on duplicate ת"ז.
-    q = ("SELECT * FROM customers WHERE status='חודש' AND brand IN (%s) ORDER BY month_id ASC, id ASC"
+    # test_ofir rows are inert practice data — never auto-deliver a policy for them.
+    q = ("SELECT * FROM customers WHERE status='חודש' AND brand IN (%s) "
+         "AND COALESCE(import_source,'')!='test_ofir' ORDER BY month_id ASC, id ASC"
          % ','.join('?' * len(brands)))
     for c in conn.execute(q, brands).fetchall():
         idn = normalize_id_number(c['id_number'])
