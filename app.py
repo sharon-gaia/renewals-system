@@ -3737,13 +3737,21 @@ def _premium_num(v):
     return float(d) if d else 0
 
 def renewal_amount(is_midwife, premium):
-    """Tier price for the email. None → generic 'like last year' (empty/0, or a premium
-    more than 100 above the tier, which is a manual-review exception)."""
+    """Renewal price shown in the message. Standard renewal is a flat 750 — any premium in the
+    normal band (≤850) maps to it (so noisy last-year premiums like 777/51 still show 750). The
+    few genuine exceptions whose renewal price is really higher show their ACTUAL premium
+    (Sharon's rule: pull the non-750 few and send the real price). Empty/0 or an implausible
+    value (>3000) → None → generic 'like last year'. Midwives keep their tier (1200/1600)."""
     p = _premium_num(premium)
-    tier = (1600 if 1500 <= p <= 1700 else 1200) if is_midwife else 750
-    if p <= 0 or p > tier + 100:
+    if p <= 0:
         return None
-    return tier
+    if is_midwife:
+        return 1600 if 1500 <= p <= 1700 else 1200
+    if p <= 850:
+        return 750
+    if p <= 3000:
+        return int(p)
+    return None
 
 def renewal_link(brand, is_midwife):
     if is_midwife:
