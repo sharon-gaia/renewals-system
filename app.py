@@ -3122,6 +3122,54 @@ def api_campaign_premium_source():
     conn.close()
     return jsonify({'brand': brand, 'count': len(out), 'items': out})
 
+@app.route('/api/campaign/resolve-premiums', methods=['POST'])
+def api_resolve_premiums_from_docs():
+    """Backfill premium_last_year for no-premium campaign customers from their policy docs, per
+    Sharon's rules: SOURCE doc (חידוש/חדש) → its premium (+ any PAID endorsement); endorsement
+    (אינ') with no price → 750; no doc at all → 750 (flagged). The display band still maps ≤850→750
+    and >850→actual. Body {brand, apply}. apply=false → dry-run (shows the plan). Token."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    brand = data.get('brand', 'ווינר')
+    apply = bool(data.get('apply'))
+    month = active_month()
+    if not month:
+        return jsonify({'count': 0, 'items': []})
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    out = []
+    for r in buckets['whatsapp']:
+        if r['brand'] != brand or _premium_num(r['premium_last_year']) > 0:
+            continue
+        z = re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0')
+        recs = conn.execute(
+            "SELECT pr.doc_type_label lbl, pr.premium FROM policy_records pr "
+            "JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? ORDER BY pd.id DESC", (z,)).fetchall()
+        source = next((_premium_num(x['premium']) for x in recs
+                       if x['lbl'] in ('חידוש', 'חדש') and _premium_num(x['premium']) > 0), 0)
+        paid_endo = sum(_premium_num(x['premium']) for x in recs
+                        if x['lbl'] == "אינ'" and _premium_num(x['premium']) > 0)
+        has_endo = any(x['lbl'] == "אינ'" for x in recs)
+        if source > 0:
+            base, src = source + paid_endo, 'מקור' + (' + תוספת בתשלום' if paid_endo else '')
+        elif has_endo:
+            base, src = 750 + paid_endo, 'תוספת ללא מחיר → 750'
+        else:
+            base, src = 750, 'ללא מסמך → 750 (ברירת מחדל)'
+        disp = renewal_amount(r['is_midwife'], base)
+        flag = (0 < source < 650) or (source == 0 and not has_endo)
+        out.append({'id': r['id'], 'name': r['name'], 'id_number': r['id_number'],
+                    'source_kind': src, 'resolved_premium': int(base),
+                    'will_display': disp, 'flag': flag})
+        if apply:
+            conn.execute("UPDATE customers SET premium_last_year=? WHERE id=?", (str(int(base)), r['id']))
+    if apply:
+        conn.commit()
+    conn.close()
+    return jsonify({'brand': brand, 'applied': apply, 'count': len(out), 'items': out})
+
 @app.route('/api/customer-update', methods=['POST'])
 def api_customer_update():
     """Token: bulk-update whitelisted customer fields by customer id. Body {updates:[{id,
