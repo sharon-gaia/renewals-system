@@ -3066,6 +3066,48 @@ def performance():
     conn.close()
     return render_template('performance.html', rows=rows, month=month, show_role=is_super)
 
+@app.route('/api/rep-performance')
+def api_rep_performance():
+    """Token-authed: per-rep (role='agent') performance for the ACTIVE month + a ready-to-send
+    Hebrew WhatsApp message. Feeds the daily 08:00 manager broadcast. Managers/super-admins are
+    the RECIPIENTS — their own activity is not included (only agents)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    month = active_month()
+    mid = month['id'] if month else -1
+    key = "COALESCE(NULLIF(ltrim(COALESCE(id_number,''),'0'),''), 'r'||id)"
+    rows = []
+    for a in conn.execute("SELECT display_name FROM users WHERE role='agent' "
+                          "AND COALESCE(display_name,'')!='' ORDER BY display_name").fetchall():
+        nm = a['display_name']
+        q = conn.execute(
+            "SELECT "
+            "SUM((CASE WHEN call_by_1=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_2=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_3=? THEN 1 ELSE 0 END)) AS calls, "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? THEN {key} END) AS touched, "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS renewals, "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS issued "
+            "FROM customers WHERE month_id=?",
+            [nm, nm, nm, nm, nm, 'חודש', nm, 'הופק', mid]).fetchone()
+        rows.append({'name': nm, 'calls': q['calls'] or 0, 'touched': q['touched'] or 0,
+                     'renewals': q['renewals'] or 0, 'issued': q['issued'] or 0})
+    conn.close()
+    rows.sort(key=lambda r: (r['renewals'], r['issued'], r['calls']), reverse=True)
+    today = datetime.date.today().strftime('%d/%m/%Y')
+    lines = [f"📊 ביצועי נציגים — {month['name'] if month else '—'}", f"🗓️ {today}", ""]
+    if rows:
+        for i, r in enumerate(rows, 1):
+            lines.append(f"{i}. {r['name']} — חודשו {r['renewals']} | הופקו {r['issued']} | "
+                         f"טופלו {r['touched']} | שיחות {r['calls']}")
+        lines += ["", (f"סה\"כ: חודשו {sum(r['renewals'] for r in rows)} | "
+                       f"הופקו {sum(r['issued'] for r in rows)} | "
+                       f"טופלו {sum(r['touched'] for r in rows)} | "
+                       f"שיחות {sum(r['calls'] for r in rows)}")]
+    else:
+        lines.append("אין נציגים מוגדרים במערכת.")
+    return jsonify({'month': month['name'] if month else None, 'count': len(rows),
+                    'rows': rows, 'message': "\n".join(lines)})
+
 def _extract_renewal_rows(ws, source):
     """Light extraction (id/name/phone) from a renewal sheet — for the pre-load VALIDATION
     only (does not insert). Mirrors the header detection of the real importers."""
