@@ -114,6 +114,7 @@ GW_STATUS_OPTIONS = [
     ('טופס התקבל', '📋 טופס התקבל'),
     ('הופק', 'הופק ✓'),
     ('חודש', 'חודש ✓'),
+    ('חידוש בעיות גביה', '⚠️ חידוש - בעיות גביה'),
     ('נוצר קשר עם לקוח', 'נוצר קשר עם לקוח'),
     ('ממתין לחידוש', 'ממתין לחידוש'),
     ('המשך טיפול בוואטסאפ', 'המשך טיפול בוואטסאפ'),
@@ -3596,6 +3597,9 @@ CAMPAIGN_STOP_STATUSES = {
     # Contact already made (incl. customers who replied to the campaign email) — don't also
     # hit them with the (WhatsApp) reminder.
     'נוצר קשר עם לקוח',
+    # Renewal in progress but stuck on a collection/billing problem — already being handled,
+    # so no "please renew" reminder.
+    'חידוש בעיות גביה',
 }
 
 CAMPAIGN_CROSS_SELL = """
