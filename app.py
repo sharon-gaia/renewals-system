@@ -3914,6 +3914,25 @@ def api_month_stats():
     conn.close()
     return jsonify({'months': out})
 
+@app.route('/api/brand-census')
+def api_brand_census():
+    """Token-authed READ-ONLY diagnostic: per-month × per-brand customer counts (+ how many are
+    'חודש'). Used to see where Ofir/Gaia/Winner rows live before/after any data move."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    out = []
+    for m in conn.execute("SELECT id, name, is_active FROM months ORDER BY id DESC").fetchall():
+        brands = {}
+        for r in conn.execute(
+            "SELECT COALESCE(NULLIF(brand,''),'(ריק)') b, COUNT(*) n, "
+            "SUM(CASE WHEN status='חודש' THEN 1 ELSE 0 END) renewed "
+            "FROM customers WHERE month_id=? GROUP BY b ORDER BY n DESC", (m['id'],)).fetchall():
+            brands[r['b']] = {'total': r['n'], 'renewed': r['renewed']}
+        out.append({'id': m['id'], 'name': m['name'], 'is_active': m['is_active'], 'brands': brands})
+    conn.close()
+    return jsonify({'months': out})
+
 @app.route('/api/set-occupations', methods=['POST'])
 def api_set_occupations():
     """Token-authed bulk fill of the occupation column (עיסוק המבוטח, extracted locally from
