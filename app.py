@@ -3094,6 +3094,34 @@ def api_campaign_brand_audit():
     conn.close()
     return jsonify({'month': month['name'], 'brand': brand, 'count': len(items), 'items': items})
 
+@app.route('/api/campaign/premium-source')
+def api_campaign_premium_source():
+    """Read-only: for each no-premium (empty/0) WhatsApp-eligible campaign customer of a brand,
+    dump their policy_records (doc_type + extracted premium/total_payment) so the real price can
+    be resolved — source (חידוש/חדש) vs endorsement (אינ'). Token."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', 'ווינר')
+    month = active_month()
+    if not month:
+        return jsonify({'count': 0, 'items': []})
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    out = []
+    for r in buckets['whatsapp']:
+        if r['brand'] != brand or _premium_num(r['premium_last_year']) > 0:
+            continue
+        z = re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0')
+        recs = conn.execute(
+            "SELECT pr.doc_type_label lbl, pr.premium, pr.total_payment, pd.received_at "
+            "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? ORDER BY pd.id DESC", (z,)).fetchall()
+        out.append({'id': r['id'], 'name': r['name'], 'id_number': r['id_number'],
+                    'docs': [{'type': x['lbl'], 'premium': x['premium'],
+                              'total': x['total_payment'], 'at': x['received_at']} for x in recs]})
+    conn.close()
+    return jsonify({'brand': brand, 'count': len(out), 'items': out})
+
 @app.route('/api/customer-update', methods=['POST'])
 def api_customer_update():
     """Token: bulk-update whitelisted customer fields by customer id. Body {updates:[{id,
