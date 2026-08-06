@@ -4373,9 +4373,13 @@ def _policy_queue_items(conn, brand_key):
     doc_sql = """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
                         pd.policy_number, pr.insured_id, pr.doc_type_label
                  FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id"""
+    # 48h fresh window, PLUS any WhatsApp-still-pending policy within a wider 10-day window — so a
+    # renewal delivered by EMAIL during a WhatsApp hold still gets its WhatsApp once the hold lifts.
+    wider = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime('%Y-%m-%d %H:%M')
     rows = list(conn.execute(
-        doc_sql + " WHERE pd.received_at >= ? ORDER BY pd.received_at DESC, pd.id DESC",
-        (cutoff,)).fetchall())
+        doc_sql + " WHERE pd.received_at >= ? OR (COALESCE(pd.whatsapp_sent_at,'')='' "
+        "AND pd.received_at >= ?) ORDER BY pd.received_at DESC, pd.id DESC",
+        (cutoff, wider)).fetchall())
     # TEST helper: force specific ת"ז's renewal docs in regardless of the 48h window
     # (they still must be marked 'חודש' to match `custs`). No effect in normal operation.
     if _POLICY_FORCE_IDS:
@@ -4430,7 +4434,8 @@ def _policy_queue_items(conn, brand_key):
             """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.policy_number,
                       pr.insured_id, pr.insured_name, pr.phone_mobile, pr.agent_number, pr.doc_type_label
                FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id
-               WHERE pd.received_at >= ? ORDER BY pd.received_at DESC, pd.id DESC""", (cutoff,)).fetchall():
+               WHERE pd.received_at >= ? OR (COALESCE(pd.whatsapp_sent_at,'')='' AND pd.received_at >= ?)
+               ORDER BY pd.received_at DESC, pd.id DESC""", (cutoff, wider)).fetchall():
             if r['whatsapp_sent_at'] or not is_new_doc(r['doc_type_label']):
                 continue
             if _new_policy_brand_key(r['agent_number']) != brand_key:
