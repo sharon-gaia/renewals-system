@@ -6250,10 +6250,23 @@ def parse_join_form(html):
         out[label] = '' if val in ('—', '-') else val
     return out
 
+def _lead_idn(f):
+    """Applicant ת"ז from a parsed join form. Try the known labels first, else fall back to ANY
+    parsed value that is a valid Israeli ID (checksum) — so a relabelled/reordered form field
+    still resolves instead of silently dropping the lead."""
+    idn = normalize_id_number(f.get('מספר ת.ז') or f.get('ת.ז המצהיר') or '')
+    if idn:
+        return idn
+    for v in f.values():
+        d = re.sub(r'\D', '', str(v or ''))
+        if 5 <= len(d) <= 9 and is_israeli_id(normalize_id_number(d)):
+            return normalize_id_number(d)
+    return ''
+
 def _ingest_join_form(conn, subject, html, received_at, attach_path=None):
     """Store/refresh a join-form lead in the active month, keyed by ת"ז. Returns ת"ז or None."""
     f = parse_join_form(html)
-    idn = normalize_id_number(f.get('מספר ת.ז') or f.get('ת.ז המצהיר') or '')
+    idn = _lead_idn(f)
     month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
     if not idn or not month:
         return None
@@ -6305,6 +6318,59 @@ def _ingest_join_form(conn, subject, html, received_at, attach_path=None):
               'system', kind='join_form')
     _resolve_form_queue(conn, idn)  # dedupe — the lead is tracked as a customer, not a raw form
     return idn
+
+@app.route('/api/lead-debug')
+def api_lead_debug():
+    """Diagnostic: find the join-form email containing ת"ז {id}, run parse_join_form, and show the
+    parsed fields + resolved ת"ז — to see why a lead didn't ingest. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    want = re.sub(r'\D', '', request.args.get('id', '')).lstrip('0')
+    days = int(request.args.get('days', 3))
+    cfg = EMAIL_CONFIG
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
+        _, data = mail.search(None, f'FROM "{JOIN_FORM_SENDER}" SINCE {since}')
+        for mid in (data[0].split() if data and data[0] else []):
+            _, fd = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(fd[0][1])
+            html = ''
+            for part in msg.walk():
+                if part.get_content_type() == 'text/html':
+                    try:
+                        html = part.get_content()
+                    except Exception:
+                        pl = part.get_payload(decode=True)
+                        html = pl.decode('utf-8', 'replace') if pl else ''
+                    break
+            if want and want not in re.sub(r'\D', '', html):
+                continue
+            f = parse_join_form(html)
+            mail.logout()
+            return jsonify({'subject': decode_str(msg.get('Subject', '')), 'fields': f,
+                            'resolved_idn': _lead_idn(f),
+                            'label_idn': normalize_id_number(f.get('מספר ת.ז') or f.get('ת.ז המצהיר') or '')})
+        mail.logout()
+        return jsonify({'error': 'not found', 'want': want})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+@app.route('/api/reingest-join-forms', methods=['POST'])
+def api_reingest_join_forms():
+    """Recover lost leads: clear the processed-dedup and re-scan join forms (idempotent upsert by
+    ת"ז), so forms that failed ת"ז extraction before the fix now ingest. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int((request.get_json(silent=True) or {}).get('days') or 14)
+    conn = get_db()
+    cleared = conn.execute("DELETE FROM processed_leads").rowcount
+    conn.commit()
+    conn.close()
+    n = check_join_forms(days_back=days)
+    return jsonify({'ok': True, 'cleared_dedup': cleared, 'leads_ingested': n})
 
 _join_form_lock = threading.Lock()
 
@@ -6360,7 +6426,7 @@ def _check_join_forms_impl(days_back=14):
             if not html:
                 continue
             f_preview = parse_join_form(html)
-            idn_preview = normalize_id_number(f_preview.get('מספר ת.ז') or f_preview.get('ת.ז המצהיר') or '')
+            idn_preview = _lead_idn(f_preview)
             attach_path = None
             for part in msg.walk():
                 if 'attachment' not in str(part.get('Content-Disposition', '')):
@@ -6377,12 +6443,18 @@ def _check_join_forms_impl(days_back=14):
                     fh.write(payload)
                 break
             idn = _ingest_join_form(conn, subject, html, received_at, attach_path)
-            if message_id:
+            # Only mark the email processed once a lead was actually created. If ת"ז extraction
+            # failed (idn is None), leave it UNprocessed so a later scan retries — otherwise the
+            # lead is silently lost forever.
+            if message_id and idn:
                 conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
                              (message_id, datetime.datetime.now().isoformat()))
             conn.commit()
-            processed += 1
-            print(f'[join-forms] ליד נקלט: {idn} ({subject})')
+            if idn:
+                processed += 1
+                print(f'[join-forms] ליד נקלט: {idn} ({subject})')
+            else:
+                print(f'[join-forms] ⚠️ לא חולץ ת"ז — לא סומן מעובד, יינסה שוב: {subject}')
         conn.close()
         mail.logout()
     except Exception as e:
