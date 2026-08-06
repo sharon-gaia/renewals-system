@@ -4431,13 +4431,16 @@ def _policy_queue_items(conn, brand_key):
         new_test = (POLICY_NEW_MODE == 'test')
         seen_new = set()
         for r in conn.execute(
-            """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.policy_number,
-                      pr.insured_id, pr.insured_name, pr.phone_mobile, pr.agent_number, pr.doc_type_label
+            """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
+                      pd.policy_number, pr.insured_id, pr.insured_name, pr.phone_mobile,
+                      pr.agent_number, pr.doc_type_label, pr.email AS pr_email
                FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id
                WHERE pd.received_at >= ? OR (COALESCE(pd.whatsapp_sent_at,'')='' AND pd.received_at >= ?)
                ORDER BY pd.received_at DESC, pd.id DESC""", (cutoff, wider)).fetchall():
-            if r['whatsapp_sent_at'] or not is_new_doc(r['doc_type_label']):
+            if not is_new_doc(r['doc_type_label']):
                 continue
+            if r['whatsapp_sent_at'] and r['email_sent_at']:
+                continue  # already delivered on both channels
             if _new_policy_brand_key(r['agent_number']) != brand_key:
                 continue
             key = (normalize_id_number(r['insured_id']) or '').lstrip('0')
@@ -4451,7 +4454,13 @@ def _policy_queue_items(conn, brand_key):
             if lead and (lead['form_received_at'] or '')[:10] <= '2026-08-01':
                 continue
             real_phone = _policy_to972(r['phone_mobile'])
-            # A no-phone new policy is still queued (phone='') so the local sender forwards it to
+            real_email = (r['pr_email'] or '').strip()
+            if not real_email:
+                ce = conn.execute("SELECT email FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                                  "AND COALESCE(email,'')!='' ORDER BY id DESC LIMIT 1", (key,)).fetchone()
+                real_email = (ce['email'].strip() if ce and ce['email'] else '')
+            has_email = bool(real_email and '@' in real_email)
+            # A no-phone/no-email new policy is still queued so the local sender forwards it to
             # Sharon (rule: issued-but-undeliverable → me) rather than dropping it silently.
             seen_new.add(key)
             items.append({
@@ -4460,15 +4469,17 @@ def _policy_queue_items(conn, brand_key):
                 'policy_number': r['policy_number'],
                 'brand': brand_key,
                 'phone': _policy_to972(POLICY_TEST_PHONE) if new_test else (real_phone or ''),
-                'email': '',
-                'whatsapp_pending': True,
-                'email_pending': False,
+                'email': (POLICY_TEST_EMAIL if new_test else real_email) if has_email else '',
+                'whatsapp_pending': not r['whatsapp_sent_at'],
+                'email_pending': (not r['email_sent_at']) and has_email,
                 'wa_text': POLICY_WA_NEW,
-                'email_subject': '', 'email_body': '', 'email_html': '',
+                'email_subject': POLICY_EMAIL_SUBJECT,
+                'email_body': new_policy_email_body(r['insured_name'] or ''),
+                'email_html': new_policy_email_html(r['insured_name'] or ''),
                 'pdf_url': f'/api/policy/pdf/{r["doc_id"]}',
                 'kind': 'new',
                 'test_mode': new_test,
-                'intended': f"{r['insured_name']} · {real_phone or '—'} (חדש)",
+                'intended': f"{r['insured_name']} · {real_phone or '—'} · {real_email or '—'} (חדש)",
             })
     return items
 
@@ -5775,6 +5786,32 @@ def policy_email_html(name):
         'אני זמין באופן אישי לכל שאלה או בקשה — בטלפון או בוואטסאפ.<br><br>'
         f'{POLICY_OPTIN}<br><br>'
         f'{CAMPAIGN_CROSS_SELL}'
+        '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
+        '</div>')
+
+def new_policy_email_body(name):
+    """Plain-text email body for a NEW-business policy delivery (not a renewal)."""
+    greet = f"שלום {name}," if name else "שלום,"
+    return (f"{greet}\n\n"
+            "תודה שבחרת בנו לביטוח המקצועי!\n"
+            "מצורפת הפוליסה. היא מהווה גם חשבונית להוצאה מוכרת, "
+            "אז אפשר להעביר אותה ישירות לרואה החשבון.\n"
+            "אני זמין באופן אישי לכל שאלה או בקשה — בטלפון או בוואטסאפ.\n\n"
+            f"{POLICY_OPTIN}\n\n"
+            f"{POLICY_EMAIL_SIGN}")
+
+def new_policy_email_html(name):
+    """RTL HTML email body for a NEW-business policy delivery."""
+    greet = f"שלום {name}," if name else "שלום,"
+    return (
+        '<div dir="rtl" style="text-align:right;font-family:Arial,Helvetica,sans-serif;'
+        'font-size:15px;line-height:1.6;color:#222;">'
+        f'{greet}<br><br>'
+        'תודה שבחרת בנו לביטוח המקצועי!<br>'
+        'מצורפת הפוליסה. היא מהווה גם חשבונית להוצאה מוכרת, '
+        'אז אפשר להעביר אותה ישירות לרואה החשבון.<br>'
+        'אני זמין באופן אישי לכל שאלה או בקשה — בטלפון או בוואטסאפ.<br><br>'
+        f'{POLICY_OPTIN}<br><br>'
         '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
         '</div>')
 
