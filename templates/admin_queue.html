@@ -49,7 +49,10 @@
             {% endif %}
           </div>
           <div class="fw-bold fs-6">{{ item.name or '(ללא שם)' }}</div>
-          {% if item.id_number %}<div class="small text-muted">ת.ז: {{ item.id_number }}</div>{% endif %}
+          {% if item.id_number %}<div class="small text-muted">ת.ז: {{ item.id_number }}
+            <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline"
+                    data-copy="{{ item.id_number }}" onclick="copyText(this)" title="העתק ת.ז"><i class="bi bi-clipboard"></i></button>
+          </div>{% endif %}
           {% if item.phone %}
           <div class="small d-flex align-items-center gap-1">
             <a href="https://wa.me/972{{ item.phone|replace('-','')|replace(' ','')|replace('0','',1) }}" target="_blank" class="text-decoration-none">
@@ -57,6 +60,8 @@
             </a>
             <a href="https://wa.me/972{{ item.phone|replace('-','')|replace(' ','')|replace('0','',1) }}" target="_blank"
                class="btn btn-success btn-sm py-0 px-2" title="פתח וואטסאפ"><i class="bi bi-whatsapp"></i></a>
+            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
+                    data-copy="{{ item.phone }}" onclick="copyText(this)" title="העתק טלפון"><i class="bi bi-clipboard"></i></button>
           </div>
           {% endif %}
           {% if item.email %}<div class="small"><i class="bi bi-envelope me-1"></i>{{ item.email }}</div>{% endif %}
@@ -140,4 +145,13 @@
 {% endfor %}
 </div>
 {% endif %}
+<script>
+function copyText(btn){
+  var t = btn.getAttribute('data-copy') || '';
+  function fb(v,cb){ var ta=document.createElement('textarea'); ta.value=v; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.focus(); ta.select(); try{document.execCommand('copy');}catch(e){} document.body.removeChild(ta); if(cb) cb(); }
+  function ok(){ var i=btn.querySelector('i'); if(!i) return; var c=i.className; i.className='bi bi-check-lg text-success'; setTimeout(function(){ i.className=c; },1200); }
+  if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(t).then(ok).catch(function(){ fb(t,ok); }); }
+  else { fb(t,ok); }
+}
+</script>
 {% endblock %}
