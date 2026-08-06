@@ -6358,6 +6358,61 @@ def api_lead_debug():
     except Exception as e:
         return jsonify({'error': str(e)})
 
+@app.route('/api/stuck-leads')
+def api_stuck_leads():
+    """Read-only check: join-form emails (last {days}) whose applicant ת"ז is NOT yet a customer —
+    i.e. leads that failed to ingest. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 5))
+    cfg = EMAIL_CONFIG
+    stuck, ok = [], 0
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
+        _, data = mail.search(None, f'FROM "{JOIN_FORM_SENDER}" SINCE {since}')
+        conn = get_db()
+        seen = set()
+        for mid in (data[0].split() if data and data[0] else []):
+            _, hd = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT)])')
+            subj = decode_str(email_lib.message_from_bytes(hd[0][1]).get('Subject', ''))
+            if JOIN_FORM_SUBJECT_MARK not in subj:
+                continue
+            _, fd = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(fd[0][1])
+            html = ''
+            for part in msg.walk():
+                if part.get_content_type() == 'text/html':
+                    try:
+                        html = part.get_content()
+                    except Exception:
+                        pl = part.get_payload(decode=True)
+                        html = pl.decode('utf-8', 'replace') if pl else ''
+                    break
+            f = parse_join_form(html)
+            idn = _lead_idn(f)
+            nm = f.get('שם מלא') or f.get('שם המצהיר') or '?'
+            if not idn:
+                stuck.append({'name': nm, 'idn': None, 'reason': 'no-id'})
+                continue
+            z = idn.lstrip('0')
+            if z in seen:
+                continue
+            seen.add(z)
+            cust = conn.execute("SELECT status FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                                "ORDER BY id DESC LIMIT 1", (z,)).fetchone()
+            if cust:
+                ok += 1
+            else:
+                stuck.append({'name': nm, 'idn': idn})
+        conn.close()
+        mail.logout()
+    except Exception as e:
+        return jsonify({'error': str(e)})
+    return jsonify({'days': days, 'has_customer': ok, 'stuck_count': len(stuck), 'stuck': stuck})
+
 @app.route('/api/reingest-join-forms', methods=['POST'])
 def api_reingest_join_forms():
     """Recover lost leads: clear the processed-dedup and re-scan join forms (idempotent upsert by
