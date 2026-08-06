@@ -92,7 +92,7 @@ def mask_card(value):
         return ''
     return '•••• ' + d[-4:] if len(d) >= 4 else '••••'
 
-STATUSES = ['', 'טופס התקבל', 'חודש', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
+STATUSES = ['', 'טופס התקבל', 'חודש', 'חודש - בוצעה שיחת מכירה', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
 
 # Work-queue states for /admin/other-forms. 'ממתין' is the stored default from intake;
@@ -114,6 +114,7 @@ GW_STATUS_OPTIONS = [
     ('טופס התקבל', '📋 טופס התקבל'),
     ('הופק', 'הופק ✓'),
     ('חודש', 'חודש ✓'),
+    ('חודש - בוצעה שיחת מכירה', 'חודש - בוצעה שיחת מכירה ✓'),
     ('חידוש בעיות גביה', '⚠️ חידוש - בעיות גביה'),
     ('נוצר קשר עם לקוח', 'נוצר קשר עם לקוח'),
     ('ממתין לחידוש', 'ממתין לחידוש'),
@@ -128,6 +129,7 @@ OFIR_STATUS_OPTIONS = [
     ('קיבל פניה', 'קיבל פניה'),
     ('הלקוח אישר', 'הלקוח אישר'),
     ('חודש', 'חודש ✓'),
+    ('חודש - בוצעה שיחת מכירה', 'חודש - בוצעה שיחת מכירה ✓'),
     ('בוטל', 'בוטל'),
     ('לא מחדש', 'לא מחדש'),
     ('ממתין לחידוש', 'ממתין לחידוש'),
@@ -409,7 +411,7 @@ def promote_customers_to_insureds(conn, month_id, brands=None):
         idn = normalize_id_number(cst['id_number'])
         if not idn:
             continue
-        status = 'פעיל' if cst['status'] in ('חודש', 'הופק') else 'לא פעיל'
+        status = 'פעיל' if cst['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק') else 'לא פעיל'
         existing = conn.execute("SELECT * FROM insureds WHERE id_number=?", (idn,)).fetchone()
         if existing:
             # Fill blanks and set renewal-based status; never wipe existing activity.
@@ -1197,7 +1199,7 @@ def api_resolve_issued_forms():
     n = conn.execute(
         "UPDATE unmatched_submissions SET status='טופל', handled_at=? "
         "WHERE status IN ('ממתין','בטיפול') AND ltrim(COALESCE(id_number,''),'0') IN "
-        "(SELECT ltrim(COALESCE(id_number,''),'0') FROM customers WHERE status IN ('הופק','חודש'))",
+        "(SELECT ltrim(COALESCE(id_number,''),'0') FROM customers WHERE status IN ('הופק','חודש','חודש - בוצעה שיחת מכירה'))",
         (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),)).rowcount
     conn.commit()
     conn.close()
@@ -1438,7 +1440,7 @@ def api_scan_email_replies():
     except Exception as e:
         conn.close()
         return jsonify({'error': str(e)})
-    KEEP = ('חודש', 'הופק', 'ממתין להפקה', 'טופס התקבל', 'לא רוצים לחדש', 'לא מחדש', 'בוטל')
+    KEEP = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'ממתין להפקה', 'טופס התקבל', 'לא רוצים לחדש', 'לא מחדש', 'בוטל')
     results = []
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     for em in sorted(senders & set(recip.keys())):
@@ -1814,13 +1816,13 @@ def index():
             # are not renewals, so they're kept out of the renewal total/buckets/%.
             core = [r for r in subset if r['status'] not in ('ממתין להפקה', 'הופק')]
             t = len(core)
-            rnw = sum(1 for r in core if r['status'] == 'חודש')
+            rnw = sum(1 for r in core if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה'))
             no_renew = sum(1 for r in core if r['status'] in NO_RENEW)
             seen = sum(1 for r in core if r['status'] in CONTACTED)
             forms = sum(1 for r in core if r['status'] == 'טופס התקבל')
             return {
                 'total': t, 'renewed': rnw,
-                'renewed_from_forms': sum(1 for r in core if r['status'] == 'חודש' and r['form_received_at']),
+                'renewed_from_forms': sum(1 for r in core if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה') and r['form_received_at']),
                 'forms': forms, 'no_renew': no_renew, 'seen': seen,
                 'pending_issue': pending_issue,
                 'no_contact': sum(1 for r in core if not r['status'] and not _contacted(r)),
@@ -1850,7 +1852,7 @@ def index():
         for cat, aliases in OFIR_CATEGORIES:
             in_cat = [r for r in ofir_rows if any(a in (r['sector'] or '') for a in aliases)]
             t = len(in_cat)
-            rnw = sum(1 for r in in_cat if r['status'] == 'חודש')
+            rnw = sum(1 for r in in_cat if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה'))
             if t:
                 ofir_by_category.append({'category': cat, 'total': t, 'renewed': rnw,
                                          'pct': round(rnw / t * 100, 1)})
@@ -2077,7 +2079,7 @@ def update_customer(cid):
         # 'חודש' (renewal) and 'הופק' (new-business issuance) both make the person active in
         # the master (כל הלקוחות): a late renewal/issue reactivates even a 'לא פעיל' record,
         # and a brand-new issued customer is inserted into the master.
-        if data.get('status') in ('חודש', 'הופק'):
+        if data.get('status') in ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק'):
             _sync_customer_to_insured(conn, cid, active=True)
             _resolve_form_queue(conn, (crow['id_number'] if crow else '') or data.get('id_number', ''), escalations=True)
     # Write the audit trail for any audited field that actually changed.
@@ -3045,10 +3047,10 @@ def performance():
             "SELECT "
             "SUM((CASE WHEN call_by_1=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_2=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_3=? THEN 1 ELSE 0 END)) AS calls, "
             f"COUNT(DISTINCT CASE WHEN handled_by=? THEN {key} END) AS touched, "
-            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS renewals, "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status IN (?,?) THEN {key} END) AS renewals, "
             f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS issued "
             "FROM customers WHERE month_id=?",
-            [nm, nm, nm, nm, nm, 'חודש', nm, 'הופק', mid]
+            [nm, nm, nm, nm, nm, 'חודש', 'חודש - בוצעה שיחת מכירה', nm, 'הופק', mid]
         ).fetchone()
         # Escalations raised by this person (customer card or customer file), which are
         # the queue-* items — not the website-form queue they merely handled.
@@ -3226,10 +3228,10 @@ def api_rep_performance():
             "SELECT "
             "SUM((CASE WHEN call_by_1=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_2=? THEN 1 ELSE 0 END)+(CASE WHEN call_by_3=? THEN 1 ELSE 0 END)) AS calls, "
             f"COUNT(DISTINCT CASE WHEN handled_by=? THEN {key} END) AS touched, "
-            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS renewals, "
+            f"COUNT(DISTINCT CASE WHEN handled_by=? AND status IN (?,?) THEN {key} END) AS renewals, "
             f"COUNT(DISTINCT CASE WHEN handled_by=? AND status=? THEN {key} END) AS issued "
             "FROM customers WHERE month_id=?",
-            [nm, nm, nm, nm, nm, 'חודש', nm, 'הופק', mid]).fetchone()
+            [nm, nm, nm, nm, nm, 'חודש', 'חודש - בוצעה שיחת מכירה', nm, 'הופק', mid]).fetchone()
         rows.append({'name': nm, 'calls': q['calls'] or 0, 'touched': q['touched'] or 0,
                      'renewals': q['renewals'] or 0, 'issued': q['issued'] or 0})
     conn.close()
@@ -3771,7 +3773,7 @@ HEB_MONTHS = ['', 'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי'
 
 # Statuses that mean "no need to send anymore": renewed / not-renewing / handled manually.
 CAMPAIGN_STOP_STATUSES = {
-    'חודש', 'טופס התקבל', 'הלקוח אישר', 'ביקשו לחדש לבד',
+    'חודש', 'חודש - בוצעה שיחת מכירה', 'טופס התקבל', 'הלקוח אישר', 'ביקשו לחדש לבד',
     'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'פרוייקט הסתיים',
     'דורש בירור', 'ממתין לאישור מיילדות', 'המשך טיפול בוואטסאפ', 'ממתין לחידוש',
     # New-business statuses — a fresh purchase / a lead awaiting issuance is NOT a renewal,
@@ -4098,7 +4100,7 @@ def api_month_stats():
     out = []
     for m in conn.execute("SELECT id, name, is_active FROM months ORDER BY id DESC").fetchall():
         total = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=?", (m['id'],)).fetchone()['c']
-        renewed = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=? AND status='חודש'",
+        renewed = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=? AND status IN ('חודש','חודש - בוצעה שיחת מכירה')",
                                (m['id'],)).fetchone()['c']
         out.append({'id': m['id'], 'name': m['name'], 'is_active': m['is_active'],
                     'total': total, 'renewed': renewed, 'not_renewed': total - renewed})
@@ -4117,7 +4119,7 @@ def api_brand_census():
         brands = {}
         for r in conn.execute(
             "SELECT COALESCE(NULLIF(brand,''),'(ריק)') b, COUNT(*) n, "
-            "SUM(CASE WHEN status='חודש' THEN 1 ELSE 0 END) renewed "
+            "SUM(CASE WHEN status IN ('חודש','חודש - בוצעה שיחת מכירה') THEN 1 ELSE 0 END) renewed "
             "FROM customers WHERE month_id=? GROUP BY b ORDER BY n DESC", (m['id'],)).fetchall():
             brands[r['b']] = {'total': r['n'], 'renewed': r['renewed']}
         out.append({'id': m['id'], 'name': m['name'], 'is_active': m['is_active'], 'brands': brands})
@@ -4200,7 +4202,7 @@ def api_sync_renewed_active():
     conn = get_db()
     now = datetime.datetime.now().isoformat()
     updated, seen = [], set()
-    for r in conn.execute("SELECT id_number, name FROM customers WHERE status='חודש'").fetchall():
+    for r in conn.execute("SELECT id_number, name FROM customers WHERE status IN ('חודש','חודש - בוצעה שיחת מכירה')").fetchall():
         idn = normalize_id_number(r['id_number'])
         key = (idn or '').lstrip('0')
         if not key or key in seen:
@@ -4312,7 +4314,7 @@ def api_commit_import():
     prev = conn.execute("SELECT * FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
     outgoing = None
     if prev:
-        renewed = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=? AND status='חודש'",
+        renewed = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=? AND status IN ('חודש','חודש - בוצעה שיחת מכירה')",
                                (prev['id'],)).fetchone()['c']
         total = conn.execute("SELECT COUNT(*) c FROM customers WHERE month_id=?",
                              (prev['id'],)).fetchone()['c']
@@ -4357,7 +4359,7 @@ def _policy_queue_items(conn, brand_key):
     # from a previous month still gets their policy — the ±48h fresh-PDF window bounds it.
     # Most-recent month wins on duplicate ת"ז.
     # test_ofir rows are inert practice data — never auto-deliver a policy for them.
-    q = ("SELECT * FROM customers WHERE status='חודש' AND brand IN (%s) "
+    q = ("SELECT * FROM customers WHERE status IN ('חודש','חודש - בוצעה שיחת מכירה') AND brand IN (%s) "
          "AND COALESCE(import_source,'')!='test_ofir' ORDER BY month_id ASC, id ASC"
          % ','.join('?' * len(brands)))
     for c in conn.execute(q, brands).fetchall():
@@ -5190,7 +5192,7 @@ def api_policy_trace():
            ORDER BY c.month_id DESC LIMIT 12""", (qz, like)).fetchall():
         custs.append({'cust_id': c['id'], 'month': c['mname'], 'active_month': bool(c['is_active']),
                       'name': c['name'], 'id_number': c['id_number'], 'status': c['status'],
-                      'marked_renewed': (c['status'] == 'חודש'), 'brand': c['brand']})
+                      'marked_renewed': (c['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה')), 'brand': c['brand']})
     conn.close()
     return jsonify({'query': q, 'window_cutoff': cutoff, 'policy_documents': docs, 'customers': custs})
 
@@ -6406,7 +6408,7 @@ def _ingest_renewal_form(conn, subject, html, received_at):
         (month['id'], idn.lstrip('0'))).fetchone()
     if not row:
         return (idn, False)
-    if (row['status'] or '') in ('חודש', 'הופק'):
+    if (row['status'] or '') in ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק'):
         return (idn, True)
     conn.execute(
         "UPDATE customers SET status='טופס התקבל', form_received_at=?, "
