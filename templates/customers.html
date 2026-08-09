@@ -127,8 +127,14 @@
       </div>
       {% endif %}
     </td>
-    <td class="px-3 d-none d-lg-table-cell">
-      <small>{{ c.whatsapp_sent_date | fdate }}</small>
+    <td class="px-3 d-none d-lg-table-cell" style="min-width:120px">
+      {% if c.whatsapp_sent_date %}
+      <button type="button" class="btn btn-sm btn-success py-0 px-2 wa-mark" data-id="{{ c.id }}" data-sent="1"
+              title="נשלח בוואטסאפ — לחץ לביטול">✓ {{ c.whatsapp_sent_date | fdate }}</button>
+      {% else %}
+      <button type="button" class="btn btn-sm btn-outline-secondary py-0 px-2 wa-mark" data-id="{{ c.id }}" data-sent="0"
+              title="סמן שנשלח בוואטסאפ ידנית — יורד מהשליחה האוטומטית"><i class="bi bi-whatsapp me-1"></i>סמן כנשלח</button>
+      {% endif %}
     </td>
     <td class="px-3 d-none d-lg-table-cell">
       <input type="text" class="form-control form-control-sm notes-input"
@@ -198,6 +204,32 @@ function saveField(id, field, value) {
     body: JSON.stringify({[field]: value})
   });
 }
+
+// "סמן כנשלח בוואטסאפ" — sets/clears whatsapp_sent_date; a set date drops the customer from the
+// automatic campaign (so manual + auto never double-send). Toggle to undo.
+function markWaSent(btn) {
+  const id = btn.dataset.id, sent = btn.dataset.sent === '1';
+  const p2 = x => String(x).padStart(2, '0'), d = new Date();
+  const value = sent ? '' : (d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()));
+  btn.disabled = true;
+  fetch(`/customer/${id}/update`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({whatsapp_sent_date: value})
+  }).then(() => {
+    if (!sent) {
+      btn.className = 'btn btn-sm btn-success py-0 px-2 wa-mark';
+      btn.dataset.sent = '1';
+      btn.textContent = '✓ ' + p2(d.getDate()) + '/' + p2(d.getMonth() + 1) + '/' + d.getFullYear();
+      btn.title = 'נשלח בוואטסאפ — לחץ לביטול';
+    } else {
+      btn.className = 'btn btn-sm btn-outline-secondary py-0 px-2 wa-mark';
+      btn.dataset.sent = '0';
+      btn.innerHTML = '<i class="bi bi-whatsapp me-1"></i>סמן כנשלח';
+      btn.title = 'סמן שנשלח בוואטסאפ ידנית — יורד מהשליחה האוטומטית';
+    }
+  }).finally(() => { btn.disabled = false; });
+}
+document.querySelectorAll('.wa-mark').forEach(b => b.addEventListener('click', () => markWaSent(b)));
 
 // Quick-log a "no answer" call attempt from the list — stamps today's date
 function logCall(ev, id, n) {
