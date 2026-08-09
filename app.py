@@ -4562,7 +4562,9 @@ def wa_queue():
     today = datetime.date.today().isoformat()
     items = []
     for r in buckets['whatsapp']:
-        if r['brand'] != brand or (r['whatsapp_sent_date'] or '') == today:
+        # Skip anyone already messaged THIS month (whatsapp_sent_date is set) — the renewal
+        # WhatsApp goes once per customer, so a multi-day drip never re-messages the same person.
+        if r['brand'] != brand or (r['whatsapp_sent_date'] or '').strip():
             continue
         phone = re.sub(r'\D', '', str(r['phone'] or ''))
         if phone.startswith('0'):
