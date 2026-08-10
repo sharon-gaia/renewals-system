@@ -4668,9 +4668,9 @@ def card_update_status_check():
         "card_update_wa_at, card_update_email_at, import_source "
         "FROM customers WHERE status=? ORDER BY brand, id", (CARD_UPDATE_STATUS,)).fetchall()]
     fuzzy = [dict(r) for r in conn.execute(
-        "SELECT id, name, brand, status FROM customers "
-        "WHERE status LIKE '%חידוש%' AND status<>? AND status<>'חידוש בעיות גביה' "
-        "ORDER BY status", (CARD_UPDATE_STATUS,)).fetchall()]
+        "SELECT id, name, brand, status, status_changed_at, handled_by FROM customers "
+        "WHERE status LIKE '%חידוש%' AND status<>? "
+        "ORDER BY status_changed_at DESC", (CARD_UPDATE_STATUS,)).fetchall()]
     # Optional ?q= name search — show a specific customer's ACTUAL stored status/brand.
     by_name = []
     q = (request.args.get('q') or '').strip()
