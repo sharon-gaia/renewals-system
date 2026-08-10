@@ -92,7 +92,7 @@ def mask_card(value):
         return ''
     return '•••• ' + d[-4:] if len(d) >= 4 else '••••'
 
-STATUSES = ['', 'טופס התקבל', 'חודש', 'חודש - בוצעה שיחת מכירה', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
+STATUSES = ['', 'טופס התקבל', 'חודש', 'חודש - בוצעה שיחת מכירה', 'התקבל חידוש - כ.א לא תקין', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
 
 # Work-queue states for /admin/other-forms. 'ממתין' is the stored default from intake;
@@ -116,6 +116,7 @@ GW_STATUS_OPTIONS = [
     ('חודש', 'חודש ✓'),
     ('חודש - בוצעה שיחת מכירה', 'חודש - בוצעה שיחת מכירה ✓'),
     ('חידוש בעיות גביה', '⚠️ חידוש - בעיות גביה'),
+    ('התקבל חידוש - כ.א לא תקין', '⚠️ התקבל חידוש - כ.א לא תקין'),
     ('נוצר קשר עם לקוח', 'נוצר קשר עם לקוח'),
     ('ממתין לחידוש', 'ממתין לחידוש'),
     ('המשך טיפול בוואטסאפ', 'המשך טיפול בוואטסאפ'),
@@ -905,6 +906,12 @@ def init_db():
         conn.execute("ALTER TABLE customers ADD COLUMN email_sent_date TEXT")
     if 'do_not_contact' not in _ccols:
         conn.execute("ALTER TABLE customers ADD COLUMN do_not_contact INTEGER DEFAULT 0")
+    # "Update your payment method" message tracking (status 'התקבל חידוש - כ.א לא תקין'),
+    # per channel so email still goes out when WhatsApp is held/down.
+    if 'card_update_wa_at' not in _ccols:
+        conn.execute("ALTER TABLE customers ADD COLUMN card_update_wa_at TEXT")
+    if 'card_update_email_at' not in _ccols:
+        conn.execute("ALTER TABLE customers ADD COLUMN card_update_email_at TEXT")
     conn.commit()
 
     # Default admin
@@ -2082,6 +2089,10 @@ def update_customer(cid):
         if data.get('status') in ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק'):
             _sync_customer_to_insured(conn, cid, active=True)
             _resolve_form_queue(conn, (crow['id_number'] if crow else '') or data.get('id_number', ''), escalations=True)
+        # Entering the "bad payment method" state clears the send-markers, so the
+        # "update your card" message goes out fresh — including on a second collection problem.
+        if status_changed and data.get('status') == CARD_UPDATE_STATUS:
+            conn.execute("UPDATE customers SET card_update_wa_at=NULL, card_update_email_at=NULL WHERE id=?", (cid,))
     # Write the audit trail for any audited field that actually changed.
     if before:
         now_s = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -3785,6 +3796,9 @@ CAMPAIGN_STOP_STATUSES = {
     # Renewal in progress but stuck on a collection/billing problem — already being handled,
     # so no "please renew" reminder.
     'חידוש בעיות גביה',
+    # Form received but the payment method was invalid — the customer is already getting the
+    # dedicated "update your card" message, so keep the renewal reminder off.
+    'התקבל חידוש - כ.א לא תקין',
 }
 
 CAMPAIGN_CROSS_SELL = """
@@ -4591,6 +4605,73 @@ def wa_sent():
         idkey = event_key(r['id_number'], 'cust-%d' % cid)
         log_event(conn, idkey, f"נשלחה הודעת וואטסאפ ({data.get('brand', '')})",
                   'וואטסאפ אוטומטי', kind='whatsapp_sent')
+        conn.commit()
+    conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/card-update/queue')
+def card_update_queue():
+    """Customers marked 'התקבל חידוש - כ.א לא תקין' who still need the "update your payment
+    method" message on WhatsApp and/or email, for the given brand (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', '')  # 'gaia' | 'winner'
+    if brand not in ('gaia', 'winner'):
+        return jsonify({'error': 'bad brand'}), 400
+    he = 'גאיה' if brand == 'gaia' else 'ווינר'
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM customers WHERE status=? AND brand=? "
+        "AND COALESCE(import_source,'')!='test_ofir' ORDER BY month_id DESC, id DESC",
+        (CARD_UPDATE_STATUS, he)).fetchall()
+    items, seen = [], set()
+    for r in rows:
+        key = (normalize_id_number(r['id_number']) or '').lstrip('0')
+        if key and key in seen:
+            continue          # one message per person even if the ת"ז repeats across months
+        if key:
+            seen.add(key)
+        wa_pending = not (r['card_update_wa_at'] or '')
+        em_pending = not (r['card_update_email_at'] or '')
+        if not (wa_pending or em_pending):
+            continue
+        phone = _policy_to972(r['phone'])
+        email = (r['email'] or '').strip() or (_campaign_email_for(conn, r) or '')
+        has_email = bool(email and '@' in email)
+        items.append({
+            'id': r['id'],
+            'name': r['name'],
+            'brand': brand,
+            'phone': phone,
+            'email': email if has_email else '',
+            'whatsapp_pending': wa_pending,
+            'email_pending': em_pending and has_email,
+            'wa_text': card_update_wa_text(r['name'], brand),
+            'email_subject': CARD_UPDATE_EMAIL_SUBJECT,
+            'email_body': card_update_email_body(r['name'], brand),
+            'email_html': card_update_email_html(r['name'], brand),
+        })
+    conn.close()
+    return jsonify({'brand': brand, 'count': len(items), 'items': items})
+
+@app.route('/api/card-update/sent', methods=['POST'])
+def card_update_mark_sent():
+    """Mark the payment-method message as sent on a channel + log it (token-authed)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data = request.get_json(silent=True) or {}
+    cid, channel = data.get('id'), data.get('channel')
+    if not cid or channel not in ('whatsapp', 'email'):
+        return jsonify({'error': 'need id + channel'}), 400
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    col = 'card_update_wa_at' if channel == 'whatsapp' else 'card_update_email_at'
+    conn = get_db()
+    r = conn.execute("SELECT id_number FROM customers WHERE id=?", (cid,)).fetchone()
+    if r:
+        conn.execute(f"UPDATE customers SET {col}=? WHERE id=?", (now, cid))
+        ch = 'וואטסאפ' if channel == 'whatsapp' else 'מייל'
+        idkey = event_key(r['id_number'], 'cust-%d' % cid)
+        log_event(conn, idkey, f"נשלחה הודעת עדכון אמצעי גביה ({ch})", 'system', kind='card_update_send')
         conn.commit()
     conn.close()
     return jsonify({'ok': True})
@@ -5814,6 +5895,50 @@ def new_policy_email_html(name):
         'אז אפשר להעביר אותה ישירות לרואה החשבון.<br>'
         'אני זמין באופן אישי לכל שאלה או בקשה — בטלפון או בוואטסאפ.<br><br>'
         f'{POLICY_OPTIN}<br><br>'
+        '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
+        '</div>')
+
+# ── "Update your payment method" message (status 'התקבל חידוש - כ.א לא תקין') ──
+# A renewal form arrived but the card was wrong / blocked / stolen, so the policy can't be
+# issued. The customer gets a brand-specific link to fix their payment details; once corrected
+# the form is re-received ('טופס התקבל') and the renewal completes ('חודש').
+CARD_UPDATE_STATUS = 'התקבל חידוש - כ.א לא תקין'
+CARD_UPDATE_LINKS = {
+    'gaia':   'https://www.gaia-ins.co.il/card-update',
+    'winner': 'https://www.winner-ins.co.il/card-update',
+}
+CARD_UPDATE_EMAIL_SUBJECT = "עדכון אמצעי גביה — הפוליסה שלך"
+
+def card_update_wa_text(name, brand_key):
+    greet = f"שלום {name}," if name else "שלום,"
+    link = CARD_UPDATE_LINKS.get(brand_key, '')
+    return (f"{greet}\n\n"
+            "הטופס התקבל אך אמצעי הגביה אינו תקין.\n"
+            "יש לעדכן גביה בקישור הבא:\n"
+            f"{link}\n\n"
+            "לאחר העדכון הפוליסה תופק ותשלח אליך בהקדם.")
+
+def card_update_email_body(name, brand_key):
+    greet = f"שלום {name}," if name else "שלום,"
+    link = CARD_UPDATE_LINKS.get(brand_key, '')
+    return (f"{greet}\n\n"
+            "הטופס התקבל אך אמצעי הגביה אינו תקין.\n"
+            "יש לעדכן גביה בקישור הבא:\n"
+            f"{link}\n\n"
+            "לאחר העדכון הפוליסה תופק ותשלח אליך בהקדם.\n\n"
+            f"{POLICY_EMAIL_SIGN}")
+
+def card_update_email_html(name, brand_key):
+    greet = f"שלום {name}," if name else "שלום,"
+    link = CARD_UPDATE_LINKS.get(brand_key, '')
+    return (
+        '<div dir="rtl" style="text-align:right;font-family:Arial,Helvetica,sans-serif;'
+        'font-size:15px;line-height:1.6;color:#222;">'
+        f'{greet}<br><br>'
+        'הטופס התקבל אך אמצעי הגביה אינו תקין.<br>'
+        'יש לעדכן גביה בקישור הבא:<br>'
+        f'<a href="{link}">{link}</a><br><br>'
+        'לאחר העדכון הפוליסה תופק ותשלח אליך בהקדם.<br><br>'
         '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
         '</div>')
 
