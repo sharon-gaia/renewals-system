@@ -4589,6 +4589,41 @@ def wa_queue():
     conn.close()
     return jsonify({'brand': brand, 'count': len(items), 'items': items})
 
+@app.route('/api/wa/template-queue')
+def wa_template_queue():
+    """Eligible renewal-campaign customers for the OFFICIAL Cloud API template `renewal_reminder`.
+    Returns the 4 body params per customer (name, month, price, link) so the sender doesn't have
+    to replicate the price/link logic. Same eligibility as /api/wa/queue (skips anyone already
+    messaged this month). Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', '')
+    if brand not in ('גאיה', 'ווינר'):
+        return jsonify({'error': 'bad brand'}), 400
+    month = active_month()
+    if not month:
+        return jsonify({'brand': brand, 'count': 0, 'items': []})
+    conn = get_db()
+    buckets = campaign_eligibility(conn, month['id'])
+    month_name = HEB_MONTHS[datetime.datetime.now().month]
+    items = []
+    for r in buckets['whatsapp']:
+        if r['brand'] != brand or (r['whatsapp_sent_date'] or '').strip():
+            continue
+        phone = re.sub(r'\D', '', str(r['phone'] or ''))
+        if phone.startswith('0'):
+            phone = '972' + phone[1:]
+        elif not phone.startswith('972'):
+            phone = '972' + phone
+        amt = renewal_amount(r['is_midwife'], r['premium_last_year'])
+        price = f"{(amt or 750):,} ₪"          # None (endorsement/no-data) → 750 per Sharon's rule
+        link, _ = renewal_link(r['brand'], r['is_midwife'])
+        # Template body params can't hold newlines/tabs — name/month/price/link are all safe.
+        items.append({'id': r['id'], 'name': r['name'], 'phone': phone,
+                      'params': [str(r['name'] or '').strip(), month_name, price, link]})
+    conn.close()
+    return jsonify({'brand': brand, 'count': len(items), 'items': items})
+
 @app.route('/api/wa/sent', methods=['POST'])
 def wa_sent():
     """Mark a WhatsApp message as sent + log it to the client timeline (token-authed)."""
