@@ -3866,17 +3866,26 @@ def _campaign_email_for(conn, cust, _ins_email=None):
                      "AND COALESCE(email,'') LIKE '%@%' LIMIT 1", (idn,)).fetchone()
     return (r['email'].strip() if r and r['email'] else '')
 
+# A new-business policy received within this many days marks the customer as a current-cycle
+# NEW customer → excluded from the renewal campaign (see campaign_eligibility).
+NEW_BIZ_EXCLUDE_DAYS = 90
+
 def campaign_eligibility(conn, month_id):
     """Bucket the active month's customers. Auto-send targets Gaia/Winner, non-midwife,
     non-VIP, no stop-status. Midwives wait for manual approval; VIPs/stop-statuses excluded."""
     ins_email = {re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0'): (r['email'] or '').strip()
                  for r in conn.execute("SELECT id_number, email FROM insureds")}
-    # ת"ז that have a NEW-business policy on file → they are NEW customers, never renewals, so
-    # they must NEVER get a renewal reminder — regardless of their (possibly stale/empty) status.
-    # Belt-and-suspenders beyond the 'הופק' status, which _ensure_new_customer only sets when the
-    # prior record was 'ממתין להפקה' (so an empty-status renewal-list row slipped through).
+    # ת"ז that bought a NEW-business policy THIS CYCLE (doc received in the last 90 days) → they
+    # are new customers now, not renewals, so they must NEVER get a renewal reminder — regardless
+    # of a stale/empty status. Time-bounded so a customer who bought new in a PRIOR cycle and is
+    # legitimately renewing now is NOT wrongly excluded (Sharon's choice: option ב).
+    nb_cutoff = (datetime.datetime.now() - datetime.timedelta(days=NEW_BIZ_EXCLUDE_DAYS)
+                 ).strftime('%Y-%m-%d %H:%M')
     new_biz_ids = set()
-    for pr in conn.execute("SELECT insured_id, doc_type_label FROM policy_records").fetchall():
+    for pr in conn.execute(
+            "SELECT pr.insured_id, pr.doc_type_label FROM policy_records pr "
+            "JOIN policy_documents pd ON pd.id = pr.policy_document_id "
+            "WHERE pd.received_at >= ?", (nb_cutoff,)).fetchall():
         if is_new_doc(pr['doc_type_label']):
             k = re.sub(r'\D', '', str(pr['insured_id'] or '')).lstrip('0')
             if k:
