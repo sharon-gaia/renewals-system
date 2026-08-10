@@ -4589,6 +4589,28 @@ def wa_queue():
     conn.close()
     return jsonify({'brand': brand, 'count': len(items), 'items': items})
 
+@app.route('/api/policy/debug')
+def api_policy_debug():
+    """Read-only: for a ת"ז, list its policy_documents (+ sent timestamps) and all policy_send
+    log events — to diagnose duplicate deliveries (multiple docs vs a re-send). Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    idn = re.sub(r'\D', '', request.args.get('id', '')).lstrip('0')
+    if not idn:
+        return jsonify({'error': 'need id'}), 400
+    conn = get_db()
+    docs = [dict(r) for r in conn.execute(
+        "SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at, "
+        "pd.policy_number, pr.doc_type_label, pr.insured_name "
+        "FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id=pd.id "
+        "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? ORDER BY pd.received_at DESC", (idn,)).fetchall()]
+    events = [dict(r) for r in conn.execute(
+        "SELECT created_at, note, created_by FROM client_events "
+        "WHERE idkey=? AND kind='policy_send' ORDER BY id DESC", (idn,)).fetchall()]
+    conn.close()
+    return jsonify({'idn': idn, 'doc_count': len(docs), 'docs': docs,
+                    'policy_send_events': events, 'send_event_count': len(events)})
+
 @app.route('/api/wa/template-queue')
 def wa_template_queue():
     """Eligible renewal-campaign customers for the OFFICIAL Cloud API template `renewal_reminder`.
