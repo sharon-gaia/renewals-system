@@ -3871,9 +3871,19 @@ def campaign_eligibility(conn, month_id):
     non-VIP, no stop-status. Midwives wait for manual approval; VIPs/stop-statuses excluded."""
     ins_email = {re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0'): (r['email'] or '').strip()
                  for r in conn.execute("SELECT id_number, email FROM insureds")}
+    # ת"ז that have a NEW-business policy on file → they are NEW customers, never renewals, so
+    # they must NEVER get a renewal reminder — regardless of their (possibly stale/empty) status.
+    # Belt-and-suspenders beyond the 'הופק' status, which _ensure_new_customer only sets when the
+    # prior record was 'ממתין להפקה' (so an empty-status renewal-list row slipped through).
+    new_biz_ids = set()
+    for pr in conn.execute("SELECT insured_id, doc_type_label FROM policy_records").fetchall():
+        if is_new_doc(pr['doc_type_label']):
+            k = re.sub(r'\D', '', str(pr['insured_id'] or '')).lstrip('0')
+            if k:
+                new_biz_ids.add(k)
     rows = conn.execute("SELECT * FROM customers WHERE month_id=?", (month_id,)).fetchall()
     b = {'email': [], 'whatsapp': [], 'midwife_pending': [], 'vip': [],
-         'status_excluded': [], 'no_contact': [], 'ofir': []}
+         'status_excluded': [], 'no_contact': [], 'ofir': [], 'new_biz': []}
     for r in rows:
         if r['brand'] not in ('גאיה', 'ווינר'):
             b['ofir'].append(r); continue
@@ -3881,6 +3891,9 @@ def campaign_eligibility(conn, month_id):
             b['midwife_pending'].append(r); continue
         if r['is_vip']:
             b['vip'].append(r); continue
+        idk = re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0')
+        if idk and idk in new_biz_ids:
+            b['new_biz'].append(r); continue
         if (r['status'] or '') in CAMPAIGN_STOP_STATUSES or \
            ('do_not_contact' in r.keys() and r['do_not_contact']):
             b['status_excluded'].append(r); continue
@@ -4610,6 +4623,25 @@ def api_policy_debug():
     conn.close()
     return jsonify({'idn': idn, 'doc_count': len(docs), 'docs': docs,
                     'policy_send_events': events, 'send_event_count': len(events)})
+
+@app.route('/api/campaign/new-biz-check')
+def api_campaign_new_biz_check():
+    """How many active-month customers are now excluded from the renewal campaign because they
+    have a NEW-business policy on file, and how many of them ALREADY got a reminder (the wrong
+    sends). Token-authed, read-only."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'new_biz_total': 0, 'already_messaged': 0, 'list': []})
+    conn = get_db()
+    nb = campaign_eligibility(conn, month['id'])['new_biz']
+    already = [{'id': r['id'], 'name': r['name'], 'brand': r['brand'], 'status': r['status'],
+                'wa_sent': r['whatsapp_sent_date'], 'email_sent': r['email_sent_date']}
+               for r in nb
+               if (r['whatsapp_sent_date'] or '').strip() or (r['email_sent_date'] or '').strip()]
+    conn.close()
+    return jsonify({'new_biz_total': len(nb), 'already_messaged': len(already), 'list': already})
 
 @app.route('/api/wa/template-queue')
 def wa_template_queue():
