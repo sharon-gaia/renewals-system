@@ -4671,9 +4671,16 @@ def card_update_status_check():
         "SELECT id, name, brand, status FROM customers "
         "WHERE status LIKE '%חידוש%' AND status<>? AND status<>'חידוש בעיות גביה' "
         "ORDER BY status", (CARD_UPDATE_STATUS,)).fetchall()]
+    # Optional ?q= name search — show a specific customer's ACTUAL stored status/brand.
+    by_name = []
+    q = (request.args.get('q') or '').strip()
+    if q:
+        by_name = [dict(r) for r in conn.execute(
+            "SELECT id, name, brand, status, month_id, card_update_wa_at, card_update_email_at "
+            "FROM customers WHERE name LIKE ? ORDER BY id DESC LIMIT 30", ('%' + q + '%',)).fetchall()]
     conn.close()
     return jsonify({'target_status': CARD_UPDATE_STATUS, 'exact_count': len(exact),
-                    'exact': exact, 'other_חידוש_statuses': fuzzy})
+                    'exact': exact, 'other_חידוש_statuses': fuzzy, 'by_name': by_name})
 
 @app.route('/api/card-update/sent', methods=['POST'])
 def card_update_mark_sent():
