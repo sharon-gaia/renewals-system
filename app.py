@@ -4654,6 +4654,27 @@ def card_update_queue():
     conn.close()
     return jsonify({'brand': brand, 'count': len(items), 'items': items})
 
+@app.route('/api/card-update/status-check')
+def card_update_status_check():
+    """Read-only diagnostic: every customer in the card-update status (ANY brand/month) with
+    their brand + per-channel sent markers — to see who's marked and who still needs sending.
+    Also returns a fuzzy list of anyone whose status merely CONTAINS 'חידוש' + 'גבי', to catch a
+    near-miss status string. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    exact = [dict(r) for r in conn.execute(
+        "SELECT id, name, brand, status, month_id, phone, email, "
+        "card_update_wa_at, card_update_email_at, import_source "
+        "FROM customers WHERE status=? ORDER BY brand, id", (CARD_UPDATE_STATUS,)).fetchall()]
+    fuzzy = [dict(r) for r in conn.execute(
+        "SELECT id, name, brand, status FROM customers "
+        "WHERE status LIKE '%חידוש%' AND status<>? AND status<>'חידוש בעיות גביה' "
+        "ORDER BY status", (CARD_UPDATE_STATUS,)).fetchall()]
+    conn.close()
+    return jsonify({'target_status': CARD_UPDATE_STATUS, 'exact_count': len(exact),
+                    'exact': exact, 'other_חידוש_statuses': fuzzy})
+
 @app.route('/api/card-update/sent', methods=['POST'])
 def card_update_mark_sent():
     """Mark the payment-method message as sent on a channel + log it (token-authed)."""
