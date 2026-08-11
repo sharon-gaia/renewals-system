@@ -110,7 +110,7 @@
         <option value="{{ val }}" {% if (c.status or '') == val %}selected{% endif %}>{{ label }}</option>
         {% endfor %}
       </select>
-      {% if c.status == 'טופס התקבל' and (c.form_email or c.form_installments or c.form_payment_method) %}
+      {% if c.status in ['טופס התקבל', 'דורש בירור'] and (c.form_email or c.form_installments or c.form_payment_method or c.lead_doc_path) %}
       <div class="mt-1 p-1 rounded small" style="background:#cff4fc; font-size:0.78rem; line-height:1.5;">
         {% if c.form_received_at %}<div><strong>התקבל:</strong> {{ c.form_received_at }}</div>{% endif %}
         {% if c.form_email %}<div><strong>מייל:</strong> {{ c.form_email }}</div>{% endif %}
@@ -118,6 +118,7 @@
         {% if c.form_payment_method %}<div><strong>גבייה:</strong> {{ c.form_payment_method }}</div>{% endif %}
         {% if c.form_coverage %}<div><strong>כיסוי:</strong> {{ c.form_coverage }}</div>{% endif %}
         {% if c.form_comments %}<div><strong>הערות:</strong> {{ c.form_comments }}</div>{% endif %}
+        {% if c.lead_doc_path %}<div class="mt-1"><a href="/lead-doc/{{ c.id }}" target="_blank"><i class="bi bi-paperclip me-1"></i>צפה במסמך מצורף</a></div>{% endif %}
       </div>
       {% endif %}
       {% if c.status == 'ממתין להפקה' %}

@@ -80,6 +80,14 @@
           {% if item.comments %}
           <div class="alert alert-warning py-1 px-2 mt-2 small">{{ item.comments }}</div>
           {% endif %}
+          {% if item.doc_cid %}
+          <div class="mt-2">
+            <a href="/lead-doc/{{ item.doc_cid }}" target="_blank" class="btn btn-outline-primary btn-sm py-0">
+              <i class="bi bi-paperclip me-1"></i>צפה במסמך מצורף
+            </a>
+            <span class="text-muted small ms-1">({{ item.doc_name }} ב-OneDrive)</span>
+          </div>
+          {% endif %}
         </div>
 
         <!-- פעולות -->

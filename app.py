@@ -2268,8 +2268,42 @@ def admin_queue():
             "AND (assigned_to=? OR (assigned_to IS NULL" + bc + ")) ORDER BY received_at DESC",
             [session.get('user_id')] + bp
         ).fetchall()
+    # For items escalated from a customer (message_id 'queue-cid-<id>'), attach the linked
+    # customer's uploaded document (if any) so the queue can offer a "view document" link.
+    out = []
+    for r in items:
+        d = dict(r)
+        mid = d.get('message_id') or ''
+        if mid.startswith('queue-cid-'):
+            try:
+                ccid = int(mid.replace('queue-cid-', ''))
+                c = conn.execute("SELECT id_number, lead_doc_path FROM customers WHERE id=?", (ccid,)).fetchone()
+                if c and (c['lead_doc_path'] or '').strip():
+                    d['doc_cid'] = ccid
+                    d['doc_name'] = 'מסמך ' + (normalize_id_number(c['id_number']) or str(c['id_number'] or ''))
+            except (ValueError, TypeError):
+                pass
+        out.append(d)
     conn.close()
-    return render_template('admin_queue.html', items=items)
+    return render_template('admin_queue.html', items=out)
+
+@app.route('/lead-doc/<int:cid>')
+@login_required
+def lead_doc_view(cid):
+    """View a customer's uploaded website-form document (session-authed, for the admin queue /
+    customers list). The file sits on the ephemeral server; if it's been cleaned up on a redeploy,
+    the permanent copy is on OneDrive as 'מסמך <ת"ז>'."""
+    conn = get_db()
+    r = conn.execute("SELECT id_number, lead_doc_path FROM customers WHERE id=?", (cid,)).fetchone()
+    conn.close()
+    if not r or not (r['lead_doc_path'] or '').strip():
+        return "אין מסמך מצורף ללקוח זה.", 404
+    if not os.path.exists(r['lead_doc_path']):
+        idn = normalize_id_number(r['id_number']) or (r['id_number'] or '')
+        return ("<div dir='rtl' style='font-family:sans-serif;padding:28px;font-size:16px'>"
+                "הקובץ כבר לא בשרת (אחסון זמני). העותק הקבוע שמור ב-OneDrive בשם "
+                f"<b>מסמך {idn}</b>.</div>"), 404
+    return send_file(r['lead_doc_path'], download_name=os.path.basename(r['lead_doc_path']))
 
 def guess_category(subject, source):
     """Rough auto-tag for the 'other forms' catch-all — a hint, not a strict classifier."""
