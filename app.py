@@ -911,6 +911,8 @@ def init_db():
         conn.execute("ALTER TABLE customers ADD COLUMN card_update_wa_at TEXT")
     if 'card_update_email_at' not in _ccols:
         conn.execute("ALTER TABLE customers ADD COLUMN card_update_email_at TEXT")
+    # Simple key/value store — used for the email-scanner heartbeat ('last_scan_at').
+    conn.execute("CREATE TABLE IF NOT EXISTS app_kv (k TEXT PRIMARY KEY, v TEXT)")
     conn.commit()
 
     # Default admin
@@ -1429,7 +1431,7 @@ def api_scan_email_replies():
     senders = set()
     cfg = EMAIL_CONFIG
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
@@ -1475,7 +1477,7 @@ def api_scan_bounces():
     cfg = EMAIL_CONFIG
     bounced = set()
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
@@ -1521,7 +1523,7 @@ def api_inbox_forms():
     cfg = EMAIL_CONFIG
     out = []
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
@@ -4878,9 +4880,20 @@ def api_scan_health():
         'last_join_lead': one("SELECT MAX(form_received_at) FROM customers WHERE import_source='join_form'"),
         'join_leads_7d': one("SELECT COUNT(*) FROM customers WHERE import_source='join_form' AND form_received_at >= ?", d7d),
     }
+    # Scanner heartbeat: when did a scan last COMPLETE. scan_age_minutes is computed server-side
+    # (avoids client timezone issues) — the watchdog uses it to detect a stalled scanner.
+    row = conn.execute("SELECT v FROM app_kv WHERE k='last_scan_at'").fetchone()
+    out['last_scan_at'] = row['v'] if row else None
+    out['scan_age_minutes'] = None
+    if out['last_scan_at']:
+        try:
+            last = datetime.datetime.strptime(out['last_scan_at'][:19], '%Y-%m-%d %H:%M:%S')
+            out['scan_age_minutes'] = int((now - last).total_seconds() // 60)
+        except Exception:
+            pass
     conn.close()
     try:
-        m = imaplib.IMAP4_SSL(EMAIL_CONFIG['imap_server'], EMAIL_CONFIG['imap_port'])
+        m = imaplib.IMAP4_SSL(EMAIL_CONFIG['imap_server'], EMAIL_CONFIG['imap_port'], timeout=30)
         m.login(EMAIL_CONFIG['username'], EMAIL_CONFIG['password'])
         m.select('INBOX')
         m.logout()
@@ -5057,7 +5070,7 @@ def backfill_site123(days_back=400, limit=None):
            'emails_updated': 0, 'phones_updated': 0, 'unmatched': 0}
     if not cfg['username'] or not cfg['password']:
         return rep
-    mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+    mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
     mail.login(cfg['username'], cfg['password'])
     mail.select('"[Gmail]/All Mail"', readonly=True)
     since = (_dt.datetime.now() - _dt.timedelta(days=days_back)).strftime('%d-%b-%Y')
@@ -5309,7 +5322,7 @@ def api_policy_inbox_search():
     out = {'query': q, 'matches': [], 'recent_composedoc': []}
     try:
         import imaplib, email as _email
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=14)).strftime('%d-%b-%Y')
@@ -5345,7 +5358,7 @@ def api_policy_inspect_email():
     out = {'emails': []}
     try:
         import imaplib, email as _email
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
@@ -5386,7 +5399,7 @@ def api_policy_pdf_text():
     out = {'q': q, 'found': False}
     try:
         import imaplib, email as _email
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
@@ -5874,7 +5887,18 @@ def check_email_inbox():
         print('[email-sync] בדיקה כבר רצה — דילוג')
         return 0
     try:
-        return _check_email_inbox_impl()
+        n = _check_email_inbox_impl()
+        # Heartbeat: record that a scan actually COMPLETED (a hung scan never reaches here, so
+        # last_scan_at goes stale → the watchdog detects it). Best-effort.
+        try:
+            hb = get_db()
+            hb.execute("INSERT INTO app_kv(k,v) VALUES('last_scan_at',?) "
+                       "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                       (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),))
+            hb.commit(); hb.close()
+        except Exception:
+            pass
+        return n
     finally:
         _email_check_lock.release()
 
@@ -5885,7 +5909,7 @@ def _check_email_inbox_impl():
 
     processed = 0
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
 
@@ -6298,7 +6322,7 @@ def _label_email(message_id, label=POLICY_SENT_LABEL, archive=True):
         return False
     ok = False
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         typ, data = mail.search(None, 'HEADER', 'Message-ID', f'"{message_id.strip()}"')
@@ -6368,7 +6392,7 @@ def label_sent_policy_emails(limit=None):
             conn.close(); return {'processed': 0, 'found': 0, 'not_found': 0, 'misses': []}
         label = '"' + _imap_utf7(GMAIL_SENT_LABEL) + '"'
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         allbox = None                                    # find the \All (All Mail) folder
         try:
@@ -6468,7 +6492,7 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
     from email.utils import parsedate_to_datetime
     processed = 0
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
 
@@ -6712,7 +6736,7 @@ def api_lead_debug():
     days = int(request.args.get('days', 3))
     cfg = EMAIL_CONFIG
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
@@ -6751,7 +6775,7 @@ def api_stuck_leads():
     cfg = EMAIL_CONFIG
     stuck, ok = [], 0
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
@@ -6828,7 +6852,7 @@ def _check_join_forms_impl(days_back=14):
     from email.utils import parsedate_to_datetime
     processed = 0
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
@@ -6946,7 +6970,7 @@ def _check_renewal_forms_impl(days_back=14):
     from email.utils import parsedate_to_datetime
     processed = unmatched = 0
     try:
-        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'])
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
