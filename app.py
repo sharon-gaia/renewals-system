@@ -4801,6 +4801,28 @@ def card_update_mark_sent():
     conn.close()
     return jsonify({'ok': True})
 
+@app.route('/api/form-debug')
+def api_form_debug():
+    """Read-only: a ת"ז's website-form fields on the customer record + any admin-queue
+    (unmatched_submissions) row — to see why form details do/don't show. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    idn = re.sub(r'\D', '', request.args.get('id', '')).lstrip('0')
+    if not idn:
+        return jsonify({'error': 'need id'}), 400
+    conn = get_db()
+    cust = [dict(r) for r in conn.execute(
+        "SELECT id, name, brand, status, form_received_at, form_email, form_installments, "
+        "form_payment_method, form_coverage, form_comments, "
+        "CASE WHEN COALESCE(form_card_number,'')!='' THEN 'yes' ELSE 'no' END AS has_card "
+        "FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? ORDER BY id DESC", (idn,)).fetchall()]
+    subs = [dict(r) for r in conn.execute(
+        "SELECT id, status, message_id, name, installments, payment_method, coverage, email, comments, "
+        "CASE WHEN COALESCE(card_number,'')!='' THEN 'yes' ELSE 'no' END AS has_card "
+        "FROM unmatched_submissions WHERE ltrim(COALESCE(id_number,''),'0')=? ORDER BY id DESC", (idn,)).fetchall()]
+    conn.close()
+    return jsonify({'idn': idn, 'customers': cust, 'submissions': subs})
+
 @app.route('/api/scan-health')
 def api_scan_health():
     """Read-only health of the email scanner (the Railway worker): recency of policy documents
