@@ -4801,6 +4801,39 @@ def card_update_mark_sent():
     conn.close()
     return jsonify({'ok': True})
 
+@app.route('/api/scan-health')
+def api_scan_health():
+    """Read-only health of the email scanner (the Railway worker): recency of policy documents
+    (הפקות/חידושים from Harel/Ofir mail) and website join-form leads, plus a live IMAP connect
+    test with the same creds the worker uses. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    now = datetime.datetime.now()
+    h24 = (now - datetime.timedelta(hours=24)).strftime('%Y-%m-%d %H:%M')
+    d7 = (now - datetime.timedelta(days=7)).strftime('%Y-%m-%d %H:%M')
+    d7d = (now - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
+    conn = get_db()
+    one = lambda sql, *a: conn.execute(sql, a).fetchone()[0]
+    out = {
+        'now': now.strftime('%Y-%m-%d %H:%M'),
+        'last_policy_doc': one("SELECT MAX(received_at) FROM policy_documents"),
+        'policy_docs_24h': one("SELECT COUNT(*) FROM policy_documents WHERE received_at >= ?", h24),
+        'policy_docs_7d': one("SELECT COUNT(*) FROM policy_documents WHERE received_at >= ?", d7),
+        'last_join_lead': one("SELECT MAX(form_received_at) FROM customers WHERE import_source='join_form'"),
+        'join_leads_7d': one("SELECT COUNT(*) FROM customers WHERE import_source='join_form' AND form_received_at >= ?", d7d),
+    }
+    conn.close()
+    try:
+        m = imaplib.IMAP4_SSL(EMAIL_CONFIG['imap_server'], EMAIL_CONFIG['imap_port'])
+        m.login(EMAIL_CONFIG['username'], EMAIL_CONFIG['password'])
+        m.select('INBOX')
+        m.logout()
+        out['imap_ok'] = True
+    except Exception as e:
+        out['imap_ok'] = False
+        out['imap_err'] = str(e)[:160]
+    return jsonify(out)
+
 @app.route('/api/backup-db')
 def backup_db():
     """Download the live DB for an off-site backup (token-authed)."""
