@@ -3947,8 +3947,8 @@ def render_renewal_email(cust, month_name):
             f'<p><a href="{link}" style="background:#0d6efd;color:#fff;padding:10px 22px;'
             f'border-radius:6px;text-decoration:none;display:inline-block">{label}</a></p>'
             f'<p>נשמח להמשיך ולהעניק לך את השירות והליווי המקצועי.</p>'
-            + (f'<p style="color:#555;margin-top:16px">—<br>שרון דר<br>'
-               f'מנהל מכירות אחריות מקצועית<br>{_html.escape(_agency_name(cust["brand"]))}</p>')
+            + ('<p style="color:#555;margin-top:16px">—<br>שרון דר,<br>'
+               'מנהל תחום אחריות מקצועית</p>')
             + (f'<p style="margin-top:14px;padding-top:10px;border-top:1px solid #eee;'
                f'color:#555;font-size:14px">{_html.escape(WINNER_EMAIL_UPDATE)}</p>'
                if cust['brand'] == 'ווינר' else '')
@@ -4018,7 +4018,7 @@ def render_renewal_whatsapp(cust, month_name):
             f"הפוליסה המקצועית שלך מסתיימת בסוף חודש {month_name}.\n"
             f"{price}\n\n"
             f"לחידוש הפוליסה וצפייה בתנאים העדכניים (שלא השתנו):\n{link}\n\n"
-            f"—\nשרון דר\nמנהל מכירות אחריות מקצועית\n{_agency_name(cust['brand'])}"
+            f"—\nשרון דר,\nמנהל תחום אחריות מקצועית"
             f"{winner_upd}")
 
 def _wa_api_authed():
