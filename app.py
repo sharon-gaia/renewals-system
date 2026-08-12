@@ -17,6 +17,12 @@ from openpyxl import load_workbook
 from openpyxl import Workbook as NewWorkbook
 import datetime
 import imaplib
+import socket
+# Global network backstop: no socket recv (IMAP fetch/search, HTTP) can block longer than this.
+# Applies per-recv, so legitimate streaming transfers are unaffected — only a genuinely stuck
+# read is cut. This is what actually kills the ~20-min OS-TCP-timeout hangs that stalled the
+# scanner (imaplib's own timeout param didn't cover fetch reliably). Set BEFORE any socket opens.
+socket.setdefaulttimeout(60)
 import email as email_lib
 from email.header import decode_header
 import threading
