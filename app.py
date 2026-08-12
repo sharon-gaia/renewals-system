@@ -4436,7 +4436,10 @@ def _policy_queue_items(conn, brand_key):
     # from a previous month still gets their policy — the ±48h fresh-PDF window bounds it.
     # Most-recent month wins on duplicate ת"ז.
     # test_ofir rows are inert practice data — never auto-deliver a policy for them.
-    q = ("SELECT * FROM customers WHERE status IN ('חודש','חודש - בוצעה שיחת מכירה') AND brand IN (%s) "
+    # 'הופק' (issued) is treated the same as 'חודש' (renewed) for policy delivery (Sharon: they're
+    # the same in the calcs) — so a renewal PDF for an 'הופק' customer is still delivered. A NEW-doc
+    # for an 'הופק' customer is skipped here (not a renewal doc) and handled by the new-business path.
+    q = ("SELECT * FROM customers WHERE status IN ('חודש','חודש - בוצעה שיחת מכירה','הופק') AND brand IN (%s) "
          "AND COALESCE(import_source,'')!='test_ofir' ORDER BY month_id ASC, id ASC"
          % ','.join('?' * len(brands)))
     for c in conn.execute(q, brands).fetchall():
