@@ -5881,6 +5881,19 @@ def _save_attachments(msg, customer_id):
 
 _email_check_lock = threading.Lock()
 
+def touch_scan_heartbeat():
+    """Record that the scanner is alive/progressing (last_scan_at). Called after EACH scan step
+    in email_poll_thread, so a slow-but-progressing cycle stays 'fresh' and the watchdog only
+    fires on a genuine per-step stall — not on a long, healthy cycle. Best-effort."""
+    try:
+        hb = get_db()
+        hb.execute("INSERT INTO app_kv(k,v) VALUES('last_scan_at',?) "
+                   "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+                   (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),))
+        hb.commit(); hb.close()
+    except Exception:
+        pass
+
 def check_email_inbox():
     """Connect to IMAP, process renewal emails not yet seen (tracked by Message-ID in DB)."""
     if not _email_check_lock.acquire(blocking=False):
@@ -5888,16 +5901,7 @@ def check_email_inbox():
         return 0
     try:
         n = _check_email_inbox_impl()
-        # Heartbeat: record that a scan actually COMPLETED (a hung scan never reaches here, so
-        # last_scan_at goes stale → the watchdog detects it). Best-effort.
-        try:
-            hb = get_db()
-            hb.execute("INSERT INTO app_kv(k,v) VALUES('last_scan_at',?) "
-                       "ON CONFLICT(k) DO UPDATE SET v=excluded.v",
-                       (datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),))
-            hb.commit(); hb.close()
-        except Exception:
-            pass
+        touch_scan_heartbeat()
         return n
     finally:
         _email_check_lock.release()
@@ -7020,7 +7024,8 @@ def _check_renewal_forms_impl(days_back=14):
     return (processed, unmatched)
 
 def email_poll_thread():
-    """Background thread: check inbox every N seconds."""
+    """Background thread: check inbox every N seconds. A heartbeat is recorded after EACH step
+    so a long-but-progressing cycle keeps the scanner 'alive' for the watchdog."""
     while True:
         time.sleep(EMAIL_CONFIG['check_interval'])
         try:
@@ -7029,30 +7034,35 @@ def email_poll_thread():
                 print(f'[email-sync] עובדו {n} מיילים חדשים')
         except Exception as e:
             print(f'[email-sync] שגיאת thread: {e}')
+        touch_scan_heartbeat()
         try:
             n2 = check_policy_documents()
             if n2:
                 print(f'[policy-docs] עובדו {n2} פוליסות חדשות')
         except Exception as e:
             print(f'[policy-docs] שגיאת thread: {e}')
+        touch_scan_heartbeat()
         try:
             n3 = check_join_forms()
             if n3:
                 print(f'[join-forms] נקלטו {n3} טפסי הצטרפות')
         except Exception as e:
             print(f'[join-forms] שגיאת thread: {e}')
+        touch_scan_heartbeat()
         try:
             rp, ru = check_renewal_forms()
             if rp:
                 print(f'[renewal-forms] עובדו {rp} טפסי חידוש ({ru} לא תואמים)')
         except Exception as e:
             print(f'[renewal-forms] שגיאת thread: {e}')
+        touch_scan_heartbeat()
         try:
             lr = label_sent_policy_emails()
             if lr.get('found'):
                 print(f"[gmail-label] תויגו ואורכבו {lr['found']} מיילי פוליסות שנשלחו")
         except Exception as e:
             print(f'[gmail-label] שגיאת thread: {e}')
+        touch_scan_heartbeat()
 
 # ── Admin email trigger ──────────────────────────────────────
 
