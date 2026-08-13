@@ -5021,6 +5021,27 @@ def api_scan_health():
         out['imap_err'] = str(e)[:160]
     return jsonify(out)
 
+@app.route('/api/mask-existing-cards', methods=['POST'])
+def api_mask_existing_cards():
+    """One-time PCI cleanup: truncate any stored FULL card number to '****<last4>' across the
+    card columns. Values already at ≤4 digits are left as-is. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    total, by_col = 0, {}
+    for tbl, col in (('customers', 'form_card_number'), ('unmatched_submissions', 'card_number')):
+        n = 0
+        for r in conn.execute(f"SELECT id, {col} AS v FROM {tbl} WHERE COALESCE({col},'')!=''").fetchall():
+            digits = re.sub(r'\D', '', r['v'] or '')
+            if len(digits) > 4:  # a full/long card number — not already masked to the last 4
+                conn.execute(f"UPDATE {tbl} SET {col}=? WHERE id=?", ('****' + digits[-4:], r['id']))
+                n += 1
+        by_col[f'{tbl}.{col}'] = n
+        total += n
+    conn.commit()
+    conn.close()
+    return jsonify({'ok': True, 'masked': total, 'by_column': by_col})
+
 @app.route('/api/backup-db')
 def backup_db():
     """Download the live DB for an off-site backup (token-authed)."""
@@ -5882,7 +5903,9 @@ def process_renewal_data(data, message_id='', subject='', received_at=''):
     comments       = str(data.get('comments') or '').strip()
     brand          = str(data.get('brand') or '').strip()
     coverage       = str(data.get('coverage_option') or '').strip()
-    card_number    = str(data.get('card_number') or '').strip()
+    # PCI: never store the full card — keep only the last 4 (masked). Matches the join-form path.
+    _card_digits   = re.sub(r'\D', '', str(data.get('card_number') or ''))
+    card_number    = ('****' + _card_digits[-4:]) if len(_card_digits) >= 4 else ''
     card_expiry    = str(data.get('card_expiry') or '').strip()
     card_holder_id = str(data.get('card_holder_id') or '').strip()
     raw_fields     = json.dumps(data.get('all_fields') or {}, ensure_ascii=False)
