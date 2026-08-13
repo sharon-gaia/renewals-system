@@ -1953,7 +1953,7 @@ def search_customers():
         phone_like = f'%{digits}%' if digits else like
         name_cond, name_params = _name_search('c.name', search, like)
         bc, bp = brand_clause('c.brand')
-        rows = conn.execute(
+        crows = conn.execute(
             """SELECT c.*, m.name AS month_name
                FROM customers c
                LEFT JOIN months m ON m.id = c.month_id
@@ -1965,6 +1965,36 @@ def search_customers():
                ORDER BY m.id DESC, c.name""",
             name_params + [like, phone_like, like, like] + bp
         ).fetchall()
+        seen = set()
+        for r in crows:
+            d = dict(r)
+            d['link_url'] = f"/customer/{r['id']}"
+            rows.append(d)
+            z = (normalize_id_number(r['id_number']) or '').lstrip('0')
+            if z:
+                seen.add(z)
+        # ALSO search the whole-book master ('לקוחות קבוצת אופיר' / insureds) — everyone, not just
+        # this month's renewal list — so a person who isn't a current customer is still found.
+        iname_cond, iname_params = _name_search('name', search, like)
+        ibc, ibp = brand_clause('brand')
+        irows = conn.execute(
+            """SELECT * FROM insureds
+               WHERE (""" + iname_cond + """
+                  OR phone LIKE ?
+                  OR replace(replace(phone,'-',''),' ','') LIKE ?
+                  OR policy_number LIKE ?
+                  OR ltrim(id_number,'0') LIKE ?)""" + ibc + """
+               ORDER BY name""",
+            iname_params + [like, phone_like, like, like] + ibp
+        ).fetchall()
+        for r in irows:
+            z = (normalize_id_number(r['id_number']) or '').lstrip('0')
+            if z and z in seen:
+                continue  # already shown as a current customer
+            d = dict(r)
+            d['link_url'] = f"/insured/{r['id']}"
+            d['month_name'] = 'כל הלקוחות'
+            rows.append(d)
         conn.close()
     return render_template('search_results.html', customers=rows, search=search)
 
