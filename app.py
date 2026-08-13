@@ -4656,6 +4656,47 @@ def wa_queue():
     conn.close()
     return jsonify({'brand': brand, 'count': len(items), 'items': items})
 
+@app.route('/api/policy/coverage')
+def api_policy_coverage():
+    """Read-only: coverage gap for Gaia/Winner (excl. Ofir). Counts 2026 renewal/new policy
+    documents by agent-brand, the unique insureds behind them, how many have NO customer record
+    ('orphans' — a scanned policy with nobody loaded), and a sample. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    cust_ids = set(
+        r[0] for r in conn.execute(
+            "SELECT DISTINCT ltrim(COALESCE(id_number,''),'0') FROM customers "
+            "WHERE COALESCE(import_source,'')!='test_ofir'").fetchall() if r[0])
+    rows = conn.execute(
+        """SELECT pr.insured_id, pr.insured_name, pr.doc_type_label, pr.agent_number, pd.received_at
+           FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
+           WHERE pd.received_at >= '2026-01-01'
+             AND (pr.doc_type_label LIKE '%חידוש%' OR pr.doc_type_label LIKE '%חדש%')""").fetchall()
+    docs_by_brand = {}
+    gw_insureds, gw_orphan_ids = set(), set()
+    orphans = []
+    for r in rows:
+        ag = re.sub(r'\D', '', str(r['agent_number'] or ''))
+        brand = NEW_AGENT_BRAND.get(ag, '(לא ידוע)')
+        docs_by_brand[brand] = docs_by_brand.get(brand, 0) + 1
+        if brand in ('גאיה', 'ווינר'):
+            idn = (normalize_id_number(r['insured_id']) or '').lstrip('0')
+            if not idn:
+                continue
+            gw_insureds.add(idn)
+            if idn not in cust_ids and idn not in gw_orphan_ids:
+                gw_orphan_ids.add(idn)
+                orphans.append({'idn': r['insured_id'], 'name': r['insured_name'],
+                                'type': r['doc_type_label'], 'brand': brand, 'recv': r['received_at']})
+    orphans.sort(key=lambda o: o['recv'] or '', reverse=True)
+    return jsonify({
+        'docs_2026_by_brand': docs_by_brand,
+        'gaia_winner_unique_insureds_2026': len(gw_insureds),
+        'gaia_winner_orphans_no_customer': len(gw_orphan_ids),
+        'orphan_sample': orphans[:40],
+    })
+
 @app.route('/api/policy/debug')
 def api_policy_debug():
     """Read-only: for a ת"ז, list its policy_documents (+ sent timestamps) and all policy_send
