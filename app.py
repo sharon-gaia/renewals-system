@@ -4663,6 +4663,7 @@ def api_policy_coverage():
     ('orphans' — a scanned policy with nobody loaded), and a sample. Token-authed."""
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
+    since = request.args.get('since', '2025-09-01')  # policy year = Sept 2025 → today
     conn = get_db()
     cust_ids = set(
         r[0] for r in conn.execute(
@@ -4671,8 +4672,8 @@ def api_policy_coverage():
     rows = conn.execute(
         """SELECT pr.insured_id, pr.insured_name, pr.doc_type_label, pr.agent_number, pd.received_at
            FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
-           WHERE pd.received_at >= '2026-01-01'
-             AND (pr.doc_type_label LIKE '%חידוש%' OR pr.doc_type_label LIKE '%חדש%')""").fetchall()
+           WHERE pd.received_at >= ?
+             AND (pr.doc_type_label LIKE '%חידוש%' OR pr.doc_type_label LIKE '%חדש%')""", (since,)).fetchall()
     docs_by_brand = {}
     gw_insureds, gw_orphan_ids = set(), set()
     orphans = []
@@ -4691,8 +4692,9 @@ def api_policy_coverage():
                                 'type': r['doc_type_label'], 'brand': brand, 'recv': r['received_at']})
     orphans.sort(key=lambda o: o['recv'] or '', reverse=True)
     return jsonify({
-        'docs_2026_by_brand': docs_by_brand,
-        'gaia_winner_unique_insureds_2026': len(gw_insureds),
+        'since': since,
+        'docs_by_brand': docs_by_brand,
+        'gaia_winner_unique_insureds': len(gw_insureds),
         'gaia_winner_orphans_no_customer': len(gw_orphan_ids),
         'orphan_sample': orphans[:40],
     })
