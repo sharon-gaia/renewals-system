@@ -6203,6 +6203,16 @@ def _ensure_new_customer(conn, pr):
     existing = conn.execute(
         "SELECT id, status FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
         (month['id'], idn.lstrip('0'))).fetchone()
+    # No ת"ז match? A Harel proposal lead ("ממתין להפקה") has no ת"ז — it's keyed by the offer
+    # number, which becomes the policy number on issuance. Link by policy number and fill the
+    # now-known ת"ז, so the lead upgrades in place (→ 'הופק') instead of duplicating.
+    if not existing and (pr['policy_number'] or ''):
+        existing = conn.execute(
+            "SELECT id, status FROM customers WHERE month_id=? AND policy_number=? AND status=?",
+            (month['id'], pr['policy_number'], LEAD_STATUS)).fetchone()
+        if existing:
+            conn.execute("UPDATE customers SET id_number=COALESCE(NULLIF(id_number,''),?) WHERE id=?",
+                         (idn, existing['id']))
     brand = NEW_AGENT_BRAND.get(re.sub(r'\D', '', str(pr['agent_number'] or '')), '')
     if existing:
         if (existing['status'] or '') == LEAD_STATUS:
@@ -7164,6 +7174,156 @@ def _check_renewal_forms_impl(days_back=14):
         print(f'[renewal-forms] שגיאה: {e}')
     return (processed, unmatched)
 
+# ── Harel "completed details" proposal emails → pending-issuance lead ─────────
+# Harel notifies the agent when a customer finishes submitting details for a
+# professional-liability proposal ("קיבלנו השלמת פרטים מ<שם> להצעה..."). There is NO ת"ז
+# in the email — only name, phone, offer number and the insurance period. We capture it as a
+# lead ("ממתין להפקה") keyed by the Harel OFFER number (which becomes the policy number once
+# issued). When the policy PDF later arrives, _ensure_new_customer links it by policy number,
+# fills the ת"ז and flips the lead to 'הופק' → it becomes 'פעיל' in the master and drops off
+# the issuance queue.
+HAREL_COMPLETED_SENDER = 'HarelInsurance@harel-group.co.il'
+HAREL_COMPLETED_SUBJECT_MARK = 'קיבלנו השלמת פרטים'
+_harel_completed_lock = threading.Lock()
+
+def _parse_harel_completed(subject, html):
+    """Extract {name, offer, phone, period} from a Harel completed-details email (free text,
+    not a table). Robust to HTML — strips tags then regexes the labelled lines."""
+    import html as _htmlmod
+    text = re.sub(r'<[^>]+>', ' ', html or '')
+    text = _htmlmod.unescape(text)
+    text = re.sub(r'[ \t‏‎\xa0‌]+', ' ', text)
+    out = {}
+    m = re.search(r'השלמת פרטים מ(.+?) להצעה', subject or '')
+    if not m:
+        m = re.search(r'קיבלנו מ(.+?) את המידע', text)
+    out['name'] = m.group(1).strip() if m else ''
+    m = re.search(r"מס['׳]\s*הצעה\s*:?\s*(\d{5,})", text)
+    out['offer'] = m.group(1) if m else ''
+    m = re.search(r'מספר טלפון\s*:?\s*([0-9\-]{7,})', text)
+    out['phone'] = re.sub(r'\D', '', m.group(1)) if m else ''
+    m = re.search(r'תקופת הביטוח\s*:?\s*(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})', text)
+    out['period'] = f'{m.group(1)} - {m.group(2)}' if m else ''
+    return out
+
+def _ingest_harel_completed(conn, subject, html, received_at):
+    """Store/refresh a Harel proposal lead as 'ממתין להפקה', keyed by the offer number.
+    Returns (offer, name) — offer is None if nothing could be extracted (so it retries)."""
+    f = _parse_harel_completed(subject, html)
+    offer, phone = f['offer'], f['phone']
+    name = f['name'] or (f'הצעה {offer}' if offer else '')
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not offer or not month:
+        return (None, None)
+    note = f"השלמת פרטים להצעה (הראל · אחריות מקצועית) · תקופה: {f['period'] or '—'}"
+    row = conn.execute(
+        "SELECT id, status FROM customers WHERE month_id=? AND policy_number=?",
+        (month['id'], offer)).fetchone()
+    if row:
+        # never downgrade a record that already renewed/issued
+        if (row['status'] or '') in ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'פעיל'):
+            return (offer, name)
+        conn.execute(
+            "UPDATE customers SET name=COALESCE(NULLIF(?,''),name), phone=COALESCE(NULLIF(?,''),phone), "
+            "form_received_at=?, sharon_notes=COALESCE(NULLIF(sharon_notes,''),?), status=? WHERE id=?",
+            (f['name'], phone, received_at, note, LEAD_STATUS, row['id']))
+        cid = row['id']
+    else:
+        cur = conn.execute(
+            """INSERT INTO customers (month_id, policy_number, name, phone, status,
+                   import_source, form_received_at, sharon_notes)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (month['id'], offer, name, phone, LEAD_STATUS, 'harel_proposal', received_at, note))
+        cid = cur.lastrowid
+    log_event(conn, event_key(offer, 'cust-%d' % cid),
+              f"התקבלה השלמת פרטים להצעה {offer} ({name})", 'system', kind='harel_proposal')
+    return (offer, name)
+
+def check_harel_completed(days_back=14):
+    if not _harel_completed_lock.acquire(blocking=False):
+        return 0
+    try:
+        return _check_harel_completed_impl(days_back)
+    finally:
+        _harel_completed_lock.release()
+
+def _check_harel_completed_impl(days_back=14):
+    cfg = EMAIL_CONFIG
+    if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
+        return 0
+    from email.utils import parsedate_to_datetime
+    processed = 0
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'FROM "{HAREL_COMPLETED_SENDER}" SINCE {since_date}')
+        if status != 'OK':
+            mail.logout(); return 0
+        conn = get_db()
+        for mid in data[0].split():
+            _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hdr_data[0][1])
+            message_id = hdr.get('Message-ID', '').strip()
+            subject = decode_str(hdr.get('Subject', ''))
+            if HAREL_COMPLETED_SUBJECT_MARK not in subject:
+                continue
+            if message_id and conn.execute(
+                    'SELECT 1 FROM processed_leads WHERE message_id=?', (message_id,)).fetchone():
+                continue
+            try:
+                received_at = parsedate_to_datetime(hdr.get('Date', '')).astimezone().strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                received_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+            _, full_data = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(full_data[0][1])
+            html = None
+            for part in msg.walk():
+                if part.get_content_type() == 'text/html' and 'attachment' not in str(part.get('Content-Disposition', '')):
+                    try:
+                        html = part.get_content()
+                    except Exception:
+                        pl = part.get_payload(decode=True); html = pl.decode('utf-8', 'replace') if pl else None
+                    break
+            if html is None:  # fall back to a plain-text body
+                for part in msg.walk():
+                    if part.get_content_type() == 'text/plain':
+                        pl = part.get_payload(decode=True); html = pl.decode('utf-8', 'replace') if pl else None
+                        break
+            if not html:
+                continue
+            offer, name = _ingest_harel_completed(conn, subject, html, received_at)
+            if offer and message_id:
+                conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
+                             (message_id, datetime.datetime.now().isoformat()))
+            conn.commit()
+            if offer:
+                processed += 1
+                print(f'[harel-proposal] ליד נקלט: {offer} {name} ({subject})')
+            else:
+                print(f"[harel-proposal] ⚠️ לא חולץ מס' הצעה — לא סומן מעובד, יינסה שוב: {subject}")
+        conn.close()
+        mail.logout()
+    except Exception as e:
+        print(f'[harel-proposal] שגיאה: {e}')
+    return processed
+
+@app.route('/api/harel-proposal-scan')
+def api_harel_proposal_scan():
+    """Manual trigger for the Harel completed-details scanner. Token-authed. Returns how many
+    proposal leads were ingested, plus the current 'ממתין להפקה' harel_proposal leads."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 14))
+    n = check_harel_completed(days_back=days)
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT policy_number, name, phone, status, sharon_notes, form_received_at "
+        "FROM customers WHERE import_source='harel_proposal' ORDER BY id DESC LIMIT 50").fetchall()
+    conn.close()
+    return jsonify({'processed': n, 'leads': [dict(r) for r in rows]})
+
 def email_poll_thread():
     """Background thread: check inbox every N seconds. A heartbeat is recorded after EACH step
     so a long-but-progressing cycle keeps the scanner 'alive' for the watchdog."""
@@ -7196,6 +7356,13 @@ def email_poll_thread():
                 print(f'[renewal-forms] עובדו {rp} טפסי חידוש ({ru} לא תואמים)')
         except Exception as e:
             print(f'[renewal-forms] שגיאת thread: {e}')
+        touch_scan_heartbeat()
+        try:
+            hp = check_harel_completed()
+            if hp:
+                print(f'[harel-proposal] נקלטו {hp} השלמות פרטים להצעה')
+        except Exception as e:
+            print(f'[harel-proposal] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
             lr = label_sent_policy_emails()
@@ -7237,6 +7404,7 @@ def refresh_data():
             check_policy_documents()
             check_join_forms()
             check_renewal_forms()
+            check_harel_completed()
             conn = get_db()
             rebuild_insureds(conn)
             recompute_insured_statuses(conn)
