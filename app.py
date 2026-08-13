@@ -7215,6 +7215,10 @@ def _ingest_harel_completed(conn, subject, html, received_at):
     month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
     if not offer or not month:
         return (None, None)
+    # Already issued? Most proposals from the 1st already became policies — don't create a
+    # phantom 'ממתין להפקה' lead for one that's already active. Mark processed (return offer).
+    if conn.execute("SELECT 1 FROM policy_records WHERE policy_number=?", (offer,)).fetchone():
+        return (offer, name)
     note = f"השלמת פרטים להצעה (הראל · אחריות מקצועית) · תקופה: {f['period'] or '—'}"
     row = conn.execute(
         "SELECT id, status FROM customers WHERE month_id=? AND policy_number=?",
@@ -7257,7 +7261,12 @@ def _check_harel_completed_impl(days_back=14):
         mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
-        since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
+        # Never scan earlier than the 1st of the current month — older proposals from prior
+        # months are already issued policies, not pending-issuance leads (Sharon's rule).
+        today = datetime.date.today()
+        since = max(datetime.date(today.year, today.month, 1),
+                    today - datetime.timedelta(days=days_back))
+        since_date = since.strftime('%d-%b-%Y')
         status, data = mail.search(None, f'FROM "{HAREL_COMPLETED_SENDER}" SINCE {since_date}')
         if status != 'OK':
             mail.logout(); return 0
