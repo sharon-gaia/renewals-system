@@ -4656,6 +4656,42 @@ def wa_queue():
     conn.close()
     return jsonify({'brand': brand, 'count': len(items), 'items': items})
 
+_rebuild_master_state = {'running': False, 'last': ''}
+
+def _run_rebuild_master():
+    _rebuild_master_state['running'] = True
+    try:
+        conn = get_db()
+        n = rebuild_insureds(conn)
+        c = recompute_insured_statuses(conn)
+        conn.close()
+        _rebuild_master_state['last'] = f"{datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}: upserted {n}, status-updated {c}"
+        print('[rebuild-master] ' + _rebuild_master_state['last'])
+    except Exception as e:
+        _rebuild_master_state['last'] = 'ERROR: ' + str(e)[:200]
+        print('[rebuild-master] ' + _rebuild_master_state['last'])
+    finally:
+        _rebuild_master_state['running'] = False
+
+@app.route('/api/rebuild-master', methods=['POST', 'GET'])
+def api_rebuild_master():
+    """Rebuild the insureds master ('לקוחות קבוצת אופיר') from ALL policy_records — one row per
+    ת"ז, status פעיל/לא-פעיל by policy end date. Loads every scanned policy's person (incl. the
+    Gaia/Winner 'orphans'). Non-destructive (preserves activity + admin overrides). Runs in the
+    background. Token-authed. GET returns status."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    if request.method == 'GET':
+        conn = get_db()
+        total = conn.execute("SELECT COUNT(*) FROM insureds").fetchone()[0]
+        conn.close()
+        return jsonify({'running': _rebuild_master_state['running'],
+                        'last_run': _rebuild_master_state['last'], 'insureds_total': total})
+    if _rebuild_master_state['running']:
+        return jsonify({'ok': False, 'msg': 'כבר רץ'})
+    threading.Thread(target=_run_rebuild_master, daemon=True).start()
+    return jsonify({'ok': True, 'msg': 'בנייה מחדש של המאסטר החלה ברקע'})
+
 @app.route('/api/policy/coverage')
 def api_policy_coverage():
     """Read-only: coverage gap for Gaia/Winner (excl. Ofir). Counts 2026 renewal/new policy
