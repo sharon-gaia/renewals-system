@@ -7357,6 +7357,9 @@ def api_harel_proposal_scan():
 # emails — differ by SUBJECT.
 HAREL_CERT_SENDER = 'HarelInsurance@harel-group.co.il'
 HAREL_CERT_SUBJECT_MARK = 'אישור לביטוח קיים'
+# From-today-onward only — never process certificate emails older than go-live (Sharon's rule:
+# no retro). The 14-day lookback still catches recent ones if the laptop was off a few days.
+CERT_GOLIVE = datetime.date(2026, 8, 17)
 _harel_cert_lock = threading.Lock()
 
 def _parse_harel_cert(subject, html):
@@ -7440,7 +7443,9 @@ def _check_cert_emails_impl(days_back=14):
         mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
-        since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
+        # Floor at go-live so we never retro-process old certificate emails (Sharon's rule).
+        since = max(datetime.date.today() - datetime.timedelta(days=days_back), CERT_GOLIVE)
+        since_date = since.strftime('%d-%b-%Y')
         status, data = mail.search(None, f'FROM "{HAREL_CERT_SENDER}" SINCE {since_date}')
         if status != 'OK':
             mail.logout(); return 0
