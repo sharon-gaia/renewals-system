@@ -671,12 +671,14 @@ def init_db():
             cust_name TEXT,
             id_number TEXT,
             phone TEXT,
+            email TEXT,
             brand TEXT,
             customer_id INTEGER,
             received_at TEXT,
             match_status TEXT,
             pdf_saved INTEGER DEFAULT 0,
             wa_sent_at TEXT,
+            email_sent_at TEXT,
             wa_target TEXT,
             created_at TEXT
         );
@@ -775,6 +777,11 @@ def init_db():
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     if 'is_midwife' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
         conn.execute("ALTER TABLE insureds ADD COLUMN is_midwife INTEGER")
+    # cert_requests: email columns (table shipped before the "both email+WhatsApp" rule)
+    _cert_cols = [r[1] for r in conn.execute("PRAGMA table_info(cert_requests)").fetchall()]
+    for col in ('email', 'email_sent_at'):
+        if col not in _cert_cols:
+            conn.execute(f"ALTER TABLE cert_requests ADD COLUMN {col} TEXT")
     # Extra elementary/car fields (mainly from the Ofir/Meir book). All optional — shown
     # in the UI only when populated. Added to both customers and the insureds master.
     for tbl in ('customers', 'insureds'):
@@ -7387,7 +7394,7 @@ def _match_insured_by_name(conn, name):
     by_id = {}
     for tbl in ('insureds', 'customers'):
         rows = conn.execute(
-            f"SELECT id_number, name, phone, brand FROM {tbl} WHERE {cond} "
+            f"SELECT id_number, name, phone, email, brand FROM {tbl} WHERE {cond} "
             f"AND COALESCE(id_number,'')!=''", params).fetchall()
         for r in rows:
             key = (r['id_number'] or '').lstrip('0')
@@ -7410,15 +7417,16 @@ def _ingest_harel_cert(conn, subject, html, received_at):
     row, mstatus = _match_insured_by_name(conn, name)
     idn = (row['id_number'] if row else '') or ''
     phone = (row['phone'] if row else '') or ''
+    email = (row['email'] if row else '') or ''
     brand = (row['brand'] if row else '') or ''
     cust = conn.execute(
         "SELECT id FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? ORDER BY id DESC LIMIT 1",
         (idn.lstrip('0'),)).fetchone() if idn else None
     conn.execute(
-        """INSERT INTO cert_requests (ticket, cust_name, id_number, phone, brand, customer_id,
+        """INSERT INTO cert_requests (ticket, cust_name, id_number, phone, email, brand, customer_id,
                received_at, match_status, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?)""",
-        (ticket, name, idn, phone, brand, (cust['id'] if cust else None), received_at, mstatus,
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        (ticket, name, idn, phone, email, brand, (cust['id'] if cust else None), received_at, mstatus,
          datetime.datetime.now().isoformat()))
     if idn:
         log_event(conn, event_key(idn, ('cust-%d' % cust['id']) if cust else ('cert-%s' % ticket)),
@@ -7500,9 +7508,10 @@ def api_cert_queue():
         return jsonify({'error': 'unauthorized'}), 403
     conn = get_db()
     rows = conn.execute(
-        "SELECT id, ticket, cust_name, id_number, phone, brand, customer_id, received_at "
+        "SELECT id, ticket, cust_name, id_number, phone, email, brand, customer_id, received_at "
         "FROM cert_requests WHERE match_status='matched' AND wa_sent_at IS NULL "
-        "AND COALESCE(id_number,'')!='' AND COALESCE(phone,'')!='' ORDER BY id LIMIT 20").fetchall()
+        "AND COALESCE(id_number,'')!='' AND (COALESCE(phone,'')!='' OR COALESCE(email,'')!='') "
+        "ORDER BY id LIMIT 20").fetchall()
     conn.close()
     return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
 
@@ -7521,16 +7530,19 @@ def api_cert_sent():
                        (ticket,)).fetchone()
     if not row:
         conn.close(); return jsonify({'error': 'unknown ticket'}), 404
-    conn.execute("UPDATE cert_requests SET wa_sent_at=?, wa_target=?, pdf_saved=? WHERE ticket=?",
-                 (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), d.get('target') or 'customer',
-                  1 if d.get('saved') else 0, ticket))
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn.execute("UPDATE cert_requests SET wa_sent_at=?, wa_target=?, pdf_saved=?, "
+                 "email_sent_at=COALESCE(?,email_sent_at) WHERE ticket=?",
+                 (now, d.get('target') or 'customer', 1 if d.get('saved') else 0,
+                  (now if d.get('email_ok') else None), ticket))
     if row['id_number']:
         tgt = d.get('target') or 'customer'
         label = {'customer': 'ללקוח', 'sharon': 'לשרון (טסט)',
                  'sharon-fallback': 'לשרון (fallback)', 'gaia-fallback': 'ללקוח דרך גאיה (fallback)'}.get(tgt, tgt)
+        chans = '+'.join([c for c, ok in (('וואטסאפ', d.get('wa_ok')), ('מייל', d.get('email_ok'))) if ok]) or '—'
         log_event(conn, event_key(row['id_number'],
                   ('cust-%d' % row['customer_id']) if row['customer_id'] else ('cert-%s' % ticket)),
-                  f"אישור קיום ביטוח נשלח {label}", 'system', kind='cert_sent')
+                  f"אישור קיום ביטוח נשלח {label} ({chans})", 'system', kind='cert_sent')
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
