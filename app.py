@@ -665,6 +665,21 @@ def init_db():
             message_id TEXT PRIMARY KEY,
             processed_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS cert_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticket TEXT UNIQUE,
+            cust_name TEXT,
+            id_number TEXT,
+            phone TEXT,
+            brand TEXT,
+            customer_id INTEGER,
+            received_at TEXT,
+            match_status TEXT,
+            pdf_saved INTEGER DEFAULT 0,
+            wa_sent_at TEXT,
+            wa_target TEXT,
+            created_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS customer_attachments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             customer_id INTEGER NOT NULL,
@@ -7333,6 +7348,200 @@ def api_harel_proposal_scan():
     conn.close()
     return jsonify({'processed': n, 'leads': [dict(r) for r in rows]})
 
+# ── Harel "certificate of insurance" (אישור קיום ביטוח) emails → auto-fetch + deliver ──
+# Harel emails the agent a link (generic-identification/?ticket=...) to a certificate it ISSUED
+# (not in our dashboard). No PDF attached — it sits behind the ticket + the insured's ת"ז. We
+# extract the ticket + the insured NAME from the email body, match the name to our master to get
+# ת"ז+phone+brand, and queue it. The wa-sender then downloads the PDF (Puppeteer types the ת"ז)
+# and delivers it (Cloud API primary, Gaia WhatsApp-Web fallback). Same sender as the proposal
+# emails — differ by SUBJECT.
+HAREL_CERT_SENDER = 'HarelInsurance@harel-group.co.il'
+HAREL_CERT_SUBJECT_MARK = 'אישור לביטוח קיים'
+_harel_cert_lock = threading.Lock()
+
+def _parse_harel_cert(subject, html):
+    """Extract {ticket, name} from a Harel certificate email."""
+    import html as _htmlmod
+    out = {'ticket': '', 'name': ''}
+    m = re.search(r'generic-identification/\?ticket=([0-9a-fA-F]+)', html or '')
+    out['ticket'] = m.group(1) if m else ''
+    text = re.sub(r'<[^>]+>', ' ', html or '')
+    text = _htmlmod.unescape(text)
+    text = re.sub(r'[ \t‏‎\xa0‌]+', ' ', text)
+    m = re.search(r'אישור קיום ביטוח עבור\s+(.+?)\s+לבקשתך', text)
+    if not m:
+        m = re.search(r'עבור\s+(.{2,30}?)\s+לבקשתך', text)
+    out['name'] = m.group(1).strip() if m else ''
+    return out
+
+def _match_insured_by_name(conn, name):
+    """Name → (dict{id_number,name,phone,brand}, status). Order-independent match against the
+    master (insureds) then customers. status: 'matched' (exactly one ת"ז) | 'ambiguous' | 'no_match'."""
+    if not name:
+        return (None, 'no_match')
+    like = f'%{name}%'
+    cond, params = _name_search('name', name, like)
+    by_id = {}
+    for tbl in ('insureds', 'customers'):
+        rows = conn.execute(
+            f"SELECT id_number, name, phone, brand FROM {tbl} WHERE {cond} "
+            f"AND COALESCE(id_number,'')!=''", params).fetchall()
+        for r in rows:
+            key = (r['id_number'] or '').lstrip('0')
+            if key:
+                by_id.setdefault(key, dict(r))
+        if by_id:
+            break  # prefer the master; only fall to customers if the master had nothing
+    if len(by_id) == 1:
+        return (list(by_id.values())[0], 'matched')
+    return (None, 'ambiguous' if len(by_id) > 1 else 'no_match')
+
+def _ingest_harel_cert(conn, subject, html, received_at):
+    """Queue a Harel certificate request keyed by ticket. Returns (ticket, name) or (None, None)."""
+    f = _parse_harel_cert(subject, html)
+    ticket, name = f['ticket'], f['name']
+    if not ticket:
+        return (None, None)
+    if conn.execute("SELECT 1 FROM cert_requests WHERE ticket=?", (ticket,)).fetchone():
+        return (ticket, name)  # already queued
+    row, mstatus = _match_insured_by_name(conn, name)
+    idn = (row['id_number'] if row else '') or ''
+    phone = (row['phone'] if row else '') or ''
+    brand = (row['brand'] if row else '') or ''
+    cust = conn.execute(
+        "SELECT id FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? ORDER BY id DESC LIMIT 1",
+        (idn.lstrip('0'),)).fetchone() if idn else None
+    conn.execute(
+        """INSERT INTO cert_requests (ticket, cust_name, id_number, phone, brand, customer_id,
+               received_at, match_status, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (ticket, name, idn, phone, brand, (cust['id'] if cust else None), received_at, mstatus,
+         datetime.datetime.now().isoformat()))
+    if idn:
+        log_event(conn, event_key(idn, ('cust-%d' % cust['id']) if cust else ('cert-%s' % ticket)),
+                  f"התקבלה בקשת אישור קיום ביטוח (הראל) · התאמה: {mstatus}", 'system', kind='cert_request')
+    return (ticket, name)
+
+def check_cert_emails(days_back=14):
+    if not _harel_cert_lock.acquire(blocking=False):
+        return 0
+    try:
+        return _check_cert_emails_impl(days_back)
+    finally:
+        _harel_cert_lock.release()
+
+def _check_cert_emails_impl(days_back=14):
+    cfg = EMAIL_CONFIG
+    if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
+        return 0
+    from email.utils import parsedate_to_datetime
+    processed = 0
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'FROM "{HAREL_CERT_SENDER}" SINCE {since_date}')
+        if status != 'OK':
+            mail.logout(); return 0
+        conn = get_db()
+        for mid in data[0].split():
+            _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hdr_data[0][1])
+            message_id = hdr.get('Message-ID', '').strip()
+            subject = decode_str(hdr.get('Subject', ''))
+            if HAREL_CERT_SUBJECT_MARK not in subject:
+                continue
+            if message_id and conn.execute(
+                    'SELECT 1 FROM processed_leads WHERE message_id=?', (message_id,)).fetchone():
+                continue
+            try:
+                received_at = parsedate_to_datetime(hdr.get('Date', '')).astimezone().strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                received_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+            _, full_data = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(full_data[0][1])
+            html = None
+            for part in msg.walk():
+                if part.get_content_type() == 'text/html' and 'attachment' not in str(part.get('Content-Disposition', '')):
+                    try:
+                        html = part.get_content()
+                    except Exception:
+                        pl = part.get_payload(decode=True); html = pl.decode('utf-8', 'replace') if pl else None
+                    break
+            if not html:
+                continue
+            ticket, name = _ingest_harel_cert(conn, subject, html, received_at)
+            if ticket and message_id:
+                conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
+                             (message_id, datetime.datetime.now().isoformat()))
+            conn.commit()
+            if ticket:
+                processed += 1
+                print(f'[harel-cert] נקלטה בקשת אישור: {name or "?"} (ticket {ticket[:10]}…)')
+            else:
+                print(f'[harel-cert] ⚠️ לא חולץ ticket — יינסה שוב: {subject}')
+        conn.close()
+        mail.logout()
+    except Exception as e:
+        print(f'[harel-cert] שגיאה: {e}')
+    return processed
+
+@app.route('/api/cert/queue')
+def api_cert_queue():
+    """wa-sender pulls matched, not-yet-sent certificate requests to download + deliver.
+    Token-authed. Only rows with a resolved ת"ז are returned (unmatched wait for Sharon)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, ticket, cust_name, id_number, phone, brand, customer_id, received_at "
+        "FROM cert_requests WHERE match_status='matched' AND wa_sent_at IS NULL "
+        "AND COALESCE(id_number,'')!='' AND COALESCE(phone,'')!='' ORDER BY id LIMIT 20").fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
+
+@app.route('/api/cert/sent', methods=['POST'])
+def api_cert_sent():
+    """wa-sender reports a cert delivered. Marks wa_sent_at + logs it under the customer.
+    Body: {ticket, target ('customer'|'sharon'|'sharon-fallback'|'gaia-fallback'), saved:bool}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(force=True, silent=True) or {}
+    ticket = (d.get('ticket') or '').strip()
+    if not ticket:
+        return jsonify({'error': 'need ticket'}), 400
+    conn = get_db()
+    row = conn.execute("SELECT id, id_number, customer_id, cust_name FROM cert_requests WHERE ticket=?",
+                       (ticket,)).fetchone()
+    if not row:
+        conn.close(); return jsonify({'error': 'unknown ticket'}), 404
+    conn.execute("UPDATE cert_requests SET wa_sent_at=?, wa_target=?, pdf_saved=? WHERE ticket=?",
+                 (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), d.get('target') or 'customer',
+                  1 if d.get('saved') else 0, ticket))
+    if row['id_number']:
+        tgt = d.get('target') or 'customer'
+        label = {'customer': 'ללקוח', 'sharon': 'לשרון (טסט)',
+                 'sharon-fallback': 'לשרון (fallback)', 'gaia-fallback': 'ללקוח דרך גאיה (fallback)'}.get(tgt, tgt)
+        log_event(conn, event_key(row['id_number'],
+                  ('cust-%d' % row['customer_id']) if row['customer_id'] else ('cert-%s' % ticket)),
+                  f"אישור קיום ביטוח נשלח {label}", 'system', kind='cert_sent')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/cert/scan')
+def api_cert_scan():
+    """Manual trigger + view of the certificate queue. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    n = check_cert_emails(days_back=int(request.args.get('days', 14)))
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT ticket, cust_name, id_number, phone, brand, match_status, wa_sent_at, wa_target "
+        "FROM cert_requests ORDER BY id DESC LIMIT 50").fetchall()
+    conn.close()
+    return jsonify({'processed': n, 'requests': [dict(r) for r in rows]})
+
 def email_poll_thread():
     """Background thread: check inbox every N seconds. A heartbeat is recorded after EACH step
     so a long-but-progressing cycle keeps the scanner 'alive' for the watchdog."""
@@ -7372,6 +7581,13 @@ def email_poll_thread():
                 print(f'[harel-proposal] נקלטו {hp} השלמות פרטים להצעה')
         except Exception as e:
             print(f'[harel-proposal] שגיאת thread: {e}')
+        touch_scan_heartbeat()
+        try:
+            hc = check_cert_emails()
+            if hc:
+                print(f'[harel-cert] נקלטו {hc} בקשות אישור קיום ביטוח')
+        except Exception as e:
+            print(f'[harel-cert] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
             lr = label_sent_policy_emails()
@@ -7414,6 +7630,7 @@ def refresh_data():
             check_join_forms()
             check_renewal_forms()
             check_harel_completed()
+            check_cert_emails()
             conn = get_db()
             rebuild_insureds(conn)
             recompute_insured_statuses(conn)
