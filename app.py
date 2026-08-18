@@ -7658,6 +7658,11 @@ def _ingest_harel_cert(conn, subject, html, received_at, message_id=''):
     if idn:
         log_event(conn, event_key(idn, ('cust-%d' % cust['id']) if cust else ('cert-%s' % ticket)),
                   f"התקבלה בקשת אישור קיום ביטוח (הראל) · התאמה: {mstatus}", 'system', kind='cert_request')
+    if mstatus != 'matched':
+        # unmatched cert → won't auto-send (we don't know who); alert Sharon so nothing falls silently.
+        conn.execute("INSERT INTO owner_alerts (text, created_at) VALUES (?,?)",
+                     (f"⚠️ אישור קיום ביטוח לא זוהה: \"{name}\" ({mstatus}) — לטיפול ידני",
+                      datetime.datetime.now().isoformat()))
     return (ticket, name)
 
 def check_cert_emails(days_back=14):
