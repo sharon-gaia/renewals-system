@@ -6615,10 +6615,12 @@ def label_sent_policy_emails(limit=None):
 
 GMAIL_CERT_SENT_LABEL = 'אישורי ביטוח נשלחו'
 
-def label_sent_cert_emails(limit=None):
-    """Gmail-label + archive the Harel certificate emails whose cert was already delivered, moving
-    them out of the inbox into 'אישורי ביטוח נשלחו' (Gmail auto-creates the label). So the inbox
-    shows only certificates still awaiting handling — the operational 'בקרה'. Returns counts."""
+def label_sent_cert_emails(limit=None, extra_tickets=None):
+    """Gmail-label + archive the Harel certificate emails whose cert was delivered, moving them out
+    of the inbox into 'אישורי ביטוח נשלחו' (Gmail auto-creates the label) — so the inbox shows only
+    certificates still awaiting handling (the operational 'בקרה'). Finds each email by its Harel
+    ticket via Gmail search (X-GM-RAW), robust even without a stored Message-ID. `extra_tickets`
+    labels emails NOT tracked in cert_requests (e.g. manually-sent ones). Returns counts."""
     if not _gmail_label_lock.acquire(blocking=False):
         return {'processed': 0, 'found': 0, 'not_found': 0}
     try:
@@ -6626,12 +6628,16 @@ def label_sent_cert_emails(limit=None):
         if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
             return {'processed': 0, 'found': 0, 'not_found': 0}
         conn = get_db()
-        q = ("SELECT id, message_id, cust_name FROM cert_requests WHERE COALESCE(message_id,'')!='' "
+        q = ("SELECT id, ticket FROM cert_requests WHERE COALESCE(ticket,'')!='' "
              "AND COALESCE(cert_labeled,'')='' AND COALESCE(wa_sent_at,'')!='' ORDER BY id DESC")
         if limit:
             q += f" LIMIT {int(limit)}"
-        rows = conn.execute(q).fetchall()
-        if not rows:
+        targets = [(r['id'], r['ticket']) for r in conn.execute(q).fetchall()]
+        for t in (extra_tickets or []):
+            t = (t or '').strip()
+            if t:
+                targets.append((None, t))
+        if not targets:
             conn.close(); return {'processed': 0, 'found': 0, 'not_found': 0}
         label = '"' + _imap_utf7(GMAIL_CERT_SENT_LABEL) + '"'
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -6650,25 +6656,25 @@ def label_sent_cert_emails(limit=None):
             pass
         mail.select(('"%s"' % allbox) if allbox else 'INBOX')
         found = not_found = 0
-        for r in rows:
-            mid = (r['message_id'] or '').strip()
+        for rid, ticket in targets:
             hit = False
             try:
-                typ, data = mail.search(None, 'HEADER', 'Message-ID', mid)
+                typ, data = mail.search(None, 'X-GM-RAW', '"%s"' % ticket)
                 for uid in (data[0].split() if typ == 'OK' else []):
                     mail.store(uid, '+X-GM-LABELS', label)
                     mail.store(uid, '-X-GM-LABELS', '\\Inbox')   # archive out of the inbox
                     hit = True
             except Exception as e:
-                print(f'[cert-label] {mid}: {e}')
+                print(f'[cert-label] {ticket[:10]}: {e}')
             if hit:
                 found += 1
-                conn.execute("UPDATE cert_requests SET cert_labeled=? WHERE id=?", (now, r['id']))
+                if rid:
+                    conn.execute("UPDATE cert_requests SET cert_labeled=? WHERE id=?", (now, rid))
             else:
                 not_found += 1
         conn.commit(); conn.close()
         mail.logout()
-        return {'processed': len(rows), 'found': found, 'not_found': not_found}
+        return {'processed': len(targets), 'found': found, 'not_found': not_found}
     except Exception as e:
         print(f'[cert-label] שגיאה: {e}')
         return {'processed': 0, 'found': 0, 'not_found': 0, 'error': str(e)}
@@ -6677,10 +6683,12 @@ def label_sent_cert_emails(limit=None):
 
 @app.route('/api/cert/label-sent', methods=['POST', 'GET'])
 def api_cert_label_sent():
-    """Manual trigger for cert-email labeling. Token-authed."""
+    """Manual trigger for cert-email labeling. Token-authed. ?tickets=t1,t2 labels extra emails
+    not tracked in cert_requests (e.g. manually-sent certs)."""
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
-    return jsonify(label_sent_cert_emails())
+    extra = [t for t in (request.args.get('tickets', '').split(',')) if t.strip()]
+    return jsonify(label_sent_cert_emails(extra_tickets=extra))
 
 @app.route('/api/gmail-label-sent', methods=['POST'])
 def api_gmail_label_sent():
