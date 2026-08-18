@@ -1684,6 +1684,26 @@ def api_group_owner_set():
     conn.commit(); conn.close()
     return jsonify({'ok': True, 'owner': owner, 'phone': phone, 'card': card_disp, 'results': done})
 
+def auto_mark_midwives(conn):
+    """New-business rule (Sharon 2026-08-18): a NEW midwife is always Winner + occupation contains
+    'מיילד' (premium ~1200). Auto-set is_midwife=1 for any such customer/insured not yet marked —
+    renewals are already flagged in advance, so this only fills in the new ones. Returns counts."""
+    c = conn.execute("UPDATE customers SET is_midwife=1 WHERE brand='ווינר' "
+                     "AND occupation LIKE '%מיילד%' AND COALESCE(is_midwife,0)=0").rowcount
+    i = conn.execute("UPDATE insureds SET is_midwife=1 WHERE brand='ווינר' "
+                     "AND occupation LIKE '%מיילד%' AND COALESCE(is_midwife,0)=0").rowcount
+    return {'customers': c, 'insureds': i}
+
+@app.route('/api/mark-midwives', methods=['POST', 'GET'])
+def api_mark_midwives():
+    """Trigger the new-midwife auto-marking sweep. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    res = auto_mark_midwives(conn)
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'marked': res})
+
 @app.route('/api/owner-response', methods=['POST'])
 def api_owner_response():
     """A group owner (e.g. Aviram) tapped a renewal-confirm button for one of their therapists.
@@ -7888,6 +7908,13 @@ def email_poll_thread():
                 print(f'[harel-cert] נקלטו {hc} בקשות אישור קיום ביטוח')
         except Exception as e:
             print(f'[harel-cert] שגיאת thread: {e}')
+        touch_scan_heartbeat()
+        try:
+            _mwc = get_db(); mw = auto_mark_midwives(_mwc); _mwc.commit(); _mwc.close()
+            if mw['customers'] or mw['insureds']:
+                print(f"[midwife] סומנו אוטומטית {mw['customers']} לקוחות + {mw['insureds']} מבוטחים כמיילדות")
+        except Exception as e:
+            print(f'[midwife] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
             lr = label_sent_policy_emails()
