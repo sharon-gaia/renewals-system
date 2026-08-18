@@ -1607,6 +1607,27 @@ def api_customer_lookup():
     return jsonify({'customers': [dict(r) for r in rows], 'insured': (dict(ins) if ins else None),
                     'unmatched_submissions': [dict(r) for r in unm]})
 
+@app.route('/api/customer-by-name')
+def api_customer_by_name():
+    """Diagnostic: customers matching a name, with their pending-handling workflow fields
+    (status, manual-send, end-reminder flag, call attempts). Token-authed. ?q=<name>."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    q = (request.args.get('q') or '').strip()
+    if not q:
+        return jsonify({'error': 'need q'}), 400
+    like = f'%{q}%'
+    cond, params = _name_search('c.name', q, like)
+    conn = get_db()
+    rows = conn.execute(
+        f"SELECT c.id, m.name AS month, c.name, c.id_number, c.brand, c.status, "
+        f"c.whatsapp_sent_date, c.end_reminder_sent_date, "
+        f"c.call_status_1, c.call_date_1, c.call_status_2, c.call_date_2, c.call_status_3, c.call_date_3 "
+        f"FROM customers c JOIN months m ON m.id=c.month_id WHERE {cond} "
+        f"ORDER BY m.is_active DESC, c.id DESC LIMIT 20", params).fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
+
 @app.route('/api/campaign/wrong-sends')
 def api_campaign_wrong_sends():
     """New-business/lead customers that received the renewal campaign email today (a mistake
