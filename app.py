@@ -665,6 +665,12 @@ def init_db():
             message_id TEXT PRIMARY KEY,
             processed_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS owner_alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            text TEXT NOT NULL,
+            created_at TEXT,
+            sent_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS cert_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticket TEXT UNIQUE,
@@ -1677,6 +1683,63 @@ def api_group_owner_set():
                       f"שויך לקבוצת {owner} (טלפון + אשראי של המרכז)", 'system', kind='group_owner')
     conn.commit(); conn.close()
     return jsonify({'ok': True, 'owner': owner, 'phone': phone, 'card': card_disp, 'results': done})
+
+@app.route('/api/owner-response', methods=['POST'])
+def api_owner_response():
+    """A group owner (e.g. Aviram) tapped a renewal-confirm button for one of their therapists.
+    Records the decision on the therapist's active-month record + logs it + queues a WhatsApp alert
+    to Sharon (picked up by the wa-sender). Token-authed.
+    Body: {id_number, decision:'approve'|'decline', therapist_name?}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(force=True, silent=True) or {}
+    idn = re.sub(r'\D', '', str(d.get('id_number') or '')).lstrip('0')
+    decision = (d.get('decision') or '').strip().lower()
+    if not idn or decision not in ('approve', 'decline'):
+        return jsonify({'error': 'need id_number + decision approve/decline'}), 400
+    status = 'חודש' if decision == 'approve' else 'לא רוצים לחדש'
+    conn = get_db()
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    row = conn.execute(
+        "SELECT id, name, group_owner FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
+        (month['id'], idn)).fetchone() if month else None
+    name = (row['name'] if row else '') or d.get('therapist_name') or idn
+    owner = (row['group_owner'] if row else '') or 'המרכז'
+    if row:
+        conn.execute("UPDATE customers SET status=?, status_changed_at=? WHERE id=?",
+                     (status, datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), row['id']))
+        log_event(conn, event_key(idn, 'cust-%d' % row['id']),
+                  f"{owner} {'אישר חידוש' if decision=='approve' else 'ביקש לא לחדש'} (תגובת כפתור)",
+                  'system', kind='owner_response')
+    verb = 'אישר חידוש ✅' if decision == 'approve' else 'לא מחדש ❌'
+    alert = f"{owner} {verb} עבור {name}" + ('' if row else ' (לא נמצא בחודש הפעיל — לבדיקה)')
+    conn.execute("INSERT INTO owner_alerts (text, created_at) VALUES (?,?)",
+                 (alert, datetime.datetime.now().isoformat()))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'matched': bool(row), 'status': status, 'alert': alert})
+
+@app.route('/api/owner-alerts')
+def api_owner_alerts():
+    """wa-sender pulls unsent owner-response alerts to WhatsApp Sharon. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    rows = conn.execute("SELECT id, text FROM owner_alerts WHERE sent_at IS NULL ORDER BY id LIMIT 20").fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
+
+@app.route('/api/owner-alerts/sent', methods=['POST'])
+def api_owner_alerts_sent():
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    ids = (request.get_json(force=True, silent=True) or {}).get('ids') or []
+    if not ids:
+        return jsonify({'ok': True, 'marked': 0})
+    conn = get_db()
+    conn.executemany("UPDATE owner_alerts SET sent_at=? WHERE id=?",
+                     [(datetime.datetime.now().isoformat(), int(i)) for i in ids])
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'marked': len(ids)})
 
 @app.route('/api/campaign/wrong-sends')
 def api_campaign_wrong_sends():
