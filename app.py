@@ -1628,6 +1628,21 @@ def api_customer_by_name():
     conn.close()
     return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
 
+@app.route('/api/end-reminder-marked')
+def api_end_reminder_marked():
+    """Diagnostic: active-month customers flagged 'תזכורת סיום' (end_reminder_sent_date set),
+    newest mark first. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    rows = conn.execute(
+        "SELECT name, id_number, brand, status, end_reminder_sent_date FROM customers "
+        "WHERE month_id=? AND COALESCE(end_reminder_sent_date,'')!='' "
+        "ORDER BY end_reminder_sent_date DESC, id DESC LIMIT 20", (month['id'],)).fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
+
 @app.route('/api/campaign/wrong-sends')
 def api_campaign_wrong_sends():
     """New-business/lead customers that received the renewal campaign email today (a mistake
