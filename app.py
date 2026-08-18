@@ -118,6 +118,7 @@ GW_STATUS_OPTIONS = [
     ('', 'ממתין לטיפול'),
     ('ממתין להפקה', '📝 ממתין להפקה (טופס חדש)'),
     ('טופס התקבל', '📋 טופס התקבל'),
+    ('בוטל', '❌ בוטל'),
     ('הופק', 'הופק ✓'),
     ('חודש', 'חודש ✓'),
     ('חודש - בוצעה שיחת מכירה', 'חודש - בוצעה שיחת מכירה ✓'),
@@ -2007,7 +2008,7 @@ def index():
             pending_issue = sum(1 for r in subset if r['status'] == 'ממתין להפקה')
             # New-business statuses — a lead awaiting issuance and an issued policy ("הופק") —
             # are not renewals, so they're kept out of the renewal total/buckets/%.
-            core = [r for r in subset if r['status'] not in ('ממתין להפקה', 'הופק')]
+            core = [r for r in subset if r['status'] not in ('ממתין להפקה', 'הופק', 'בוטל')]
             t = len(core)
             rnw = sum(1 for r in core if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה'))
             no_renew = sum(1 for r in core if r['status'] in NO_RENEW)
@@ -6377,6 +6378,32 @@ POLICY_WA_NEW = (
 # Status of a join-form lead awaiting policy issuance (see the join-form pipeline below).
 LEAD_STATUS = 'ממתין להפקה'
 
+def _apply_new_occupation(conn, cust_id, pr):
+    """At new-business scan time, read the insured's occupation from the policy PDF and, for a
+    WINNER midwife (occupation contains 'מיילד'), flag is_midwife — BEFORE the policy is delivered,
+    so it auto-files to the midwives folder + shows in the filter without any manual step (Sharon's
+    rule: it must be a fully automatic pipeline). Also stores the occupation for everyone."""
+    try:
+        doc_id = pr['policy_document_id'] if 'policy_document_id' in pr.keys() else None
+        if not doc_id:
+            return
+        d = conn.execute("SELECT filepath FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
+        fp = d['filepath'] if d else None
+        if not fp or not os.path.exists(fp):
+            return
+        occ = extract_insured_occupation(fp)
+        if not occ:
+            return
+        row = conn.execute("SELECT brand FROM customers WHERE id=?", (cust_id,)).fetchone()
+        mw = 1 if (row and row['brand'] == 'ווינר' and 'מיילד' in occ) else None
+        conn.execute("UPDATE customers SET occupation=COALESCE(NULLIF(occupation,''),?), "
+                     "is_midwife=COALESCE(is_midwife,?) WHERE id=?", (occ, mw, cust_id))
+        if mw:
+            _sync_customer_to_insured(conn, cust_id, active=True)
+            print(f'[new-midwife] סומנה מיילדת חדשה אוטומטית (cust {cust_id}, {occ[:30]})')
+    except Exception as e:
+        print(f'[new-midwife] {e}')
+
 def _ensure_new_customer(conn, pr):
     """Create a customers record for a new-business policy (so it's serviceable). If a
     pending-issuance lead (from a website join form) already exists for this ת"ז, upgrade
@@ -6407,6 +6434,7 @@ def _ensure_new_customer(conn, pr):
                 "status='הופק', status_changed_at=? WHERE id=?",
                 (pr['policy_number'], datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), existing['id']))
             _sync_customer_to_insured(conn, existing['id'], active=True)
+            _apply_new_occupation(conn, existing['id'], pr)
             _resolve_form_queue(conn, idn, escalations=True)
         return
     cur = conn.execute(
@@ -6415,6 +6443,7 @@ def _ensure_new_customer(conn, pr):
            VALUES (?,?,?,?,?,?,?,?,?)""",
         (month['id'], pr['policy_number'], (pr['insured_name'] or ''), idn,
          re.sub(r'\D', '', str(pr['phone_mobile'] or '')), (pr['email'] or ''), brand, 'הופק', 'new_policy'))
+    _apply_new_occupation(conn, cur.lastrowid, pr)
     _sync_customer_to_insured(conn, cur.lastrowid, active=True)
     _resolve_form_queue(conn, idn, escalations=True)
 
