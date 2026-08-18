@@ -7546,6 +7546,57 @@ def api_cert_sent():
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
+@app.route('/api/cert/preview')
+def api_cert_preview():
+    """READ-ONLY: list Harel certificate emails since a date WITHOUT queuing or sending — to see
+    what arrived (e.g. before go-live). Token-authed. ?since=YYYY-MM-DD (default: 3 days back)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    cfg = EMAIL_CONFIG
+    if not cfg['enabled']:
+        return jsonify({'error': 'email not configured'}), 400
+    since_s = request.args.get('since')
+    try:
+        since = datetime.datetime.strptime(since_s, '%Y-%m-%d').date() if since_s \
+            else (datetime.date.today() - datetime.timedelta(days=3))
+    except ValueError:
+        return jsonify({'error': 'bad since (YYYY-MM-DD)'}), 400
+    items = []
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        status, data = mail.search(None,
+            f'FROM "{HAREL_CERT_SENDER}" SINCE {since.strftime("%d-%b-%Y")}')
+        conn = get_db()
+        for mid in (data[0].split() if status == 'OK' and data and data[0] else []):
+            _, hd = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hd[0][1])
+            subject = decode_str(hdr.get('Subject', ''))
+            if HAREL_CERT_SUBJECT_MARK not in subject:
+                continue
+            _, fd = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(fd[0][1])
+            html = None
+            for part in msg.walk():
+                if part.get_content_type() == 'text/html':
+                    try: html = part.get_content()
+                    except Exception:
+                        pl = part.get_payload(decode=True); html = pl.decode('utf-8', 'replace') if pl else None
+                    break
+            f = _parse_harel_cert(subject, html or '')
+            row, mstatus = _match_insured_by_name(conn, f['name'])
+            already = bool(f['ticket'] and conn.execute(
+                "SELECT 1 FROM cert_requests WHERE ticket=?", (f['ticket'],)).fetchone())
+            items.append({'date': hdr.get('Date', ''), 'name': f['name'], 'ticket': f['ticket'],
+                          'match': mstatus, 'id_number': (row['id_number'] if row else ''),
+                          'phone': (row['phone'] if row else ''), 'email': (row['email'] if row else ''),
+                          'already_in_queue': already})
+        conn.close(); mail.logout()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    return jsonify({'since': since.isoformat(), 'count': len(items), 'items': items})
+
 @app.route('/api/cert/scan')
 def api_cert_scan():
     """Manual trigger + view of the certificate queue. Token-authed."""
