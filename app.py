@@ -6691,12 +6691,14 @@ def label_sent_cert_emails(limit=None, extra_tickets=None):
 
 @app.route('/api/cert/label-sent', methods=['POST', 'GET'])
 def api_cert_label_sent():
-    """Manual trigger for cert-email labeling. Token-authed. ?tickets=t1,t2 labels extra emails
-    not tracked in cert_requests (e.g. manually-sent certs)."""
+    """Manual trigger for cert-email labeling. Runs in the BACKGROUND (scanning bodies is slow and
+    exceeds the gunicorn worker timeout). Token-authed. ?tickets=t1,t2 labels extra emails not
+    tracked in cert_requests (e.g. manually-sent certs)."""
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
     extra = [t for t in (request.args.get('tickets', '').split(',')) if t.strip()]
-    return jsonify(label_sent_cert_emails(extra_tickets=extra))
+    threading.Thread(target=label_sent_cert_emails, kwargs={'extra_tickets': extra}, daemon=True).start()
+    return jsonify({'ok': True, 'started': True, 'extra_tickets': len(extra)})
 
 @app.route('/api/gmail-label-sent', methods=['POST'])
 def api_gmail_label_sent():
