@@ -680,6 +680,8 @@ def init_db():
             wa_sent_at TEXT,
             email_sent_at TEXT,
             wa_target TEXT,
+            message_id TEXT,
+            cert_labeled TEXT,
             created_at TEXT
         );
         CREATE TABLE IF NOT EXISTS customer_attachments (
@@ -779,7 +781,7 @@ def init_db():
         conn.execute("ALTER TABLE insureds ADD COLUMN is_midwife INTEGER")
     # cert_requests: email columns (table shipped before the "both email+WhatsApp" rule)
     _cert_cols = [r[1] for r in conn.execute("PRAGMA table_info(cert_requests)").fetchall()]
-    for col in ('email', 'email_sent_at'):
+    for col in ('email', 'email_sent_at', 'message_id', 'cert_labeled'):
         if col not in _cert_cols:
             conn.execute(f"ALTER TABLE cert_requests ADD COLUMN {col} TEXT")
     # Extra elementary/car fields (mainly from the Ofir/Meir book). All optional — shown
@@ -6611,6 +6613,75 @@ def label_sent_policy_emails(limit=None):
     finally:
         _gmail_label_lock.release()
 
+GMAIL_CERT_SENT_LABEL = 'אישורי ביטוח נשלחו'
+
+def label_sent_cert_emails(limit=None):
+    """Gmail-label + archive the Harel certificate emails whose cert was already delivered, moving
+    them out of the inbox into 'אישורי ביטוח נשלחו' (Gmail auto-creates the label). So the inbox
+    shows only certificates still awaiting handling — the operational 'בקרה'. Returns counts."""
+    if not _gmail_label_lock.acquire(blocking=False):
+        return {'processed': 0, 'found': 0, 'not_found': 0}
+    try:
+        cfg = EMAIL_CONFIG
+        if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
+            return {'processed': 0, 'found': 0, 'not_found': 0}
+        conn = get_db()
+        q = ("SELECT id, message_id, cust_name FROM cert_requests WHERE COALESCE(message_id,'')!='' "
+             "AND COALESCE(cert_labeled,'')='' AND COALESCE(wa_sent_at,'')!='' ORDER BY id DESC")
+        if limit:
+            q += f" LIMIT {int(limit)}"
+        rows = conn.execute(q).fetchall()
+        if not rows:
+            conn.close(); return {'processed': 0, 'found': 0, 'not_found': 0}
+        label = '"' + _imap_utf7(GMAIL_CERT_SENT_LABEL) + '"'
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
+        mail.login(cfg['username'], cfg['password'])
+        allbox = None
+        try:
+            typ, boxes = mail.list()
+            for b in (boxes or []):
+                line = b.decode('utf-8', 'replace') if isinstance(b, (bytes, bytearray)) else str(b)
+                if '\\All' in line:
+                    mm = re.findall(r'"([^"]*)"', line)
+                    if mm:
+                        allbox = mm[-1]; break
+        except Exception:
+            pass
+        mail.select(('"%s"' % allbox) if allbox else 'INBOX')
+        found = not_found = 0
+        for r in rows:
+            mid = (r['message_id'] or '').strip()
+            hit = False
+            try:
+                typ, data = mail.search(None, 'HEADER', 'Message-ID', mid)
+                for uid in (data[0].split() if typ == 'OK' else []):
+                    mail.store(uid, '+X-GM-LABELS', label)
+                    mail.store(uid, '-X-GM-LABELS', '\\Inbox')   # archive out of the inbox
+                    hit = True
+            except Exception as e:
+                print(f'[cert-label] {mid}: {e}')
+            if hit:
+                found += 1
+                conn.execute("UPDATE cert_requests SET cert_labeled=? WHERE id=?", (now, r['id']))
+            else:
+                not_found += 1
+        conn.commit(); conn.close()
+        mail.logout()
+        return {'processed': len(rows), 'found': found, 'not_found': not_found}
+    except Exception as e:
+        print(f'[cert-label] שגיאה: {e}')
+        return {'processed': 0, 'found': 0, 'not_found': 0, 'error': str(e)}
+    finally:
+        _gmail_label_lock.release()
+
+@app.route('/api/cert/label-sent', methods=['POST', 'GET'])
+def api_cert_label_sent():
+    """Manual trigger for cert-email labeling. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    return jsonify(label_sent_cert_emails())
+
 @app.route('/api/gmail-label-sent', methods=['POST'])
 def api_gmail_label_sent():
     if not _wa_api_authed():
@@ -7406,7 +7477,7 @@ def _match_insured_by_name(conn, name):
         return (list(by_id.values())[0], 'matched')
     return (None, 'ambiguous' if len(by_id) > 1 else 'no_match')
 
-def _ingest_harel_cert(conn, subject, html, received_at):
+def _ingest_harel_cert(conn, subject, html, received_at, message_id=''):
     """Queue a Harel certificate request keyed by ticket. Returns (ticket, name) or (None, None)."""
     f = _parse_harel_cert(subject, html)
     ticket, name = f['ticket'], f['name']
@@ -7424,10 +7495,10 @@ def _ingest_harel_cert(conn, subject, html, received_at):
         (idn.lstrip('0'),)).fetchone() if idn else None
     conn.execute(
         """INSERT INTO cert_requests (ticket, cust_name, id_number, phone, email, brand, customer_id,
-               received_at, match_status, created_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+               received_at, match_status, message_id, created_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         (ticket, name, idn, phone, email, brand, (cust['id'] if cust else None), received_at, mstatus,
-         datetime.datetime.now().isoformat()))
+         (message_id or '').strip(), datetime.datetime.now().isoformat()))
     if idn:
         log_event(conn, event_key(idn, ('cust-%d' % cust['id']) if cust else ('cert-%s' % ticket)),
                   f"התקבלה בקשת אישור קיום ביטוח (הראל) · התאמה: {mstatus}", 'system', kind='cert_request')
@@ -7484,7 +7555,7 @@ def _check_cert_emails_impl(days_back=14):
                     break
             if not html:
                 continue
-            ticket, name = _ingest_harel_cert(conn, subject, html, received_at)
+            ticket, name = _ingest_harel_cert(conn, subject, html, received_at, message_id)
             if ticket and message_id:
                 conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
                              (message_id, datetime.datetime.now().isoformat()))
@@ -7663,6 +7734,13 @@ def email_poll_thread():
                 print(f"[gmail-label] תויגו ואורכבו {lr['found']} מיילי פוליסות שנשלחו")
         except Exception as e:
             print(f'[gmail-label] שגיאת thread: {e}')
+        touch_scan_heartbeat()
+        try:
+            cl = label_sent_cert_emails()
+            if cl.get('found'):
+                print(f"[cert-label] תויגו ואורכבו {cl['found']} מיילי אישורי ביטוח שנשלחו")
+        except Exception as e:
+            print(f'[cert-label] שגיאת thread: {e}')
         touch_scan_heartbeat()
 
 # ── Admin email trigger ──────────────────────────────────────
