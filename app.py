@@ -775,11 +775,13 @@ def init_db():
                      ('is_midwife','INTEGER'),
                      ('lead_form_json','TEXT'), ('marketing_consent','TEXT'),
                      ('lead_doc_path','TEXT'), ('lead_doc_saved','TEXT'),
-                     ('end_reminder_sent_date','TEXT')]:
+                     ('end_reminder_sent_date','TEXT'), ('group_owner','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     if 'is_midwife' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
         conn.execute("ALTER TABLE insureds ADD COLUMN is_midwife INTEGER")
+    if 'group_owner' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
+        conn.execute("ALTER TABLE insureds ADD COLUMN group_owner TEXT")
     # cert_requests: email columns (table shipped before the "both email+WhatsApp" rule)
     _cert_cols = [r[1] for r in conn.execute("PRAGMA table_info(cert_requests)").fetchall()]
     for col in ('email', 'email_sent_at', 'message_id', 'cert_labeled'):
@@ -1643,6 +1645,39 @@ def api_end_reminder_marked():
     conn.close()
     return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
 
+@app.route('/api/group-owner/set', methods=['POST'])
+def api_group_owner_set():
+    """Mark customers as belonging to a group owner (e.g. Aviram's therapists): sets group_owner,
+    overrides the contact phone to the owner's phone, and notes the shared card last-4. Applies to
+    EVERY month's customer row + the insured master, keyed by ת"ז. Token-authed.
+    Body: {id_numbers:[...], owner, phone, card4}. Pass owner='' to CLEAR the marking."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(force=True, silent=True) or {}
+    owner = (d.get('owner') or '').strip()
+    phone = re.sub(r'\D', '', str(d.get('phone') or ''))
+    card4 = re.sub(r'\D', '', str(d.get('card4') or ''))[-4:]
+    ids = [re.sub(r'\D', '', str(x)).lstrip('0') for x in (d.get('id_numbers') or []) if str(x).strip()]
+    if not ids:
+        return jsonify({'error': 'need id_numbers'}), 400
+    card_disp = ('****' + card4) if card4 else None
+    conn = get_db()
+    done = []
+    for z in ids:
+        cust = conn.execute(
+            "UPDATE customers SET group_owner=?, phone=COALESCE(NULLIF(?,''),phone), "
+            "form_card_number=COALESCE(?,form_card_number) WHERE ltrim(COALESCE(id_number,''),'0')=?",
+            (owner or None, phone, card_disp, z)).rowcount
+        ins = conn.execute(
+            "UPDATE insureds SET group_owner=?, phone=COALESCE(NULLIF(?,''),phone) "
+            "WHERE ltrim(COALESCE(id_number,''),'0')=?", (owner or None, phone, z)).rowcount
+        done.append({'id_number': z, 'customers': cust, 'insureds': ins})
+        if owner:
+            log_event(conn, event_key(z, 'grp-%s' % z),
+                      f"שויך לקבוצת {owner} (טלפון + אשראי של המרכז)", 'system', kind='group_owner')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'owner': owner, 'phone': phone, 'card': card_disp, 'results': done})
+
 @app.route('/api/campaign/wrong-sends')
 def api_campaign_wrong_sends():
     """New-business/lead customers that received the renewal campaign email today (a mistake
@@ -2122,7 +2157,7 @@ def update_customer(cid):
         _c.close()
         if not _row or not can_access_brand(_row['brand']):
             return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
-    allowed = ['status', 'contact_date', 'interested_in_products', 'end_reminder_sent_date',
+    allowed = ['status', 'contact_date', 'interested_in_products', 'end_reminder_sent_date', 'group_owner',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip', 'is_midwife',
                 'whatsapp_source', 'brand', 'phone', 'email', 'address', 'name', 'id_number',
                 'call_date_1', 'call_status_1', 'call_by_1',
@@ -4530,8 +4565,11 @@ def _policy_queue_items(conn, brand_key):
     # 'הופק' (issued) is treated the same as 'חודש' (renewed) for policy delivery (Sharon: they're
     # the same in the calcs) — so a renewal PDF for an 'הופק' customer is still delivered. A NEW-doc
     # for an 'הופק' customer is skipped here (not a renewal doc) and handled by the new-business path.
+    # Group-owner customers (e.g. Aviram's therapists) are EXCLUDED from auto-delivery — their PDFs
+    # are prepared manually (price removed) and sent to the group owner by hand.
     q = ("SELECT * FROM customers WHERE status IN ('חודש','חודש - בוצעה שיחת מכירה','הופק') AND brand IN (%s) "
-         "AND COALESCE(import_source,'')!='test_ofir' ORDER BY month_id ASC, id ASC"
+         "AND COALESCE(import_source,'')!='test_ofir' AND COALESCE(group_owner,'')='' "
+         "ORDER BY month_id ASC, id ASC"
          % ','.join('?' * len(brands)))
     for c in conn.execute(q, brands).fetchall():
         idn = normalize_id_number(c['id_number'])

@@ -94,6 +94,7 @@
         <div>
           <div class="fw-semibold">{{ c.name }}</div>
           <small class="text-muted">{{ c.policy_number }}</small>
+          {% if c.group_owner %}<div><span class="badge bg-dark" title="שייך לקבוצת {{ c.group_owner }} — הטלפון והאשראי של המרכז"><i class="bi bi-people-fill me-1"></i>{{ c.group_owner }}</span></div>{% endif %}
         </div>
         <i class="bi bi-pencil-square text-secondary" style="font-size:0.85rem; flex-shrink:0"></i>
       </a>
