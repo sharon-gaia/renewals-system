@@ -4820,7 +4820,8 @@ def policy_sent():
     col = 'whatsapp_sent_at' if channel == 'whatsapp' else 'email_sent_at'
     conn.execute(f"UPDATE policy_documents SET {col}=? WHERE id=?", (now, doc_id))
     pr = conn.execute(
-        """SELECT insured_id, insured_name, phone_mobile, email, agent_number, doc_type_label, policy_number
+        """SELECT insured_id, insured_name, phone_mobile, email, agent_number, doc_type_label,
+                  policy_number, policy_document_id
            FROM policy_records WHERE policy_document_id=? LIMIT 1""", (doc_id,)).fetchone()
     if pr and pr['insured_id']:
         ch = 'וואטסאפ' if channel == 'whatsapp' else 'מייל'
