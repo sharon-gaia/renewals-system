@@ -4716,6 +4716,7 @@ def _policy_queue_items(conn, brand_key):
             'email_html': policy_email_html(c['name']),
             'pdf_url': f'/api/policy/pdf/{r["doc_id"]}',
             'test_mode': not live,
+            'is_midwife': bool(c['is_midwife']),
             'intended': f"{c['name']} · {real_phone or '—'} · {real_email or '—'}",
         })
     # ── New-business policies (WhatsApp only), gated by POLICY_NEW_MODE ('test'→Sharon,'live') ──
@@ -4755,11 +4756,14 @@ def _policy_queue_items(conn, brand_key):
             # A no-phone/no-email new policy is still queued so the local sender forwards it to
             # Sharon (rule: issued-but-undeliverable → me) rather than dropping it silently.
             seen_new.add(key)
+            _mw = conn.execute("SELECT 1 FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                               "AND COALESCE(is_midwife,0)=1 LIMIT 1", (key,)).fetchone()
             items.append({
                 'doc_id': r['doc_id'],
                 'name': r['insured_name'] or '',
                 'policy_number': r['policy_number'],
                 'brand': brand_key,
+                'is_midwife': bool(_mw),
                 'phone': _policy_to972(POLICY_TEST_PHONE) if new_test else (real_phone or ''),
                 'email': (POLICY_TEST_EMAIL if new_test else real_email) if has_email else '',
                 'whatsapp_pending': not r['whatsapp_sent_at'],
