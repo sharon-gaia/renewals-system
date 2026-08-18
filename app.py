@@ -774,7 +774,8 @@ def init_db():
                      ('address','TEXT'), ('status_changed_at','TEXT'),
                      ('is_midwife','INTEGER'),
                      ('lead_form_json','TEXT'), ('marketing_consent','TEXT'),
-                     ('lead_doc_path','TEXT'), ('lead_doc_saved','TEXT')]:
+                     ('lead_doc_path','TEXT'), ('lead_doc_saved','TEXT'),
+                     ('end_reminder_sent_date','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     if 'is_midwife' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
@@ -2085,7 +2086,7 @@ def update_customer(cid):
         _c.close()
         if not _row or not can_access_brand(_row['brand']):
             return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
-    allowed = ['status', 'contact_date', 'interested_in_products',
+    allowed = ['status', 'contact_date', 'interested_in_products', 'end_reminder_sent_date',
                 'whatsapp_sent_date', 'sharon_notes', 'requests_to_sharon', 'is_vip', 'is_midwife',
                 'whatsapp_source', 'brand', 'phone', 'email', 'address', 'name', 'id_number',
                 'call_date_1', 'call_status_1', 'call_by_1',
