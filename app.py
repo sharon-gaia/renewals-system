@@ -6630,14 +6630,14 @@ def label_sent_cert_emails(limit=None, extra_tickets=None):
         conn = get_db()
         q = ("SELECT id, ticket FROM cert_requests WHERE COALESCE(ticket,'')!='' "
              "AND COALESCE(cert_labeled,'')='' AND COALESCE(wa_sent_at,'')!='' ORDER BY id DESC")
-        if limit:
-            q += f" LIMIT {int(limit)}"
-        targets = [(r['id'], r['ticket']) for r in conn.execute(q).fetchall()]
+        want = {}                                        # ticket -> cert_requests.id (or None)
+        for r in conn.execute(q).fetchall():
+            want[r['ticket']] = r['id']
         for t in (extra_tickets or []):
             t = (t or '').strip()
-            if t:
-                targets.append((None, t))
-        if not targets:
+            if t and t not in want:
+                want[t] = None
+        if not want:
             conn.close(); return {'processed': 0, 'found': 0, 'not_found': 0}
         label = '"' + _imap_utf7(GMAIL_CERT_SENT_LABEL) + '"'
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -6655,26 +6655,34 @@ def label_sent_cert_emails(limit=None, extra_tickets=None):
         except Exception:
             pass
         mail.select(('"%s"' % allbox) if allbox else 'INBOX')
-        found = not_found = 0
-        for rid, ticket in targets:
-            hit = False
+        # Scan the actual Harel cert emails and match each by the ticket in its body (Gmail can't
+        # reliably search the hex ticket inside a URL, so we read the bodies).
+        since = (datetime.date.today() - datetime.timedelta(days=int(limit or 10))).strftime('%d-%b-%Y')
+        typ, data = mail.search(None, f'FROM "{HAREL_CERT_SENDER}" SINCE {since}')
+        done = set()
+        for uid in (data[0].split() if typ == 'OK' and data and data[0] else []):
             try:
-                typ, data = mail.search(None, 'X-GM-RAW', '"%s"' % ticket)
-                for uid in (data[0].split() if typ == 'OK' else []):
+                _, fd = mail.fetch(uid, '(BODY.PEEK[])')
+                msg = email_lib.message_from_bytes(fd[0][1])
+                html = None
+                for part in msg.walk():
+                    if part.get_content_type() == 'text/html':
+                        try: html = part.get_content()
+                        except Exception:
+                            pl = part.get_payload(decode=True); html = pl.decode('utf-8', 'replace') if pl else None
+                        break
+                tk = _parse_harel_cert('', html or '')['ticket']
+                if tk and tk in want and tk not in done:
                     mail.store(uid, '+X-GM-LABELS', label)
                     mail.store(uid, '-X-GM-LABELS', '\\Inbox')   # archive out of the inbox
-                    hit = True
+                    done.add(tk)
+                    if want[tk]:
+                        conn.execute("UPDATE cert_requests SET cert_labeled=? WHERE id=?", (now, want[tk]))
             except Exception as e:
-                print(f'[cert-label] {ticket[:10]}: {e}')
-            if hit:
-                found += 1
-                if rid:
-                    conn.execute("UPDATE cert_requests SET cert_labeled=? WHERE id=?", (now, rid))
-            else:
-                not_found += 1
+                print(f'[cert-label] uid {uid}: {e}')
         conn.commit(); conn.close()
         mail.logout()
-        return {'processed': len(targets), 'found': found, 'not_found': not_found}
+        return {'processed': len(want), 'found': len(done), 'not_found': len(want) - len(done)}
     except Exception as e:
         print(f'[cert-label] שגיאה: {e}')
         return {'processed': 0, 'found': 0, 'not_found': 0, 'error': str(e)}
