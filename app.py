@@ -7869,6 +7869,66 @@ def api_cert_sent():
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
+@app.route('/api/cert/resolve', methods=['POST'])
+def api_cert_resolve():
+    """Manually resolve a no_match / ambiguous certificate request so it can be delivered.
+    Body {ticket, phone?, id_number?, email?}. Priority: an explicit id_number wins; otherwise
+    look the phone up in the master (insureds) + active-month customers and, if it points to
+    exactly ONE ת"ز, use it. Sets the cert_request's id_number/phone/email/customer_id +
+    match_status='matched' so /api/cert/queue picks it up. Returns candidates if ambiguous."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    ticket = (d.get('ticket') or '').strip()
+    if not ticket:
+        return jsonify({'error': 'need ticket'}), 400
+    conn = get_db()
+    cr = conn.execute("SELECT id, cust_name FROM cert_requests WHERE ticket=?", (ticket,)).fetchone()
+    if not cr:
+        conn.close(); return jsonify({'error': 'unknown ticket'}), 404
+    idn = re.sub(r'\D', '', str(d.get('id_number') or ''))
+    phone = re.sub(r'\D', '', str(d.get('phone') or ''))
+    email = (d.get('email') or '').strip()
+    # No explicit ת"ז? Resolve it from the phone via the master + active customers.
+    if not idn and phone:
+        cands = {}
+        for r in conn.execute("SELECT id_number, name, phone, email, brand FROM insureds "
+                              "WHERE REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ','')=?", (phone,)).fetchall():
+            z = re.sub(r'\D', '', r['id_number'] or '')
+            if z: cands[z] = {'name': r['name'], 'email': r['email'], 'brand': r['brand'], 'src': 'master'}
+        for r in conn.execute("SELECT id_number, name, phone, email, brand FROM customers "
+                              "WHERE REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ','')=?", (phone,)).fetchall():
+            z = re.sub(r'\D', '', r['id_number'] or '')
+            if z: cands.setdefault(z, {'name': r['name'], 'email': r['email'], 'brand': r['brand'], 'src': 'customer'})
+        if len(cands) == 1:
+            idn = next(iter(cands))
+            if not email:
+                email = cands[idn].get('email') or ''
+        else:
+            conn.close()
+            return jsonify({'resolved': False, 'reason': ('no phone match' if not cands else 'ambiguous'),
+                            'candidates': [{'id_number': k, **v} for k, v in cands.items()]})
+    if not idn:
+        conn.close(); return jsonify({'error': 'need id_number or a phone that resolves to one'}), 400
+    # Pull master contact + link to an active-month customer if present.
+    ins = conn.execute("SELECT name, phone, email, brand FROM insureds "
+                       "WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn.lstrip('0'),)).fetchone()
+    cust = conn.execute("SELECT c.id, c.brand FROM customers c JOIN months m ON m.id=c.month_id "
+                        "WHERE m.is_active=1 AND ltrim(COALESCE(c.id_number,''),'0')=?",
+                        (idn.lstrip('0'),)).fetchone()
+    if not phone:
+        phone = re.sub(r'\D', '', str((ins['phone'] if ins else '') or ''))
+    if not email and ins:
+        email = ins['email'] or ''
+    brand = (cust['brand'] if cust else (ins['brand'] if ins else None))
+    conn.execute("UPDATE cert_requests SET id_number=?, phone=?, email=?, brand=COALESCE(?,brand), "
+                 "customer_id=COALESCE(?,customer_id), match_status='matched' WHERE ticket=?",
+                 (idn, phone, email, brand, (cust['id'] if cust else None), ticket))
+    conn.commit()
+    conn.close()
+    return jsonify({'resolved': True, 'ticket': ticket, 'id_number': idn, 'phone': phone,
+                    'email': email, 'brand': brand, 'customer_id': (cust['id'] if cust else None)})
+
 @app.route('/api/cert/preview')
 def api_cert_preview():
     """READ-ONLY: list Harel certificate emails since a date WITHOUT queuing or sending — to see
