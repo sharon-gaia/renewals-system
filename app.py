@@ -3471,6 +3471,43 @@ def api_customer_update():
     conn.close()
     return jsonify({'updated': len(done), 'ids': done})
 
+@app.route('/api/fix-master-id', methods=['POST'])
+def api_fix_master_id():
+    """Token: correct a wrong ת"ז on the insured master (+ any customer rows) — old→new. Used when
+    a renewal file carries the VALID ת"ז but the master holds a bad legacy one (same person, matched
+    by name+phone). Body {pairs:[{old,new}]}. Guards: 'new' must be free (not held by a DIFFERENT
+    insured), 'old' must exist. Returns per-pair result."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    pairs = (request.get_json(silent=True) or {}).get('pairs') or []
+    conn = get_db()
+    out = []
+    for p in pairs:
+        old = re.sub(r'\D', '', str(p.get('old', ''))).lstrip('0')
+        new = re.sub(r'\D', '', str(p.get('new', '')))
+        newz = new.lstrip('0')
+        if not old or not new:
+            out.append({'old': p.get('old'), 'result': 'skip: missing old/new'})
+            continue
+        src = conn.execute("SELECT name FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?", (old,)).fetchone()
+        if not src:
+            out.append({'old': old, 'result': 'skip: old not in master'})
+            continue
+        clash = conn.execute("SELECT name FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                             "AND ltrim(COALESCE(id_number,''),'0')!=?", (newz, old)).fetchone()
+        if clash:
+            out.append({'old': old, 'new': new, 'result': f'ABORT: new ת"ז held by {clash["name"]}'})
+            continue
+        ni = conn.execute("UPDATE insureds SET id_number=? WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                          (new, old)).rowcount
+        nc = conn.execute("UPDATE customers SET id_number=? WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                          (new, old)).rowcount
+        out.append({'name': src['name'], 'old': old, 'new': new,
+                    'result': f'ok: insureds={ni}, customers={nc}'})
+    conn.commit()
+    conn.close()
+    return jsonify({'pairs': out})
+
 @app.route('/api/rep-performance')
 def api_rep_performance():
     """Token-authed: per-rep (role='agent') performance for the ACTIVE month + a ready-to-send
