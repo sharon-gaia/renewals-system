@@ -804,6 +804,19 @@ def init_db():
     conn.execute("""CREATE TABLE IF NOT EXISTS send_batch_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER, cust_id INTEGER, name TEXT,
         phone TEXT, brand TEXT, pnid TEXT, template TEXT, body_params TEXT)""")
+    # No-send dates (Jewish holidays / eves) for the bulk-send timing gate — Sharon-editable.
+    # Fri/Sat are handled automatically in code; this table adds holidays. Seeded ONCE (Tishrei
+    # 5787) so Sharon's later edits/deletes persist across restarts.
+    conn.execute("CREATE TABLE IF NOT EXISTS no_send_dates (date TEXT PRIMARY KEY, label TEXT)")
+    if not conn.execute("SELECT 1 FROM app_meta WHERE key='no_send_seeded'").fetchone():
+        for dt, lbl in [('2026-09-11', 'ערב ראש השנה'), ('2026-09-12', 'ראש השנה א׳'),
+                        ('2026-09-13', 'ראש השנה ב׳'), ('2026-09-20', 'ערב יום כיפור'),
+                        ('2026-09-21', 'יום כיפור'), ('2026-09-25', 'ערב סוכות'),
+                        ('2026-09-26', 'סוכות א׳'), ('2026-10-02', 'הושענא רבה'),
+                        ('2026-10-03', 'שמחת תורה')]:
+            conn.execute("INSERT OR IGNORE INTO no_send_dates (date, label) VALUES (?,?)", (dt, lbl))
+        conn.execute("INSERT INTO app_meta (key, value) VALUES ('no_send_seeded','1') "
+                     "ON CONFLICT(key) DO UPDATE SET value='1'")
     if 'group_owner' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
         conn.execute("ALTER TABLE insureds ADD COLUMN group_owner TEXT")
     # cert_requests: email columns (table shipped before the "both email+WhatsApp" rule)
@@ -1878,8 +1891,11 @@ def api_send_batch_create():
                      "VALUES (?,?,?,?,?,?,?,?)",
                      (bid, it['id'], it['name'], it['phone'], it['brand'], it['pnid'], it['template'],
                       json.dumps(it['body_params'], ensure_ascii=False)))
+    _typ_he = {'reminder_25': 'תזכורת חידוש (25 לחודש)', 'last_reminder_eom': 'אי-חידוש (סוף חודש)'}.get(typ, typ)
     conn.execute("INSERT INTO owner_alerts (text, created_at) VALUES (?,?)",
-                 (f"📋 מנת שליחה ממתינה לאישור: {len(items)} נמענים לסוג '{typ}'. לאישור/ביטול היכנס לדשבורד → /send-approvals", now))
+                 (f"📋 מנת שליחה ממתינה לאישור: {len(items)} נמענים — {_typ_he}.\n"
+                  f"לאישור או ביטול היכנס לעמוד האישור בדשבורד:\n"
+                  f"https://renewals-system-production.up.railway.app/send-approvals", now))
     conn.commit(); conn.close()
     return jsonify({'ok': True, 'batch_id': bid, 'count': len(items), 'status': 'pending'})
 
@@ -1928,8 +1944,66 @@ def send_approvals():
         items = conn.execute("SELECT name, brand, phone FROM send_batch_items WHERE batch_id=? ORDER BY brand, name",
                              (b['id'],)).fetchall()
         data.append({'b': b, 'items': items})
+    today = datetime.date.today().strftime('%Y-%m-%d')
+    holidays = conn.execute("SELECT date, label FROM no_send_dates WHERE date>=? ORDER BY date", (today,)).fetchall()
     conn.close()
-    return render_template('send_approvals.html', batches=data)
+    return render_template('send_approvals.html', batches=data, holidays=holidays)
+
+@app.route('/send-approvals/holidays/add', methods=['POST'])
+@login_required
+def send_approvals_holiday_add():
+    dt = (request.form.get('date') or '').strip()
+    lbl = (request.form.get('label') or 'חג').strip()
+    if re.match(r'^\d{4}-\d{2}-\d{2}$', dt):
+        conn = get_db()
+        conn.execute("INSERT OR REPLACE INTO no_send_dates (date, label) VALUES (?,?)", (dt, lbl))
+        conn.commit(); conn.close()
+        flash(f'נוסף תאריך ללא-שליחה: {dt} ({lbl})', 'success')
+    else:
+        flash('תאריך לא תקין (YYYY-MM-DD)', 'danger')
+    return redirect(url_for('send_approvals'))
+
+@app.route('/send-approvals/holidays/remove', methods=['POST'])
+@login_required
+def send_approvals_holiday_remove():
+    dt = (request.form.get('date') or '').strip()
+    conn = get_db()
+    conn.execute("DELETE FROM no_send_dates WHERE date=?", (dt,))
+    conn.commit(); conn.close()
+    flash(f'הוסר: {dt}', 'info')
+    return redirect(url_for('send_approvals'))
+
+@app.route('/api/send-window')
+def api_send_window():
+    """Token-authed: is it OK to send on a given date? Blocks Fri/Sat + any no_send_dates holiday.
+    ?date=YYYY-MM-DD (default today). Returns ok, reason, and the next allowed send day."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    ds = (request.args.get('date') or '').strip()
+    try:
+        d = datetime.datetime.strptime(ds, '%Y-%m-%d').date() if ds else datetime.date.today()
+    except ValueError:
+        return jsonify({'error': 'bad date (YYYY-MM-DD)'}), 400
+    conn = get_db()
+    hol = {r['date']: r['label'] for r in conn.execute("SELECT date, label FROM no_send_dates")}
+    conn.close()
+
+    def blocked(dt):
+        wd = dt.weekday()  # Mon=0 … Fri=4, Sat=5
+        if wd == 4:
+            return 'שישי'
+        if wd == 5:
+            return 'שבת'
+        lbl = hol.get(dt.strftime('%Y-%m-%d'))
+        return ('חג: ' + lbl) if lbl else None
+    reason = blocked(d)
+    nxt = d
+    for _ in range(60):
+        if not blocked(nxt):
+            break
+        nxt += datetime.timedelta(days=1)
+    return jsonify({'date': d.strftime('%Y-%m-%d'), 'ok': reason is None,
+                    'reason': reason or 'תקין', 'next_send_day': nxt.strftime('%Y-%m-%d')})
 
 @app.route('/send-approvals/<int:bid>/approve', methods=['POST'])
 @login_required
