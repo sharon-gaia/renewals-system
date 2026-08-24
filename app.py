@@ -4199,6 +4199,15 @@ def campaign_eligibility(conn, month_id):
         idk = re.sub(r'\D', '', str(r['id_number'] or '')).lstrip('0')
         if idk and idk in new_biz_ids:
             b['new_biz'].append(r); continue
+        # New business by SOURCE — join_form/harel_proposal leads (no issued policy yet, so the
+        # 90-day policy-record check above misses them) + issued new_policy rows. These are never
+        # renewals, so they must never get a renewal reminder whatever their work status.
+        if ('import_source' in r.keys() and (r['import_source'] or '') in NEW_BUSINESS_SOURCES):
+            b['new_biz'].append(r); continue
+        # Group-owner customers (e.g. Aviram's therapists) renew via the owner_renewal_confirm
+        # button flow to the owner, NOT the standard campaign — exclude from the auto-send.
+        if ('group_owner' in r.keys() and (r['group_owner'] or '').strip()):
+            b['status_excluded'].append(r); continue
         if (r['status'] or '') in CAMPAIGN_STOP_STATUSES or \
            ('do_not_contact' in r.keys() and r['do_not_contact']):
             b['status_excluded'].append(r); continue
