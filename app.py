@@ -4570,19 +4570,22 @@ def api_delivery_audit():
     now = datetime.datetime.now()
     cut_sent = (now - datetime.timedelta(hours=24)).strftime('%Y-%m-%d %H:%M')   # stuck: arrived >24h ago, unsent
     cut_nodoc = (now - datetime.timedelta(hours=72)).strftime('%Y-%m-%d %H:%M')  # no-doc: renewed >72h ago, no PDF
-    cycle = (now - datetime.timedelta(days=90)).strftime('%Y-%m-%d %H:%M')       # "this cycle" policy window
+    cycle = (now - datetime.timedelta(days=45)).strftime('%Y-%m-%d %H:%M')       # this-cycle policy window
+    # Only DELIVERABLE policy documents count — the delivery system sends renewal (חידוש) + new
+    # (חדש) PDFs, never proposals ("אינ'") or other doc types. Matching that keeps the audit honest.
+    DELIV = "(pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%')"
     conn = get_db()
     month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
     if not month:
         conn.close(); return jsonify({'error': 'no active month'}), 400
     rows = conn.execute(
-        """SELECT c.id, c.name, c.id_number, c.brand, c.status, c.status_changed_at,
+        f"""SELECT c.id, c.name, c.id_number, c.brand, c.status, c.status_changed_at,
                   (SELECT COUNT(*) FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
                      WHERE ltrim(COALESCE(pr.insured_id,''),'0')=ltrim(COALESCE(c.id_number,''),'0')
-                       AND pd.received_at >= ?) AS docs,
+                       AND pd.received_at >= ? AND {DELIV}) AS docs,
                   (SELECT COUNT(*) FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
                      WHERE ltrim(COALESCE(pr.insured_id,''),'0')=ltrim(COALESCE(c.id_number,''),'0')
-                       AND pd.received_at >= ?
+                       AND pd.received_at >= ? AND {DELIV}
                        AND (COALESCE(pd.whatsapp_sent_at,'')!='' OR COALESCE(pd.email_sent_at,'')!='')) AS sent
            FROM customers c
            WHERE c.month_id=? AND c.status IN ('חודש','חודש - בוצעה שיחת מכירה','הופק')
