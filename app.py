@@ -4558,6 +4558,60 @@ def api_funnel():
         out['views'][b] = _renewal_funnel([r for r in rows if r['brand'] == b])
     return jsonify(out)
 
+@app.route('/api/delivery-audit')
+def api_delivery_audit():
+    """Token-authed reliability net for the DASHBOARD's post-event individual sends (Sharon's hard
+    rule: a customer who renewed/was-issued, or a cert customer, must NEVER silently miss their
+    message). Surfaces, for the active cycle: renewed/issued customers whose THIS-CYCLE policy
+    arrived but wasn't delivered ('stuck'), renewed/issued with no policy doc at all past a longer
+    horizon ('no_doc'), and matched certs not sent ('cert_stuck') + unresolved no_match certs."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    now = datetime.datetime.now()
+    cut_sent = (now - datetime.timedelta(hours=24)).strftime('%Y-%m-%d %H:%M')   # stuck: arrived >24h ago, unsent
+    cut_nodoc = (now - datetime.timedelta(hours=72)).strftime('%Y-%m-%d %H:%M')  # no-doc: renewed >72h ago, no PDF
+    cycle = (now - datetime.timedelta(days=90)).strftime('%Y-%m-%d %H:%M')       # "this cycle" policy window
+    conn = get_db()
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    rows = conn.execute(
+        """SELECT c.id, c.name, c.id_number, c.brand, c.status, c.status_changed_at,
+                  (SELECT COUNT(*) FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
+                     WHERE ltrim(COALESCE(pr.insured_id,''),'0')=ltrim(COALESCE(c.id_number,''),'0')
+                       AND pd.received_at >= ?) AS docs,
+                  (SELECT COUNT(*) FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
+                     WHERE ltrim(COALESCE(pr.insured_id,''),'0')=ltrim(COALESCE(c.id_number,''),'0')
+                       AND pd.received_at >= ?
+                       AND (COALESCE(pd.whatsapp_sent_at,'')!='' OR COALESCE(pd.email_sent_at,'')!='')) AS sent
+           FROM customers c
+           WHERE c.month_id=? AND c.status IN ('חודש','חודש - בוצעה שיחת מכירה','הופק')
+             AND COALESCE(c.group_owner,'')='' AND COALESCE(c.id_number,'')!=''""",
+        (cycle, cycle, month['id'])).fetchall()
+    stuck, no_doc = [], []
+    for r in rows:
+        if r['sent'] > 0:
+            continue  # this-cycle policy delivered — fine
+        chg = r['status_changed_at'] or ''
+        item = {'id': r['id'], 'name': r['name'], 'id_number': r['id_number'],
+                'brand': r['brand'], 'status': r['status'], 'since': chg or '(no date)'}
+        if r['docs'] > 0:
+            if not chg or chg <= cut_sent:
+                stuck.append(item)           # PDF arrived, not delivered → real miss
+        elif not chg or chg <= cut_nodoc:
+            no_doc.append(item)              # renewed/issued, no PDF at all → waiting/lost
+    cert_stuck = [dict(x) for x in conn.execute(
+        "SELECT cust_name, id_number, brand, received_at FROM cert_requests "
+        "WHERE match_status='matched' AND COALESCE(wa_sent_at,'')='' AND received_at <= ? ORDER BY received_at",
+        (cut_sent,)).fetchall()]
+    cert_no_match = conn.execute(
+        "SELECT COUNT(*) FROM cert_requests WHERE match_status='no_match' AND COALESCE(wa_sent_at,'')=''").fetchone()[0]
+    conn.close()
+    return jsonify({'month': month['name'],
+                    'policy_stuck': stuck, 'policy_no_doc': no_doc,
+                    'cert_stuck': cert_stuck, 'cert_no_match': cert_no_match,
+                    'total_gaps': len(stuck) + len(no_doc) + len(cert_stuck) + cert_no_match})
+
 @app.route('/api/new-biz-in-renewals')
 def api_new_biz_in_renewals():
     """Token-authed diagnostic: active-month rows from a NEW-BUSINESS pipeline whose work status
