@@ -1986,6 +1986,35 @@ def _enforce_2fa():
             time.time() - session.get('verified_at', 0) > TWOFA_TTL:
         return redirect(url_for('twofa_verify'))
 
+RENEWAL_NO_RENEW = ('לא רוצים לחדש', 'לא מחדש', 'בוטל')
+RENEWAL_CONTACTED = ('נוצר קשר עם לקוח', 'קיבל פניה', 'הלקוח אישר')
+
+def _renewal_funnel(subset):
+    """Renewal funnel counts for a set of customer rows (must carry status, import_source,
+    form_received_at, call_status_1..3). New business is NOT a renewal — excluded from the
+    total/buckets/% both by status (ממתין להפקה/הופק/בוטל) and by source (NEW_BUSINESS_SOURCES),
+    whatever its work status. Single source of truth for the dashboard AND /api/funnel."""
+    def _contacted(r):
+        return bool(r['call_status_1'] or r['call_status_2'] or r['call_status_3'])
+    pending_issue = sum(1 for r in subset if r['status'] == 'ממתין להפקה')
+    core = [r for r in subset
+            if r['status'] not in ('ממתין להפקה', 'הופק', 'בוטל')
+            and (r['import_source'] or '') not in NEW_BUSINESS_SOURCES]
+    t = len(core)
+    rnw = sum(1 for r in core if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה'))
+    no_renew = sum(1 for r in core if r['status'] in RENEWAL_NO_RENEW)
+    seen = sum(1 for r in core if r['status'] in RENEWAL_CONTACTED)
+    forms = sum(1 for r in core if r['status'] == 'טופס התקבל')
+    return {
+        'total': t, 'renewed': rnw,
+        'renewed_from_forms': sum(1 for r in core if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה') and r['form_received_at']),
+        'forms': forms, 'no_renew': no_renew, 'seen': seen,
+        'pending_issue': pending_issue,
+        'no_contact': sum(1 for r in core if not r['status'] and not _contacted(r)),
+        'pending': t - rnw - no_renew - seen - forms,
+        'pct': round(rnw / t * 100, 1) if t else 0,
+    }
+
 @app.route('/')
 @login_required
 def index():
@@ -1999,37 +2028,7 @@ def index():
                                call_status_1, call_status_2, call_status_3
                                FROM customers WHERE month_id=?""" + bc,
                             [month['id']] + bp).fetchall()
-        # Status buckets span both pipelines: Gaia/Winner and the Ofir equivalents.
-        NO_RENEW = ('לא רוצים לחדש', 'לא מחדש', 'בוטל')
-        CONTACTED = ('נוצר קשר עם לקוח', 'קיבל פניה', 'הלקוח אישר')
-        def _contacted(r):
-            return bool(r['call_status_1'] or r['call_status_2'] or r['call_status_3'])
-        def _funnel(subset):
-            """Renewal funnel counts. New-business leads ("ממתין להפקה") are NOT renewals —
-            they're counted separately (pending_issue) and excluded from the renewal
-            total, the buckets, and the renewal-percentage denominator."""
-            pending_issue = sum(1 for r in subset if r['status'] == 'ממתין להפקה')
-            # New business is excluded from the renewal funnel two ways: by status (a lead
-            # awaiting issuance "ממתין להפקה", an issued policy "הופק", a cancellation "בוטל")
-            # AND by source — any row from a new-business pipeline (new_policy/join_form/
-            # harel_proposal) is never a renewal, whatever its work status.
-            core = [r for r in subset
-                    if r['status'] not in ('ממתין להפקה', 'הופק', 'בוטל')
-                    and (r['import_source'] or '') not in NEW_BUSINESS_SOURCES]
-            t = len(core)
-            rnw = sum(1 for r in core if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה'))
-            no_renew = sum(1 for r in core if r['status'] in NO_RENEW)
-            seen = sum(1 for r in core if r['status'] in CONTACTED)
-            forms = sum(1 for r in core if r['status'] == 'טופס התקבל')
-            return {
-                'total': t, 'renewed': rnw,
-                'renewed_from_forms': sum(1 for r in core if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה') and r['form_received_at']),
-                'forms': forms, 'no_renew': no_renew, 'seen': seen,
-                'pending_issue': pending_issue,
-                'no_contact': sum(1 for r in core if not r['status'] and not _contacted(r)),
-                'pending': t - rnw - no_renew - seen - forms,
-                'pct': round(rnw / t * 100, 1) if t else 0,
-            }
+        _funnel = _renewal_funnel
         # Per-agency views for the top-of-dashboard toggle (client-side switch).
         # Gaia+Winner are the active book; Ofir is planning-only, so its data is masked.
         present = [b for b in ('גאיה', 'ווינר', 'אופיר') if any(r['brand'] == b for r in rows)]
@@ -4465,6 +4464,29 @@ def api_brand_census():
         out.append({'id': m['id'], 'name': m['name'], 'is_active': m['is_active'], 'brands': brands})
     conn.close()
     return jsonify({'months': out})
+
+@app.route('/api/funnel')
+def api_funnel():
+    """Token-authed: the exact renewal-funnel numbers the dashboard shows for the active month —
+    the combined גאיה+ווינר view plus each present brand. Uses the same _renewal_funnel helper."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    rows = conn.execute("""SELECT status, brand, sector, form_received_at, import_source,
+                           call_status_1, call_status_2, call_status_3
+                           FROM customers WHERE month_id=?""", (month['id'],)).fetchall()
+    conn.close()
+    present = [b for b in ('גאיה', 'ווינר', 'אופיר') if any(r['brand'] == b for r in rows)]
+    active = [b for b in ('גאיה', 'ווינר') if b in present]
+    out = {'month': month['name'], 'views': {}}
+    if len(active) > 1:
+        out['views']['גאיה + ווינר'] = _renewal_funnel([r for r in rows if r['brand'] in active])
+    for b in present:
+        out['views'][b] = _renewal_funnel([r for r in rows if r['brand'] == b])
+    return jsonify(out)
 
 @app.route('/api/new-biz-in-renewals')
 def api_new_biz_in_renewals():
