@@ -1,0 +1,67 @@
+{% extends 'base.html' %}
+{% block title %} — אישור שליחות{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h5 class="mb-0"><i class="bi bi-send-check text-primary me-2"></i>שליחות המוניות — ממתין לאישור</h5>
+  <span class="badge bg-secondary fs-6">{{ batches|length }} מנות</span>
+</div>
+
+{% set type_labels = {'reminder_25': 'תזכורת חידוש (25 לחודש)', 'last_reminder_eom': 'אי-חידוש (סוף חודש)'} %}
+
+{% if not batches %}
+<div class="alert alert-light border text-muted py-4 text-center">
+  אין כרגע מנות שליחה שממתינות לאישור. מנה נוצרת אוטומטית במועד השליחה, ותופיע כאן לאישורך.
+</div>
+{% endif %}
+
+{% for row in batches %}
+{% set b = row.b %}
+<div class="card mb-3 shadow-sm">
+  <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2
+              {% if b.status=='approved' %}bg-success-subtle{% else %}bg-warning-subtle{% endif %}">
+    <div>
+      <span class="fw-bold">{{ type_labels.get(b.send_type, b.send_type) }}</span>
+      <span class="badge bg-dark ms-2">{{ b.count }} נמענים</span>
+      {% if b.status=='approved' %}
+      <span class="badge bg-success ms-1">אושר ✓ ({{ b.approved_at }})</span>
+      {% else %}
+      <span class="badge bg-warning text-dark ms-1">ממתין לאישור</span>
+      {% endif %}
+      <div class="text-muted small mt-1">תבנית <code>{{ b.template }}</code> · נוצר {{ b.created_at }}</div>
+    </div>
+    <div class="d-flex gap-2">
+      {% if b.status=='pending' %}
+      <form method="POST" action="/send-approvals/{{ b.id }}/approve"
+            onsubmit="return confirm('לאשר שליחה ל-{{ b.count }} נמענים? הבוט ישלח לאחר האישור.');">
+        <button class="btn btn-success btn-sm"><i class="bi bi-check-lg me-1"></i>אשר ושלח</button>
+      </form>
+      {% endif %}
+      <form method="POST" action="/send-approvals/{{ b.id }}/cancel"
+            onsubmit="return confirm('לבטל את המנה?');">
+        <button class="btn btn-outline-danger btn-sm"><i class="bi bi-x-lg me-1"></i>בטל</button>
+      </form>
+    </div>
+  </div>
+  <div class="card-body py-2">
+    <a class="small" data-bs-toggle="collapse" href="#names{{ b.id }}" role="button">
+      <i class="bi bi-list-ul me-1"></i>הצג את {{ row.items|length }} השמות
+    </a>
+    <div class="collapse mt-2" id="names{{ b.id }}">
+      <div class="table-responsive" style="max-height:340px;overflow:auto">
+        <table class="table table-sm table-striped mb-0 small">
+          <thead><tr><th>#</th><th>שם</th><th>מותג</th><th>טלפון</th></tr></thead>
+          <tbody>
+            {% for it in row.items %}
+            <tr><td class="text-muted">{{ loop.index }}</td><td>{{ it.name }}</td>
+                <td>{{ it.brand }}</td><td dir="ltr">{{ it.phone }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+{% endblock %}

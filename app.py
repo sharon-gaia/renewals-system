@@ -797,6 +797,13 @@ def init_db():
         error_code TEXT, sent_at TEXT, updated_at TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS optouts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, id_number TEXT, reason TEXT, created_at TEXT)""")
+    # Bulk-send approval batches — a frozen recipient snapshot Sharon approves before the bot sends.
+    conn.execute("""CREATE TABLE IF NOT EXISTS send_batches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, send_type TEXT, template TEXT, status TEXT,
+        count INTEGER, created_at TEXT, approved_at TEXT, approved_by TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS send_batch_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER, cust_id INTEGER, name TEXT,
+        phone TEXT, brand TEXT, pnid TEXT, template TEXT, body_params TEXT)""")
     if 'group_owner' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
         conn.execute("ALTER TABLE insureds ADD COLUMN group_owner TEXT")
     # cert_requests: email columns (table shipped before the "both email+WhatsApp" rule)
@@ -1735,22 +1742,11 @@ BRAND_PNID = {'גאיה': '1030477631130403', 'ווינר': '103910399338118', '
 SEND_TEMPLATES = {'reminder_25': 'renewal_reminder', 'renewal_campaign': 'renewal_reminder',
                   'last_reminder_eom': 'renewal_last_reminder'}
 
-@app.route('/api/send-queue')
-def api_send_queue():
-    """Token-authed: send-ready recipients for the bot (the pure executor). ?type=reminder_25 |
-    last_reminder_eom (renewal_campaign/telemarketing = coming). Each recipient carries everything
-    needed to POST to Meta: phone(972), pnid, template, lang, ordered body_params. Targeting +
-    exclusions live HERE (single source of truth); the bot never filters. Opt-outs excluded."""
-    if not _wa_api_authed():
-        return jsonify({'error': 'unauthorized'}), 403
-    typ = request.args.get('type', 'reminder_25')
+def _send_queue_recipients(conn, month, typ):
+    """Shared send-ready recipient builder (used by /api/send-queue AND batch creation). Targeting +
+    exclusions live here — single source of truth. Returns (template, [items]); each item carries
+    phone(972), pnid, template, lang, ordered body_params (+ name/id_number for the approval view)."""
     tpl = SEND_TEMPLATES.get(typ)
-    if typ not in ('reminder_25', 'last_reminder_eom'):
-        return jsonify({'error': 'type not implemented yet', 'type': typ, 'ready': list(SEND_TEMPLATES)}), 501
-    conn = get_db()
-    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
-    if not month:
-        conn.close(); return jsonify({'error': 'no active month'}), 400
     nb = ','.join('?' * len(NEW_BUSINESS_SOURCES))
     common = (f" AND brand IN ('גאיה','ווינר') AND COALESCE(import_source,'') NOT IN ({nb}) "
               f" AND COALESCE(group_owner,'')='' AND COALESCE(is_midwife,0)=0 AND COALESCE(is_vip,0)=0 "
@@ -1769,7 +1765,6 @@ def api_send_queue():
         f"FROM customers WHERE {where} ORDER BY brand, name", params).fetchall()
     optout = {re.sub(r'\D', '', str(r['phone'] or '')).lstrip('0')
               for r in conn.execute("SELECT phone FROM optouts")}
-    conn.close()
     end_month = (month['name'] or '').split(' ')[0]
     end_date = _month_end_hebrew()
     items = []
@@ -1784,9 +1779,28 @@ def api_send_queue():
             price = f"{amt:,} ₪" if amt else "750 ₪"
             url = renewal_link(r['brand'], r['is_midwife'])[0]
             body = [r['name'] or '', end_month, price, url]
-        items.append({'id': r['id'], 'phone': p972, 'brand': r['brand'],
+        items.append({'id': r['id'], 'name': r['name'] or '', 'id_number': r['id_number'] or '',
+                      'phone': p972, 'brand': r['brand'],
                       'pnid': BRAND_PNID.get(r['brand'], BRAND_PNID['גאיה']),
                       'template': tpl, 'lang': 'he', 'body_params': body})
+    return tpl, items
+
+@app.route('/api/send-queue')
+def api_send_queue():
+    """Token-authed LIVE preview of send-ready recipients (targeting truth). ?type=reminder_25 |
+    last_reminder_eom. This is the PREVIEW; a real blast goes through an approved batch (see
+    /api/send-batch/*). Each recipient carries everything the bot needs to POST to Meta."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    typ = request.args.get('type', 'reminder_25')
+    if typ not in ('reminder_25', 'last_reminder_eom'):
+        return jsonify({'error': 'type not implemented yet', 'type': typ, 'ready': list(SEND_TEMPLATES)}), 501
+    conn = get_db()
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    tpl, items = _send_queue_recipients(conn, month, typ)
+    conn.close()
     return jsonify({'type': typ, 'month': month['name'], 'template': tpl,
                     'count': len(items), 'recipients': items})
 
@@ -1833,6 +1847,108 @@ def api_optout():
                  (phone, idn, (d.get('reason') or '').strip(), now))
     conn.commit(); conn.close()
     return jsonify({'ok': True})
+
+# ── Approval batches: freeze a recipient snapshot → Sharon approves → the bot sends only approved ──
+@app.route('/api/send-batch/create', methods=['POST'])
+def api_send_batch_create():
+    """Token-authed (bot, at the gate time): freeze the current send-queue for `type` into a
+    PENDING batch + alert Sharon (via owner_alerts → wa-sender email). Refuses if a pending/approved
+    batch of that type is already open. Body/query {type}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    typ = (request.get_json(silent=True) or {}).get('type') or request.args.get('type', '')
+    if typ not in ('reminder_25', 'last_reminder_eom'):
+        return jsonify({'error': 'type not implemented', 'ready': list(SEND_TEMPLATES)}), 501
+    conn = get_db()
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    dup = conn.execute("SELECT id, status FROM send_batches WHERE send_type=? AND status IN ('pending','approved')",
+                       (typ,)).fetchone()
+    if dup:
+        conn.close(); return jsonify({'error': 'batch already open', 'batch_id': dup['id'], 'status': dup['status']}), 409
+    tpl, items = _send_queue_recipients(conn, month, typ)
+    if not items:
+        conn.close(); return jsonify({'ok': True, 'count': 0, 'batch_id': None, 'note': 'no recipients'})
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    bid = conn.execute("INSERT INTO send_batches (send_type, template, status, count, created_at) VALUES (?,?,?,?,?)",
+                       (typ, tpl, 'pending', len(items), now)).lastrowid
+    for it in items:
+        conn.execute("INSERT INTO send_batch_items (batch_id, cust_id, name, phone, brand, pnid, template, body_params) "
+                     "VALUES (?,?,?,?,?,?,?,?)",
+                     (bid, it['id'], it['name'], it['phone'], it['brand'], it['pnid'], it['template'],
+                      json.dumps(it['body_params'], ensure_ascii=False)))
+    conn.execute("INSERT INTO owner_alerts (text, created_at) VALUES (?,?)",
+                 (f"📋 מנת שליחה ממתינה לאישור: {len(items)} נמענים לסוג '{typ}'. לאישור/ביטול היכנס לדשבורד → /send-approvals", now))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'batch_id': bid, 'count': len(items), 'status': 'pending'})
+
+@app.route('/api/send-batch/next')
+def api_send_batch_next():
+    """Token-authed (bot): the oldest APPROVED batch's frozen recipients to send now (or null).
+    Optional ?type= filter. The bot sends each, reports via /api/send-queue/sent, then POSTs
+    /api/send-batch/<id>/done."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    typ = request.args.get('type', '')
+    conn = get_db()
+    q = "SELECT * FROM send_batches WHERE status='approved'"
+    p = []
+    if typ:
+        q += " AND send_type=?"; p = [typ]
+    b = conn.execute(q + " ORDER BY id ASC LIMIT 1", p).fetchone()
+    if not b:
+        conn.close(); return jsonify({'batch': None})
+    items = [{'id': r['cust_id'], 'name': r['name'], 'phone': r['phone'], 'brand': r['brand'],
+              'pnid': r['pnid'], 'template': r['template'], 'lang': 'he',
+              'body_params': json.loads(r['body_params'] or '[]')}
+             for r in conn.execute("SELECT * FROM send_batch_items WHERE batch_id=?", (b['id'],)).fetchall()]
+    conn.close()
+    return jsonify({'batch_id': b['id'], 'type': b['send_type'], 'template': b['template'],
+                    'count': len(items), 'recipients': items})
+
+@app.route('/api/send-batch/<int:bid>/done', methods=['POST'])
+def api_send_batch_done(bid):
+    """Token-authed (bot): mark an approved batch fully sent."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    conn.execute("UPDATE send_batches SET status='sent' WHERE id=? AND status='approved'", (bid,))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/send-approvals')
+@login_required
+def send_approvals():
+    """Sharon's approval page — pending/approved bulk-send batches with count + names + buttons."""
+    conn = get_db()
+    batches = conn.execute("SELECT * FROM send_batches WHERE status IN ('pending','approved') ORDER BY id DESC").fetchall()
+    data = []
+    for b in batches:
+        items = conn.execute("SELECT name, brand, phone FROM send_batch_items WHERE batch_id=? ORDER BY brand, name",
+                             (b['id'],)).fetchall()
+        data.append({'b': b, 'items': items})
+    conn.close()
+    return render_template('send_approvals.html', batches=data)
+
+@app.route('/send-approvals/<int:bid>/approve', methods=['POST'])
+@login_required
+def send_approvals_approve(bid):
+    conn = get_db()
+    conn.execute("UPDATE send_batches SET status='approved', approved_at=?, approved_by=? WHERE id=? AND status='pending'",
+                 (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), session.get('username', '?'), bid))
+    conn.commit(); conn.close()
+    flash('המנה אושרה — הבוט ישלח אותה.', 'success')
+    return redirect(url_for('send_approvals'))
+
+@app.route('/send-approvals/<int:bid>/cancel', methods=['POST'])
+@login_required
+def send_approvals_cancel(bid):
+    conn = get_db()
+    conn.execute("UPDATE send_batches SET status='cancelled' WHERE id=?", (bid,))
+    conn.commit(); conn.close()
+    flash('המנה בוטלה.', 'info')
+    return redirect(url_for('send_approvals'))
 
 @app.route('/api/group-owner/set', methods=['POST'])
 def api_group_owner_set():
