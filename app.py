@@ -785,7 +785,8 @@ def init_db():
                      ('is_midwife','INTEGER'),
                      ('lead_form_json','TEXT'), ('marketing_consent','TEXT'),
                      ('lead_doc_path','TEXT'), ('lead_doc_saved','TEXT'),
-                     ('end_reminder_sent_date','TEXT'), ('group_owner','TEXT')]:
+                     ('end_reminder_sent_date','TEXT'), ('group_owner','TEXT'),
+                     ('lr25_sent_at','TEXT'), ('lreom_sent_at','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     if 'is_midwife' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
@@ -1654,6 +1655,75 @@ def api_end_reminder_marked():
         "ORDER BY end_reminder_sent_date DESC, id DESC LIMIT 20", (month['id'],)).fetchall()
     conn.close()
     return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
+
+_HEB_DOW = ['שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת', 'ראשון']  # Python weekday(): Mon=0..Sun=6
+
+def _month_end_hebrew(ref=None):
+    """The coverage-end date string for the last-reminder template's {{1}} — the last day of the
+    current month, formatted 'יום <weekday> DD/MM/YYYY' (e.g. 'יום שני 31/08/2026')."""
+    d = ref or datetime.date.today()
+    if d.month == 12:
+        last = datetime.date(d.year, 12, 31)
+    else:
+        last = datetime.date(d.year, d.month + 1, 1) - datetime.timedelta(days=1)
+    return f'יום {_HEB_DOW[last.weekday()]} {last.strftime("%d/%m/%Y")}'
+
+# Statuses that mean a renewal is settled (renewed / declined) or is new business / in-process —
+# used to build the end-of-month "still open" list (everyone NOT in one of these).
+_EOM_SETTLED = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'ממתין להפקה',
+                'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'טופס התקבל', 'הלקוח אישר')
+
+@app.route('/api/end-reminder/queue')
+def api_end_reminder_queue():
+    """Token-authed: build the recipient list for a last-reminder send. ?kind=25 (default) = the
+    rep-flagged 'תזכורת סיום' list; ?kind=eom = everyone still open (not renewed/declined/new/in-
+    process). Both: Gaia/Winner only, exclude new-business SOURCES, group-owner, midwives, VIPs,
+    the already-renewed/issued, and rows already sent this cycle + rows without a phone. The
+    {{1}} template value (coverage-end date) is returned once as `end_date`."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    kind = request.args.get('kind', '25')
+    sent_col = 'lreom_sent_at' if kind == 'eom' else 'lr25_sent_at'
+    conn = get_db()
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    nb = ','.join('?' * len(NEW_BUSINESS_SOURCES))
+    common = (
+        f" AND brand IN ('גאיה','ווינר') "
+        f" AND COALESCE(import_source,'') NOT IN ({nb}) "
+        f" AND COALESCE(group_owner,'')='' AND COALESCE(is_midwife,0)=0 AND COALESCE(is_vip,0)=0 "
+        f" AND COALESCE(phone,'')!='' AND COALESCE({sent_col},'')='' ")
+    if kind == 'eom':
+        st = ','.join('?' * len(_EOM_SETTLED))
+        where = f"month_id=? AND COALESCE(status,'') NOT IN ({st})" + common
+        params = [month['id']] + list(_EOM_SETTLED) + list(NEW_BUSINESS_SOURCES)
+    else:  # '25' — the flagged list, minus already renewed/issued
+        where = ("month_id=? AND COALESCE(end_reminder_sent_date,'')!='' "
+                 "AND COALESCE(status,'') NOT IN ('חודש','חודש - בוצעה שיחת מכירה','הופק')" + common)
+        params = [month['id']] + list(NEW_BUSINESS_SOURCES)
+    rows = conn.execute(
+        f"SELECT id, name, id_number, brand, phone, status FROM customers WHERE {where} ORDER BY brand, name",
+        params).fetchall()
+    conn.close()
+    return jsonify({'kind': kind, 'month': month['name'], 'end_date': _month_end_hebrew(),
+                    'count': len(rows), 'items': [dict(r) for r in rows]})
+
+@app.route('/api/end-reminder/sent', methods=['POST'])
+def api_end_reminder_sent():
+    """Token-authed: mark a last-reminder delivered so it isn't re-sent. Body {id, kind:'25'|'eom'}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    cid = d.get('id'); kind = d.get('kind', '25')
+    if not cid:
+        return jsonify({'error': 'need id'}), 400
+    col = 'lreom_sent_at' if kind == 'eom' else 'lr25_sent_at'
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    conn.execute(f"UPDATE customers SET {col}=? WHERE id=?", (now, cid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
 
 @app.route('/api/group-owner/set', methods=['POST'])
 def api_group_owner_set():
