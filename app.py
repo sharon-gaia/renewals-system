@@ -791,6 +791,12 @@ def init_db():
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
     if 'is_midwife' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
         conn.execute("ALTER TABLE insureds ADD COLUMN is_midwife INTEGER")
+    # Bulk-send delivery log (bot reports back; upsert by wamid) + marketing opt-outs.
+    conn.execute("""CREATE TABLE IF NOT EXISTS send_log (
+        wamid TEXT PRIMARY KEY, cust_id INTEGER, send_type TEXT, status TEXT,
+        error_code TEXT, sent_at TEXT, updated_at TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS optouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT, id_number TEXT, reason TEXT, created_at TEXT)""")
     if 'group_owner' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
         conn.execute("ALTER TABLE insureds ADD COLUMN group_owner TEXT")
     # cert_requests: email columns (table shipped before the "both email+WhatsApp" rule)
@@ -1722,6 +1728,109 @@ def api_end_reminder_sent():
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     conn = get_db()
     conn.execute(f"UPDATE customers SET {col}=? WHERE id=?", (now, cid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+BRAND_PNID = {'גאיה': '1030477631130403', 'ווינר': '103910399338118', 'אופיר': '103910399338118'}
+SEND_TEMPLATES = {'reminder_25': 'renewal_reminder', 'renewal_campaign': 'renewal_reminder',
+                  'last_reminder_eom': 'renewal_last_reminder'}
+
+@app.route('/api/send-queue')
+def api_send_queue():
+    """Token-authed: send-ready recipients for the bot (the pure executor). ?type=reminder_25 |
+    last_reminder_eom (renewal_campaign/telemarketing = coming). Each recipient carries everything
+    needed to POST to Meta: phone(972), pnid, template, lang, ordered body_params. Targeting +
+    exclusions live HERE (single source of truth); the bot never filters. Opt-outs excluded."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    typ = request.args.get('type', 'reminder_25')
+    tpl = SEND_TEMPLATES.get(typ)
+    if typ not in ('reminder_25', 'last_reminder_eom'):
+        return jsonify({'error': 'type not implemented yet', 'type': typ, 'ready': list(SEND_TEMPLATES)}), 501
+    conn = get_db()
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    nb = ','.join('?' * len(NEW_BUSINESS_SOURCES))
+    common = (f" AND brand IN ('גאיה','ווינר') AND COALESCE(import_source,'') NOT IN ({nb}) "
+              f" AND COALESCE(group_owner,'')='' AND COALESCE(is_midwife,0)=0 AND COALESCE(is_vip,0)=0 "
+              f" AND COALESCE(phone,'')!='' ")
+    if typ == 'last_reminder_eom':
+        st = ','.join('?' * len(_EOM_SETTLED))
+        where = (f"month_id=? AND COALESCE(status,'') NOT IN ({st}) AND COALESCE(lreom_sent_at,'')=''" + common)
+        params = [month['id']] + list(_EOM_SETTLED) + list(NEW_BUSINESS_SOURCES)
+    else:  # reminder_25
+        where = ("month_id=? AND COALESCE(end_reminder_sent_date,'')!='' "
+                 "AND COALESCE(status,'') NOT IN ('חודש','חודש - בוצעה שיחת מכירה','הופק') "
+                 "AND COALESCE(lr25_sent_at,'')=''" + common)
+        params = [month['id']] + list(NEW_BUSINESS_SOURCES)
+    rows = conn.execute(
+        f"SELECT id, name, id_number, brand, phone, status, is_midwife, premium_last_year "
+        f"FROM customers WHERE {where} ORDER BY brand, name", params).fetchall()
+    optout = {re.sub(r'\D', '', str(r['phone'] or '')).lstrip('0')
+              for r in conn.execute("SELECT phone FROM optouts")}
+    conn.close()
+    end_month = (month['name'] or '').split(' ')[0]
+    end_date = _month_end_hebrew()
+    items = []
+    for r in rows:
+        p972 = _policy_to972(r['phone'])
+        if not p972 or re.sub(r'\D', '', str(r['phone'])).lstrip('0') in optout:
+            continue
+        if typ == 'last_reminder_eom':
+            body = [end_date]
+        else:
+            amt = renewal_amount(r['is_midwife'], r['premium_last_year'])
+            price = f"{amt:,} ₪" if amt else "750 ₪"
+            url = renewal_link(r['brand'], r['is_midwife'])[0]
+            body = [r['name'] or '', end_month, price, url]
+        items.append({'id': r['id'], 'phone': p972, 'brand': r['brand'],
+                      'pnid': BRAND_PNID.get(r['brand'], BRAND_PNID['גאיה']),
+                      'template': tpl, 'lang': 'he', 'body_params': body})
+    return jsonify({'type': typ, 'month': month['name'], 'template': tpl,
+                    'count': len(items), 'recipients': items})
+
+@app.route('/api/send-queue/sent', methods=['POST'])
+def api_send_queue_sent():
+    """Token-authed: the bot reports a send + its evolving status. Upsert by wamid into send_log
+    (sent→delivered→read→failed+error_code) + mark the customer's per-type sent flag on first send."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    wamid = (d.get('wamid') or '').strip()
+    if not wamid:
+        return jsonify({'error': 'need wamid'}), 400
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    cid, typ, status, ec = d.get('id'), d.get('type'), (d.get('status') or 'sent'), d.get('error_code')
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO send_log (wamid, cust_id, send_type, status, error_code, sent_at, updated_at)
+           VALUES (?,?,?,?,?,?,?)
+           ON CONFLICT(wamid) DO UPDATE SET status=excluded.status,
+             error_code=COALESCE(excluded.error_code, send_log.error_code), updated_at=excluded.updated_at""",
+        (wamid, cid, typ, status, (str(ec) if ec is not None else None), now, now))
+    # On the first 'sent', stamp the customer's per-type flag so the queue won't re-serve them.
+    if cid and status == 'sent' and typ in ('reminder_25', 'last_reminder_eom'):
+        col = 'lreom_sent_at' if typ == 'last_reminder_eom' else 'lr25_sent_at'
+        conn.execute(f"UPDATE customers SET {col}=COALESCE(NULLIF({col},''),?) WHERE id=?", (now, cid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/optout', methods=['POST'])
+def api_optout():
+    """Token-authed: the bot reports a marketing opt-out (unsubscribe / 'not now'). Stored in
+    optouts and excluded from every /api/send-queue from now on. Body {phone, id_number?, reason?}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    phone = re.sub(r'\D', '', str(d.get('phone') or ''))
+    idn = re.sub(r'\D', '', str(d.get('id_number') or ''))
+    if not phone and not idn:
+        return jsonify({'error': 'need phone or id_number'}), 400
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    conn.execute("INSERT INTO optouts (phone, id_number, reason, created_at) VALUES (?,?,?,?)",
+                 (phone, idn, (d.get('reason') or '').strip(), now))
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
@@ -4439,8 +4548,11 @@ def render_renewal_whatsapp(cust, month_name):
             f"{winner_upd}")
 
 def _wa_api_authed():
-    tok = os.environ.get('WA_API_TOKEN', '')
-    return bool(tok) and request.headers.get('X-WA-Token') == tok
+    # Accepts the wa-sender token OR a SEPARATE bot token (WA_API_TOKEN_BOT) so the bot project can
+    # be authorized + revoked independently. Either valid X-WA-Token passes.
+    got = request.headers.get('X-WA-Token') or ''
+    valid = {t for t in (os.environ.get('WA_API_TOKEN', ''), os.environ.get('WA_API_TOKEN_BOT', '')) if t}
+    return bool(got) and got in valid
 
 @app.route('/api/stage-import', methods=['POST'])
 def api_stage_import():
