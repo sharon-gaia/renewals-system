@@ -14,6 +14,50 @@
       <i class="bi bi-file-earmark-excel me-1"></i>ייצוא Excel
     </a>
     {% endif %}
+    {% if not is_archived %}
+    <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addCustModal">
+      <i class="bi bi-person-plus me-1"></i>הוסף לקוח
+    </button>
+    {% endif %}
+  </div>
+</div>
+
+<!-- הוספת לקוח ידנית -->
+<div class="modal fade" id="addCustModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog">
+    <form method="POST" action="/customer/add" class="modal-content">
+      <div class="modal-header">
+        <h6 class="modal-title"><i class="bi bi-person-plus text-primary me-2"></i>הוספת לקוח לחודש {{ month['name'] }}</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="סגור"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-2">
+          <div class="col-12"><label class="form-label small mb-1">שם *</label>
+            <input type="text" name="name" class="form-control" required></div>
+          <div class="col-6"><label class="form-label small mb-1">ת"ז</label>
+            <input type="text" name="id_number" class="form-control" inputmode="numeric"></div>
+          <div class="col-6"><label class="form-label small mb-1">טלפון</label>
+            <input type="text" name="phone" class="form-control" inputmode="tel"></div>
+          <div class="col-12"><label class="form-label small mb-1">אימייל</label>
+            <input type="email" name="email" class="form-control"></div>
+          <div class="col-6"><label class="form-label small mb-1">מותג *</label>
+            <select name="brand" class="form-select" required>
+              <option value="גאיה">גאיה</option>
+              <option value="ווינר">ווינר</option>
+              <option value="אופיר">אופיר</option>
+            </select></div>
+          <div class="col-6"><label class="form-label small mb-1">סטטוס</label>
+            <select name="status" class="form-select">
+              {% for val, label in gw_status_options %}<option value="{{ val }}">{{ label }}</option>{% endfor %}
+            </select></div>
+        </div>
+        <div class="form-text mt-2">נוסף לחודש הפעיל + למאסטר. אם ת"ז כבר קיים בחודש — לא ייווצר כפול.</div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal">ביטול</button>
+        <button type="submit" class="btn btn-primary btn-sm"><i class="bi bi-check-lg me-1"></i>הוסף</button>
+      </div>
+    </form>
   </div>
 </div>
 

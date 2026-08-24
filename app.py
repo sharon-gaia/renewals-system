@@ -2195,6 +2195,49 @@ def customers():
                            midwife_filter=midwife_filter, search=search,
                            statuses=STATUSES, is_archived=is_archived)
 
+@app.route('/customer/add', methods=['POST'])
+@login_required
+def customer_add():
+    """Manually add a customer to the ACTIVE month + upsert the insured master. import_source
+    'manual' so it's a normal renewal candidate (not new-business). Deduped by ת"ז in the month."""
+    month = active_month()
+    if not month:
+        flash('אין חודש פעיל', 'warning'); return redirect(url_for('index'))
+    name = (request.form.get('name') or '').strip()
+    idn = re.sub(r'\D', '', request.form.get('id_number') or '')
+    phone = re.sub(r'\D', '', request.form.get('phone') or '')
+    email = (request.form.get('email') or '').strip()
+    brand = (request.form.get('brand') or '').strip()
+    status = (request.form.get('status') or '').strip()
+    if not name or brand not in ('גאיה', 'ווינר', 'אופיר'):
+        flash('חובה שם ומותג תקין', 'danger'); return redirect(url_for('customers'))
+    conn = get_db()
+    if idn:
+        dup = conn.execute("SELECT id FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
+                           (month['id'], idn.lstrip('0'))).fetchone()
+        if dup:
+            conn.close(); flash(f'לקוח עם ת"ז {idn} כבר קיים בחודש', 'warning'); return redirect(url_for('customers'))
+    now = datetime.datetime.now()
+    conn.execute(
+        """INSERT INTO customers (month_id, name, id_number, phone, email, brand, status,
+                                  import_source, status_changed_at)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (month['id'], name, idn, phone, email, brand, status, 'manual', now.strftime('%Y-%m-%d %H:%M')))
+    if idn:
+        ins = conn.execute("SELECT id FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                           (idn.lstrip('0'),)).fetchone()
+        iso = now.isoformat()
+        if ins:
+            conn.execute("UPDATE insureds SET name=COALESCE(NULLIF(name,''),?), phone=COALESCE(NULLIF(phone,''),?), "
+                         "email=COALESCE(NULLIF(email,''),?), brand=COALESCE(NULLIF(brand,''),?), updated_at=? WHERE id=?",
+                         (name, phone, email, brand, iso, ins['id']))
+        else:
+            conn.execute("INSERT INTO insureds (id_number, name, brand, phone, email, status, created_at, updated_at) "
+                         "VALUES (?,?,?,?,?,?,?,?)", (idn, name, brand, phone, email, 'פעיל', iso, iso))
+    conn.commit(); conn.close()
+    flash(f'נוסף לקוח: {name} ({brand})', 'success')
+    return redirect(url_for('customers'))
+
 @app.route('/search')
 @login_required
 def search_customers():
