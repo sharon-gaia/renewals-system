@@ -4578,6 +4578,10 @@ def api_delivery_audit():
     month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
     if not month:
         conn.close(); return jsonify({'error': 'no active month'}), 400
+    # A deliverable PDF stops auto-retrying once it's older than the 10-day WhatsApp-pending window
+    # (see _policy_queue_items). So a doc unsent AND past that window is genuinely stuck (won't self-
+    # heal); an unsent doc still inside the window is just pending and must NOT raise an alert.
+    retry_window = (now - datetime.timedelta(days=11)).strftime('%Y-%m-%d %H:%M')
     rows = conn.execute(
         f"""SELECT c.id, c.name, c.id_number, c.brand, c.status, c.status_changed_at,
                   (SELECT COUNT(*) FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
@@ -4586,21 +4590,27 @@ def api_delivery_audit():
                   (SELECT COUNT(*) FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
                      WHERE ltrim(COALESCE(pr.insured_id,''),'0')=ltrim(COALESCE(c.id_number,''),'0')
                        AND pd.received_at >= ? AND {DELIV}
-                       AND (COALESCE(pd.whatsapp_sent_at,'')!='' OR COALESCE(pd.email_sent_at,'')!='')) AS sent
+                       AND (COALESCE(pd.whatsapp_sent_at,'')!='' OR COALESCE(pd.email_sent_at,'')!='')) AS sent,
+                  (SELECT MAX(pd.received_at) FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
+                     WHERE ltrim(COALESCE(pr.insured_id,''),'0')=ltrim(COALESCE(c.id_number,''),'0')
+                       AND pd.received_at >= ? AND {DELIV}) AS max_recv
            FROM customers c
            WHERE c.month_id=? AND c.status IN ('חודש','חודש - בוצעה שיחת מכירה','הופק')
              AND COALESCE(c.group_owner,'')='' AND COALESCE(c.id_number,'')!=''""",
-        (cycle, cycle, month['id'])).fetchall()
-    stuck, no_doc = [], []
+        (cycle, cycle, cycle, month['id'])).fetchall()
+    stuck, no_doc, pending = [], [], 0
     for r in rows:
         if r['sent'] > 0:
             continue  # this-cycle policy delivered — fine
         chg = r['status_changed_at'] or ''
         item = {'id': r['id'], 'name': r['name'], 'id_number': r['id_number'],
-                'brand': r['brand'], 'status': r['status'], 'since': chg or '(no date)'}
+                'brand': r['brand'], 'status': r['status'], 'since': chg or '(no date)',
+                'doc_received': r['max_recv']}
         if r['docs'] > 0:
-            if not chg or chg <= cut_sent:
-                stuck.append(item)           # PDF arrived, not delivered → real miss
+            if (r['max_recv'] or '') and r['max_recv'] < retry_window:
+                stuck.append(item)           # arrived, not delivered, past retry window → real miss
+            else:
+                pending += 1                 # still inside the auto-retry window — not a gap yet
         elif not chg or chg <= cut_nodoc:
             no_doc.append(item)              # renewed/issued, no PDF at all → waiting/lost
     cert_stuck = [dict(x) for x in conn.execute(
@@ -4612,6 +4622,7 @@ def api_delivery_audit():
     conn.close()
     return jsonify({'month': month['name'],
                     'policy_stuck': stuck, 'policy_no_doc': no_doc,
+                    'policy_pending_in_window': pending,
                     'cert_stuck': cert_stuck, 'cert_no_match': cert_no_match,
                     'total_gaps': len(stuck) + len(no_doc) + len(cert_stuck) + cert_no_match})
 
