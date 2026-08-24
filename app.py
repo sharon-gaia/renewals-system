@@ -4957,13 +4957,21 @@ def _policy_queue_items(conn, brand_key):
     if POLICY_NEW_MODE in ('test', 'live'):
         new_test = (POLICY_NEW_MODE == 'test')
         seen_new = set()
+        # Forced ת"ז (via /api/policy/force-test) re-enter regardless of the window — so a stuck
+        # new-business policy that aged out of the 10-day window can be re-sent on demand.
+        nb_where = "pd.received_at >= ? OR (COALESCE(pd.whatsapp_sent_at,'')='' AND pd.received_at >= ?)"
+        nb_params = [cutoff, wider]
+        if _POLICY_FORCE_IDS:
+            fph = ','.join('?' * len(_POLICY_FORCE_IDS))
+            nb_where += f" OR ltrim(COALESCE(pr.insured_id,''),'0') IN ({fph})"
+            nb_params += list(_POLICY_FORCE_IDS)
         for r in conn.execute(
-            """SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
+            f"""SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at,
                       pd.policy_number, pr.insured_id, pr.insured_name, pr.phone_mobile,
                       pr.agent_number, pr.doc_type_label, pr.email AS pr_email
                FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id = pd.id
-               WHERE pd.received_at >= ? OR (COALESCE(pd.whatsapp_sent_at,'')='' AND pd.received_at >= ?)
-               ORDER BY pd.received_at DESC, pd.id DESC""", (cutoff, wider)).fetchall():
+               WHERE {nb_where}
+               ORDER BY pd.received_at DESC, pd.id DESC""", nb_params).fetchall():
             if not is_new_doc(r['doc_type_label']):
                 continue
             if r['whatsapp_sent_at'] and r['email_sent_at']:
@@ -4978,8 +4986,8 @@ def _policy_queue_items(conn, brand_key):
             lead = conn.execute(
                 "SELECT form_received_at FROM customers WHERE import_source='join_form' "
                 "AND ltrim(COALESCE(id_number,''),'0')=? ORDER BY id DESC LIMIT 1", (key,)).fetchone()
-            if lead and (lead['form_received_at'] or '')[:10] <= '2026-08-01':
-                continue
+            if lead and (lead['form_received_at'] or '')[:10] <= '2026-08-01' and key not in _POLICY_FORCE_IDS:
+                continue  # (a forced ת"ז overrides the backlog guard — explicit re-send)
             real_phone = _policy_to972(r['phone_mobile'])
             real_email = (r['pr_email'] or '').strip()
             if not real_email:
