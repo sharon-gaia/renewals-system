@@ -99,6 +99,9 @@ def mask_card(value):
     return '•••• ' + d[-4:] if len(d) >= 4 else '••••'
 
 STATUSES = ['', 'טופס התקבל', 'חודש', 'חודש - בוצעה שיחת מכירה', 'התקבל חידוש - כ.א לא תקין', 'לא רוצים לחדש', 'נוצר קשר עם לקוח']
+# New-business import pipelines — never renewals, so excluded from the renewal funnel by SOURCE
+# (in addition to the status-based exclusion) whatever their work status.
+NEW_BUSINESS_SOURCES = ('new_policy', 'join_form', 'harel_proposal')
 BRANDS = ['גאיה', 'ווינר', 'אופיר']
 
 # Work-queue states for /admin/other-forms. 'ממתין' is the stored default from intake;
@@ -1992,7 +1995,7 @@ def index():
     if month:
         conn = get_db()
         bc, bp = brand_clause()
-        rows = conn.execute("""SELECT status, brand, sector, form_received_at,
+        rows = conn.execute("""SELECT status, brand, sector, form_received_at, import_source,
                                call_status_1, call_status_2, call_status_3
                                FROM customers WHERE month_id=?""" + bc,
                             [month['id']] + bp).fetchall()
@@ -2006,9 +2009,13 @@ def index():
             they're counted separately (pending_issue) and excluded from the renewal
             total, the buckets, and the renewal-percentage denominator."""
             pending_issue = sum(1 for r in subset if r['status'] == 'ממתין להפקה')
-            # New-business statuses — a lead awaiting issuance and an issued policy ("הופק") —
-            # are not renewals, so they're kept out of the renewal total/buckets/%.
-            core = [r for r in subset if r['status'] not in ('ממתין להפקה', 'הופק', 'בוטל')]
+            # New business is excluded from the renewal funnel two ways: by status (a lead
+            # awaiting issuance "ממתין להפקה", an issued policy "הופק", a cancellation "בוטל")
+            # AND by source — any row from a new-business pipeline (new_policy/join_form/
+            # harel_proposal) is never a renewal, whatever its work status.
+            core = [r for r in subset
+                    if r['status'] not in ('ממתין להפקה', 'הופק', 'בוטל')
+                    and (r['import_source'] or '') not in NEW_BUSINESS_SOURCES]
             t = len(core)
             rnw = sum(1 for r in core if r['status'] in ('חודש', 'חודש - בוצעה שיחת מכירה'))
             no_renew = sum(1 for r in core if r['status'] in NO_RENEW)
@@ -4449,6 +4456,26 @@ def api_brand_census():
         out.append({'id': m['id'], 'name': m['name'], 'is_active': m['is_active'], 'brands': brands})
     conn.close()
     return jsonify({'months': out})
+
+@app.route('/api/new-biz-in-renewals')
+def api_new_biz_in_renewals():
+    """Token-authed diagnostic: active-month rows from a NEW-BUSINESS pipeline whose work status
+    isn't a terminal new-business one — i.e. the ones that leaked into the renewal funnel before
+    the source-based exclusion. Read-only; shows exactly what the fix removes from the counts."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    ph = ','.join('?' * len(NEW_BUSINESS_SOURCES))
+    rows = conn.execute(
+        f"SELECT id, name, id_number, brand, status, import_source, policy_number "
+        f"FROM customers WHERE month_id=? AND import_source IN ({ph}) "
+        f"AND COALESCE(status,'') NOT IN ('ממתין להפקה','הופק','בוטל') ORDER BY brand, name",
+        [month['id']] + list(NEW_BUSINESS_SOURCES)).fetchall()
+    conn.close()
+    return jsonify({'month': month['name'], 'count': len(rows), 'items': [dict(r) for r in rows]})
 
 @app.route('/api/ofir-test-copy', methods=['POST'])
 def api_ofir_test_copy():
