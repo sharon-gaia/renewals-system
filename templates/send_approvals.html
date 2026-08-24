@@ -45,14 +45,14 @@
   </div>
   <div class="card-body py-2">
     <a class="small" data-bs-toggle="collapse" href="#names{{ b.id }}" role="button">
-      <i class="bi bi-list-ul me-1"></i>הצג את {{ row.items|length }} השמות
+      <i class="bi bi-list-ul me-1"></i>הצג את {{ row['items']|length }} השמות
     </a>
     <div class="collapse mt-2" id="names{{ b.id }}">
       <div class="table-responsive" style="max-height:340px;overflow:auto">
         <table class="table table-sm table-striped mb-0 small">
           <thead><tr><th>#</th><th>שם</th><th>מותג</th><th>טלפון</th></tr></thead>
           <tbody>
-            {% for it in row.items %}
+            {% for it in row['items'] %}
             <tr><td class="text-muted">{{ loop.index }}</td><td>{{ it.name }}</td>
                 <td>{{ it.brand }}</td><td dir="ltr">{{ it.phone }}</td></tr>
             {% endfor %}
