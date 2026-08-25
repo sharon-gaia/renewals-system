@@ -1749,6 +1749,45 @@ def api_policy_pdf_lookup():
             return send_file(fp, as_attachment=True, download_name=nm)
     return jsonify({'found': False, 'reason': 'no server-side file'}), 404
 
+@app.route('/api/test/policy', methods=['POST'])
+def api_test_policy():
+    """Token-authed TEST helper: attach a dummy policy (PDF + record) to a ת"ז so policy-lookup /
+    policy-pdf return real data — for testing. Body {id_number, name?, brand?, policy_number?,
+    period_start, period_end, premium?} (dates DD/MM/YYYY)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    idn = re.sub(r'\D', '', str(d.get('id_number') or ''))
+    if not idn:
+        return jsonify({'error': 'need id_number'}), 400
+    name = (d.get('name') or 'טסט').strip()
+    pol = (d.get('policy_number') or ('TEST' + idn[-6:])).strip()
+    ps = (d.get('period_start') or '').strip()
+    pe = (d.get('period_end') or '').strip()
+    prem = (d.get('premium') or '750').strip()
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    try:
+        import fitz
+        test_dir = os.path.join(POLICY_DOCS_DIR, 'test')
+        os.makedirs(test_dir, exist_ok=True)
+        fp = os.path.join(test_dir, f'test_{idn}_{re.sub(r"[^A-Za-z0-9]", "", pol)}.pdf')
+        doc = fitz.open()
+        pg = doc.new_page()
+        pg.insert_text((50, 70), f"TEST POLICY\nInsured ID: {idn}\nPolicy: {pol}\nPeriod: {ps} - {pe}\nPremium: {prem}",
+                       fontsize=14)
+        doc.save(fp); doc.close()
+    except Exception as e:
+        return jsonify({'error': f'pdf create failed: {e}'}), 500
+    conn = get_db()
+    did = conn.execute("INSERT INTO policy_documents (filename, filepath, received_at, policy_number) VALUES (?,?,?,?)",
+                       (f'פוליסת טסט {pol}.pdf', fp, now, pol)).lastrowid
+    conn.execute("INSERT INTO policy_records (policy_document_id, policy_number, doc_type_label, insured_name, "
+                 "insured_id, period_start, period_end, premium, extracted_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                 (did, pol, 'חידוש', name, idn, ps, pe, prem, now))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'doc_id': did, 'policy_number': pol, 'insured_id': idn,
+                    'period_start': ps, 'period_end': pe})
+
 @app.route('/api/customer-by-name')
 def api_customer_by_name():
     """Diagnostic: customers matching a name, with their pending-handling workflow fields
