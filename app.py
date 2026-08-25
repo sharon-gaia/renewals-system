@@ -1713,6 +1713,42 @@ def api_policy_lookup():
                     'policy': {'status': status, 'period_start': period_start, 'period_end': period_end,
                                'professions': professions, 'premium': prem}})
 
+@app.route('/api/policy-pdf')
+def api_policy_pdf_lookup():
+    """Token-authed: the customer's OWN latest policy PDF by ת"ז — phone-gated (last-9 match), so a
+    customer gets only their own policy. Serves the newest deliverable (חדש/חידוש) file still on the
+    server; 404 if none (older archived copies live only in OneDrive, not reachable here). No ת"ז log."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    idn = re.sub(r'\D', '', request.args.get('id_number', '')).lstrip('0')
+    phone_in = re.sub(r'\D', '', request.args.get('phone', ''))
+    if not idn or not phone_in:
+        return jsonify({'found': False}), 404
+    def last9(p):
+        return re.sub(r'\D', '', str(p or ''))[-9:]
+    conn = get_db()
+    known = set()
+    for r in conn.execute("SELECT phone FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn,)).fetchall():
+        if r['phone']:
+            known.add(last9(r['phone']))
+    for r in conn.execute("SELECT phone FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn,)).fetchall():
+        if r['phone']:
+            known.add(last9(r['phone']))
+    if not last9(phone_in) or last9(phone_in) not in known:
+        conn.close(); return jsonify({'found': False}), 404
+    rows = conn.execute(
+        "SELECT pd.filename, pd.filepath FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+        "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? "
+        "AND (pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%') "
+        "ORDER BY pd.received_at DESC, pr.id DESC", (idn,)).fetchall()
+    conn.close()
+    for r in rows:
+        fp = r['filepath']
+        if fp and os.path.exists(fp):
+            nm = re.sub(r'[\r\n]+', ' ', (r['filename'] or 'policy.pdf')).strip() or 'policy.pdf'
+            return send_file(fp, as_attachment=True, download_name=nm)
+    return jsonify({'found': False, 'reason': 'no server-side file'}), 404
+
 @app.route('/api/customer-by-name')
 def api_customer_by_name():
     """Diagnostic: customers matching a name, with their pending-handling workflow fields
