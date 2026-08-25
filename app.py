@@ -1749,6 +1749,32 @@ def api_policy_pdf_lookup():
             return send_file(fp, as_attachment=True, download_name=nm)
     return jsonify({'found': False, 'reason': 'no server-side file'}), 404
 
+def _make_dummy_pdf(title):
+    """Build a minimal valid single-page PDF (pure Python, no library — fitz isn't on the server)."""
+    t = re.sub(r'[()\\]', ' ', str(title))[:90].encode('latin-1', 'replace')
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        None,  # content stream, filled below
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    stream = b"BT /F1 16 Tf 50 780 Td (" + t + b") Tj ET"
+    objs[3] = b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"
+    out = b"%PDF-1.4\n"
+    offsets = []
+    for i, o in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += str(i).encode() + b" 0 obj\n" + o + b"\nendobj\n"
+    xref_pos = len(out)
+    out += b"xref\n0 " + str(len(objs) + 1).encode() + b"\n0000000000 65535 f \n"
+    for off in offsets:
+        out += ("%010d 00000 n \n" % off).encode()
+    out += (b"trailer\n<< /Size " + str(len(objs) + 1).encode() + b" /Root 1 0 R >>\nstartxref\n"
+            + str(xref_pos).encode() + b"\n%%EOF")
+    return out
+
 @app.route('/api/test/policy', methods=['POST'])
 def api_test_policy():
     """Token-authed TEST helper: attach a dummy policy (PDF + record) to a ת"ז so policy-lookup /
@@ -1767,15 +1793,11 @@ def api_test_policy():
     prem = (d.get('premium') or '750').strip()
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     try:
-        import fitz
         test_dir = os.path.join(POLICY_DOCS_DIR, 'test')
         os.makedirs(test_dir, exist_ok=True)
         fp = os.path.join(test_dir, f'test_{idn}_{re.sub(r"[^A-Za-z0-9]", "", pol)}.pdf')
-        doc = fitz.open()
-        pg = doc.new_page()
-        pg.insert_text((50, 70), f"TEST POLICY\nInsured ID: {idn}\nPolicy: {pol}\nPeriod: {ps} - {pe}\nPremium: {prem}",
-                       fontsize=14)
-        doc.save(fp); doc.close()
+        with open(fp, 'wb') as f:
+            f.write(_make_dummy_pdf(f"TEST POLICY  ID {idn}  Policy {pol}  {ps} - {pe}"))
     except Exception as e:
         return jsonify({'error': f'pdf create failed: {e}'}), 500
     conn = get_db()
