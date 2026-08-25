@@ -1646,6 +1646,73 @@ def api_customer_lookup():
     return jsonify({'customers': [dict(r) for r in rows], 'insured': (dict(ins) if ins else None),
                     'unmatched_submissions': [dict(r) for r in unm]})
 
+def _policy_facing_status(cust_status, ins_status):
+    """Customer-facing policy status for the bot's personalization answers."""
+    if (ins_status or '') == 'בוטל':
+        return 'בוטלה'
+    if (ins_status or '') == 'לא פעיל':
+        return 'לא פעילה'
+    cs = cust_status or ''
+    if cs in ('חודש', 'חודש - בוצעה שיחת מכירה'):
+        return 'חודשה'
+    if cs == 'הופק':
+        return 'הופקה'
+    if cs == 'ממתין להפקה':
+        return 'בתהליך הפקה'
+    if cs and cs not in ('לא רוצים לחדש', 'לא מחדש'):
+        return 'בתהליך חידוש'
+    return 'פעילה'
+
+@app.route('/api/policy-lookup')
+def api_policy_lookup():
+    """Token-authed personalization lookup for the bot: a customer's OWN policy by ת"ז — returned
+    ONLY if the supplied phone matches a phone on file for that ת"ז (so a customer can pull only
+    their own policy, never a stranger's). Any mismatch/miss → {found:false}. Never logs the ת"ז."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    idn = re.sub(r'\D', '', request.args.get('id_number', '')).lstrip('0')
+    phone_in = re.sub(r'\D', '', request.args.get('phone', ''))
+    if not idn or not phone_in:
+        return jsonify({'found': False})
+    def last9(p):
+        return re.sub(r'\D', '', str(p or ''))[-9:]
+    conn = get_db()
+    ins = conn.execute("SELECT name, brand, phone, status, period_start, period_end "
+                       "FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn,)).fetchone()
+    cust = conn.execute(
+        "SELECT c.name, c.brand, c.phone, c.status, c.occupation, c.premium_last_year "
+        "FROM customers c JOIN months m ON m.id=c.month_id "
+        "WHERE ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY m.is_active DESC, c.id DESC LIMIT 1", (idn,)).fetchone()
+    if not (ins or cust):
+        conn.close(); return jsonify({'found': False})
+    # SECURITY: the phone must match a phone on file for this ת"ז (compare last 9 digits).
+    known = {last9(x) for x in [(ins['phone'] if ins else ''), (cust['phone'] if cust else '')] if x}
+    if not last9(phone_in) or last9(phone_in) not in known:
+        conn.close(); return jsonify({'found': False})
+    pr = conn.execute(
+        "SELECT pr.period_start, pr.period_end, pr.premium, pr.policy_document_id "
+        "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+        "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? ORDER BY pd.received_at DESC, pr.id DESC LIMIT 1", (idn,)).fetchone()
+    name = (cust['name'] if cust else '') or (ins['name'] if ins else '')
+    brand = (cust['brand'] if cust else '') or (ins['brand'] if ins else '')
+    period_start = (pr['period_start'] if pr else None) or (ins['period_start'] if ins else None)
+    period_end = (pr['period_end'] if pr else None) or (ins['period_end'] if ins else None)
+    occ = ((cust['occupation'] if cust else '') or '').strip()
+    if not occ and pr and pr['policy_document_id']:
+        d = conn.execute("SELECT filepath FROM policy_documents WHERE id=?", (pr['policy_document_id'],)).fetchone()
+        if d and d['filepath'] and os.path.exists(d['filepath']):
+            occ = extract_insured_occupation(d['filepath']) or ''
+    professions = [p.strip() for p in re.split(r'[,،/]', occ) if p.strip()]
+    prem = (pr['premium'] if pr else None) or (str(cust['premium_last_year']) if cust and cust['premium_last_year'] else None)
+    if prem:
+        pn = re.sub(r'[^\d.]', '', str(prem))
+        prem = (f"{int(float(pn)):,} ₪" if pn else None)
+    status = _policy_facing_status(cust['status'] if cust else None, ins['status'] if ins else None)
+    conn.close()
+    return jsonify({'found': True, 'name': name, 'brand': brand,
+                    'policy': {'status': status, 'period_start': period_start, 'period_end': period_end,
+                               'professions': professions, 'premium': prem}})
+
 @app.route('/api/customer-by-name')
 def api_customer_by_name():
     """Diagnostic: customers matching a name, with their pending-handling workflow fields
