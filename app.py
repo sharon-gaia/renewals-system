@@ -1932,7 +1932,7 @@ def api_end_reminder_queue():
         params = [month['id']] + list(_EOM_SETTLED) + list(NEW_BUSINESS_SOURCES)
     else:  # '25' — the flagged list, minus already renewed/issued
         where = ("month_id=? AND COALESCE(end_reminder_sent_date,'')!='' "
-                 "AND COALESCE(status,'') NOT IN ('חודש','חודש - בוצעה שיחת מכירה','הופק')" + common)
+                 "AND COALESCE(status,'') NOT IN ('חודש','חודש - בוצעה שיחת מכירה','הופק','טופס התקבל')" + common)
         params = [month['id']] + list(NEW_BUSINESS_SOURCES)
     rows = conn.execute(
         f"SELECT id, name, id_number, brand, phone, status FROM customers WHERE {where} ORDER BY brand, name",
@@ -1976,7 +1976,7 @@ def _send_queue_recipients(conn, month, typ):
         params = [month['id']] + list(_EOM_SETTLED) + list(NEW_BUSINESS_SOURCES)
     else:  # reminder_25
         where = ("month_id=? AND COALESCE(end_reminder_sent_date,'')!='' "
-                 "AND COALESCE(status,'') NOT IN ('חודש','חודש - בוצעה שיחת מכירה','הופק') "
+                 "AND COALESCE(status,'') NOT IN ('חודש','חודש - בוצעה שיחת מכירה','הופק','טופס התקבל') "
                  "AND COALESCE(lr25_sent_at,'')=''" + common)
         params = [month['id']] + list(NEW_BUSINESS_SOURCES)
     rows = conn.execute(
