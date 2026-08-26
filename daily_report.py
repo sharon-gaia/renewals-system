@@ -1,115 +1,40 @@
 """
 Daily health-check report for the renewals system.
-Sends a summary email to the admin every morning.
+Fetches the summary from the PRODUCTION cloud app (Railway) and emails it to the admin.
+(Previously read a LOCAL dev SQLite copy — which showed stale/dev numbers, not production.)
 Run via Windows Task Scheduler at 08:00.
 """
-import sqlite3
 import smtplib
 import datetime
 import sys
 import os
+import json
+from urllib import request as urlrequest
 
 sys.stdout.reconfigure(encoding='utf-8')
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'renewals.db')
-REPORT_TO   = 'd.sharon.d@gmail.com'
-REPORT_FROM = 'sharon@gaia-ins.co.il'
+REPORT_TO    = 'd.sharon.d@gmail.com'
+REPORT_FROM  = 'sharon@gaia-ins.co.il'
 APP_PASSWORD = 'mieewohcyjygjfbx'
-SYSTEM_URL  = 'https://negligee-pager-tray.ngrok-free.dev'
+CLOUD_URL    = os.environ.get('RENEWALS_URL', 'https://renewals-system-production.up.railway.app').rstrip('/')
 
-def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
 
-def build_report():
-    conn = get_db()
-    today = datetime.date.today().isoformat()
-    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+def _token():
+    """Bot API token. From env, else an untracked local report_token.txt (gitignored)."""
+    t = os.environ.get('WA_API_TOKEN')
+    if t:
+        return t.strip()
+    path = os.path.join(os.path.dirname(__file__), 'report_token.txt')
+    with open(path, encoding='utf-8') as f:
+        return f.read().strip()
 
-    month = conn.execute("SELECT * FROM months WHERE is_active=1").fetchone()
-    month_name = month['name'] if month else '(אין חודש פעיל)'
 
-    # Unmatched pending in admin queue
-    unmatched = conn.execute(
-        "SELECT * FROM unmatched_submissions WHERE status='pending' ORDER BY received_at DESC"
-    ).fetchall()
-
-    # Customers with form received (needs agent action)
-    forms_pending = conn.execute(
-        "SELECT * FROM customers WHERE month_id=(SELECT id FROM months WHERE is_active=1) "
-        "AND status='טופס התקבל' ORDER BY form_received_at DESC"
-    ).fetchall()
-
-    # Customers marked 'דורש בירור' (needs admin)
-    needs_clarify = conn.execute(
-        "SELECT * FROM customers WHERE month_id=(SELECT id FROM months WHERE is_active=1) "
-        "AND status='דורש בירור'"
-    ).fetchall()
-
-    # Overall stats
-    stats = conn.execute(
-        "SELECT COUNT(*) as total, "
-        "SUM(CASE WHEN status='חודש' THEN 1 ELSE 0 END) as renewed, "
-        "SUM(CASE WHEN status='' OR status IS NULL THEN 1 ELSE 0 END) as pending "
-        "FROM customers WHERE month_id=(SELECT id FROM months WHERE is_active=1)"
-    ).fetchone()
-
-    conn.close()
-
-    lines = []
-    lines.append(f"דוח יומי — מערכת שירות לקוחות | {today}")
-    lines.append(f"חודש פעיל: {month_name}")
-    lines.append("")
-
-    # Alert if anything needs attention
-    alerts = []
-    if unmatched:
-        alerts.append(f"⚠️  {len(unmatched)} טפסים בתור אדמין שממתינים לבירור")
-    if forms_pending:
-        alerts.append(f"📋 {len(forms_pending)} לקוחות עם טופס שהתקבל — ממתין לטיפול נציג")
-    if needs_clarify:
-        alerts.append(f"❓ {len(needs_clarify)} לקוחות סומנו 'דורש בירור'")
-
-    if alerts:
-        lines.append("== דרוש טיפול ==")
-        for a in alerts:
-            lines.append(a)
-        lines.append("")
-
-    # Stats
-    if stats:
-        total = stats['total'] or 0
-        renewed = stats['renewed'] or 0
-        pending = stats['pending'] or 0
-        pct = round(renewed / total * 100) if total else 0
-        lines.append("== סטטיסטיקות חודש ==")
-        lines.append(f"סה\"כ לקוחות: {total}")
-        lines.append(f"חידשו: {renewed} ({pct}%)")
-        lines.append(f"ממתינים לטיפול: {pending}")
-        lines.append("")
-
-    # Unmatched details
-    if unmatched:
-        lines.append("== תור אדמין — פרטים ==")
-        for u in unmatched:
-            lines.append(f"  • {u['name'] or '(ללא שם)'} | ת.ז: {u['id_number'] or '-'} | {u['received_at']}")
-        lines.append("")
-
-    # Forms pending details
-    if forms_pending:
-        lines.append("== טפסים שהתקבלו — ממתין לטיפול נציג ==")
-        for c in forms_pending:
-            lines.append(f"  • {c['name']} | {c['form_received_at']}")
-        lines.append("")
-
-    lines.append(f"כניסה למערכת: {SYSTEM_URL}")
-
-    if not alerts:
-        lines.insert(2, "✅ הכל תקין — אין פריטים ממתינים לטיפול")
-        lines.insert(3, "")
-
-    return "\n".join(lines)
+def fetch_report():
+    """Pull the server-computed report text from the production app."""
+    req = urlrequest.Request(CLOUD_URL + '/api/daily-report', headers={'X-WA-Token': _token()})
+    with urlrequest.urlopen(req, timeout=30) as r:
+        data = json.loads(r.read().decode('utf-8'))
+    return data['report']
 
 
 def send_report(body):
@@ -134,7 +59,11 @@ def send_report(body):
 
 
 if __name__ == '__main__':
-    body = build_report()
+    try:
+        body = fetch_report()
+    except Exception as e:
+        body = (f"⚠️ הדוח היומי נכשל בשליפת נתונים מהענן: {e}\n"
+                f"בדוק את {CLOUD_URL}/api/daily-report ואת report_token.txt")
     print(body)
     print()
     send_report(body)

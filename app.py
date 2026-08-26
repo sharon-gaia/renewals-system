@@ -1877,6 +1877,70 @@ def api_renewal_status():
     conn.close()
     return jsonify({'is_due': True, 'name': match['name'], 'period_end': pe, 'brand': match['brand']})
 
+@app.route('/api/daily-report')
+def api_daily_report():
+    """Token-authed: the morning health-report text, computed from THIS (production) DB.
+    Lets the local scheduled emailer reflect production instead of a stale local/dev copy."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    today = datetime.date.today().isoformat()
+    month = conn.execute("SELECT * FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    month_name = month['name'] if month else '(אין חודש פעיל)'
+    mid = month['id'] if month else -1
+    unmatched = conn.execute(
+        "SELECT name, id_number, received_at FROM unmatched_submissions "
+        "WHERE status='pending' ORDER BY received_at DESC").fetchall()
+    forms_pending = conn.execute(
+        "SELECT name, form_received_at FROM customers WHERE month_id=? "
+        "AND status='טופס התקבל' ORDER BY form_received_at DESC", (mid,)).fetchall()
+    needs_clarify = conn.execute(
+        "SELECT id FROM customers WHERE month_id=? AND status='דורש בירור'", (mid,)).fetchall()
+    stats = conn.execute(
+        "SELECT COUNT(*) AS total, "
+        "SUM(CASE WHEN status='חודש' THEN 1 ELSE 0 END) AS renewed, "
+        "SUM(CASE WHEN status='' OR status IS NULL THEN 1 ELSE 0 END) AS pending "
+        "FROM customers WHERE month_id=?", (mid,)).fetchone()
+    conn.close()
+
+    lines = [f"דוח יומי — מערכת שירות לקוחות | {today}",
+             f"חודש פעיל: {month_name}", ""]
+    alerts = []
+    if unmatched:
+        alerts.append(f"⚠️  {len(unmatched)} טפסים בתור אדמין שממתינים לבירור")
+    if forms_pending:
+        alerts.append(f"📋 {len(forms_pending)} לקוחות עם טופס שהתקבל — ממתין לטיפול נציג")
+    if needs_clarify:
+        alerts.append(f"❓ {len(needs_clarify)} לקוחות סומנו 'דורש בירור'")
+    if alerts:
+        lines.append("== דרוש טיפול ==")
+        lines.extend(alerts)
+        lines.append("")
+    if stats:
+        total = stats['total'] or 0
+        renewed = stats['renewed'] or 0
+        pending = stats['pending'] or 0
+        pct = round(renewed / total * 100) if total else 0
+        lines += ["== סטטיסטיקות חודש ==",
+                  f"סה\"כ לקוחות: {total}",
+                  f"חידשו: {renewed} ({pct}%)",
+                  f"ממתינים לטיפול: {pending}", ""]
+    if unmatched:
+        lines.append("== תור אדמין — פרטים ==")
+        for u in unmatched:
+            lines.append(f"  • {u['name'] or '(ללא שם)'} | ת.ז: {u['id_number'] or '-'} | {u['received_at']}")
+        lines.append("")
+    if forms_pending:
+        lines.append("== טפסים שהתקבלו — ממתין לטיפול נציג ==")
+        for c in forms_pending:
+            lines.append(f"  • {c['name']} | {c['form_received_at']}")
+        lines.append("")
+    lines.append("כניסה למערכת: https://renewals-system-production.up.railway.app/queue")
+    if not alerts:
+        lines.insert(2, "✅ הכל תקין — אין פריטים ממתינים לטיפול")
+        lines.insert(3, "")
+    return jsonify({'report': "\n".join(lines), 'generated_at': today})
+
 @app.route('/api/customer-by-name')
 def api_customer_by_name():
     """Diagnostic: customers matching a name, with their pending-handling workflow fields
