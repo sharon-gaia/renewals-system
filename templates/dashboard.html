@@ -98,14 +98,21 @@
     </a>
   </div>
   <div class="col-6 col-md-3">
-    <a href="/customers?status=ממתין+להפקה" class="text-decoration-none stat-link" data-status="ממתין להפקה">
-      <div class="card text-center border-0 shadow-sm h-100 {% if stats.pending_issue %}border-warning{% endif %}">
-        <div class="card-body">
-          <div class="stat-number text-warning" data-stat="pending_issue">{{ stats.pending_issue }}</div>
-          <div class="stat-label">📝 ממתין להפקה (טפסים חדשים)</div>
+    <div class="card text-center border-0 shadow-sm h-100 {% if stats.pending_total %}border-warning{% endif %}">
+      <div class="card-body">
+        <div class="stat-label mb-2">📝 ממתין להפקה</div>
+        <div class="d-flex justify-content-around">
+          <a href="/customers?status=ממתין+להפקה&src=join_form" class="text-decoration-none stat-link" data-status="ממתין להפקה">
+            <div class="stat-number text-warning" data-stat="pending_site" style="font-size:1.5rem;line-height:1">{{ stats.pending_site }}</div>
+            <div class="small text-muted">אתר</div>
+          </a>
+          <a href="/customers?status=ממתין+להפקה&src=harel_proposal" class="text-decoration-none stat-link" data-status="ממתין להפקה">
+            <div class="stat-number text-warning" data-stat="pending_harel" style="font-size:1.5rem;line-height:1">{{ stats.pending_harel }}</div>
+            <div class="small text-muted">הראל</div>
+          </a>
         </div>
       </div>
-    </a>
+    </div>
   </div>
 </div>
 <div class="row g-3 mb-4">

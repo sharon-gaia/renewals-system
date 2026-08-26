@@ -2685,6 +2685,7 @@ def customers():
     brand_filter = request.args.get('brand', '')
     status_filter = request.args.get('status', '')
     midwife_filter = request.args.get('mw', '') == '1'
+    src_filter = request.args.get('src', '')  # import_source, e.g. join_form (אתר) / harel_proposal (הראל)
     search = request.args.get('q', '').strip()
 
     query = "SELECT * FROM customers WHERE month_id=?"
@@ -2707,6 +2708,9 @@ def customers():
     elif status_filter:
         query += " AND status=?"
         params.append(status_filter)
+    if src_filter:
+        query += " AND import_source=?"
+        params.append(src_filter)
     if search:
         like = f'%{search}%'
         name_cond, name_params = _name_search('name', search, like)
