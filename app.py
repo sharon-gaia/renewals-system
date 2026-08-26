@@ -1663,6 +1663,31 @@ def _policy_facing_status(cust_status, ins_status):
         return 'בתהליך חידוש'
     return 'פעילה'
 
+@app.route('/api/reminded-but-renewed')
+def api_reminded_but_renewed():
+    """Token-authed: active-month customers who got the 25th reminder (lr25_sent_at set) BUT already
+    have a DELIVERED renewal policy this cycle — i.e. they'd renewed and shouldn't have been
+    reminded (status wasn't flipped). Returns them for the apology + status fix."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    cycle = (datetime.datetime.now() - datetime.timedelta(days=45)).strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    rows = conn.execute(
+        """SELECT c.id, c.name, c.id_number, c.brand, c.phone, c.status
+           FROM customers c
+           WHERE c.month_id=? AND COALESCE(c.lr25_sent_at,'')!=''
+             AND EXISTS (SELECT 1 FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id
+                         WHERE ltrim(COALESCE(pr.insured_id,''),'0')=ltrim(COALESCE(c.id_number,''),'0')
+                           AND pr.doc_type_label LIKE '%חידוש%' AND pd.received_at >= ?
+                           AND (COALESCE(pd.whatsapp_sent_at,'')!='' OR COALESCE(pd.email_sent_at,'')!=''))
+           ORDER BY c.brand, c.name""",
+        (month['id'], cycle)).fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
+
 @app.route('/api/policy-lookup')
 def api_policy_lookup():
     """Token-authed personalization lookup for the bot: a customer's OWN policy by ת"ז — returned
@@ -5662,6 +5687,18 @@ def policy_sent():
         else:
             tag = ' [בדיקה]' if POLICY_AUTOSEND_TEST else ''
             note = f"פוליסת חידוש נשלחה אוטומטית ({ch}){tag}"
+            # Delivering the renewal policy means the customer renewed → flip an OPEN status to 'חודש'
+            # so they drop off the renewal work lists + reminders. Never override an already-settled
+            # or declined status (that's a conflict for a human to resolve).
+            _idn = normalize_id_number(pr['insured_id'])
+            if _idn and not POLICY_AUTOSEND_TEST:
+                _c = conn.execute(
+                    "SELECT c.id, c.status FROM customers c JOIN months m ON m.id=c.month_id "
+                    "WHERE m.is_active=1 AND ltrim(COALESCE(c.id_number,''),'0')=?", (_idn.lstrip('0'),)).fetchone()
+                _settled = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'לא רוצים לחדש', 'לא מחדש', 'בוטל')
+                if _c and (_c['status'] or '') not in _settled:
+                    conn.execute("UPDATE customers SET status='חודש', status_changed_at=? WHERE id=?", (now, _c['id']))
+                    log_event(conn, idkey, "סטטוס עודכן אוטומטית ל-'חודש' (פוליסת חידוש נמסרה)", 'system', kind='status')
         log_event(conn, idkey, note, 'system', kind='policy_send')
     mid = conn.execute("SELECT message_id FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
     conn.commit()
