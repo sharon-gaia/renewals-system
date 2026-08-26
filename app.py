@@ -1810,6 +1810,48 @@ def api_test_policy():
     return jsonify({'ok': True, 'doc_id': did, 'policy_number': pol, 'insured_id': idn,
                     'period_start': ps, 'period_end': pe})
 
+@app.route('/api/renewal-status')
+def api_renewal_status():
+    """Token-authed: does the phone (an inbound WhatsApp sender — its own verified identity) have an
+    OPEN renewal this cycle? is_due=true only for an active-month Gaia/Winner renewal that isn't new
+    business/group-owner and isn't already settled (renewed/declined/issued). Returns name/period_end/
+    brand when due, else {is_due:false}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    p = re.sub(r'\D', '', request.args.get('phone', ''))
+    if len(p) < 9:
+        return jsonify({'is_due': False})
+    p9 = p[-9:]
+    conn = get_db()
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'is_due': False})
+    settled = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'ממתין להפקה')
+    rows = conn.execute(
+        "SELECT name, id_number, brand, status, import_source, group_owner FROM customers "
+        "WHERE month_id=? AND brand IN ('גאיה','ווינר') "
+        "AND REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ','') LIKE ?",
+        (month['id'], '%' + p9)).fetchall()
+    match = None
+    for r in rows:
+        if (r['import_source'] or '') in NEW_BUSINESS_SOURCES or (r['group_owner'] or '').strip():
+            continue
+        if (r['status'] or '') in settled:
+            continue
+        match = r; break
+    if not match:
+        conn.close(); return jsonify({'is_due': False})
+    idn = re.sub(r'\D', '', match['id_number'] or '').lstrip('0')
+    ins = conn.execute("SELECT period_end FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn,)).fetchone() if idn else None
+    pe = (ins['period_end'] if ins and ins['period_end'] else None)
+    if not pe:
+        today = datetime.date.today()
+        last = (datetime.date(today.year, 12, 31) if today.month == 12
+                else datetime.date(today.year, today.month + 1, 1) - datetime.timedelta(days=1))
+        pe = last.strftime('%d/%m/%Y')
+    conn.close()
+    return jsonify({'is_due': True, 'name': match['name'], 'period_end': pe, 'brand': match['brand']})
+
 @app.route('/api/customer-by-name')
 def api_customer_by_name():
     """Diagnostic: customers matching a name, with their pending-handling workflow fields
