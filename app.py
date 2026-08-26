@@ -2590,6 +2590,23 @@ def _renewal_funnel(subset):
         'pct': round(rnw / t * 100, 1) if t else 0,
     }
 
+def _pending_split(rows):
+    """'ממתין להפקה' split by lead SOURCE (brand-agnostic — a lead has no brand until issuance, which
+    is why counting it inside a single-brand view undercounts). join_form=אתר, harel_proposal=הראל."""
+    site = harel = other = 0
+    for r in rows:
+        if (r['status'] or '') != 'ממתין להפקה':
+            continue
+        src = (r['import_source'] or '')
+        if src == 'join_form':
+            site += 1
+        elif src == 'harel_proposal':
+            harel += 1
+        else:
+            other += 1
+    return {'pending_site': site, 'pending_harel': harel, 'pending_other': other,
+            'pending_total': site + harel + other}
+
 @app.route('/')
 @login_required
 def index():
@@ -2621,6 +2638,12 @@ def index():
             views[GW] = _funnel(rows)
             view_labels = [GW]
         masked_views = ['אופיר']  # planning-only — show the layout, hide the numbers
+        # 'ממתין להפקה' is a brand-agnostic lead bucket — count it GLOBALLY (all rows) and inject the
+        # אתר/הראל split into every view, so the card shows the real total (not just branded rows).
+        psplit = _pending_split(rows)
+        for _v in views.values():
+            _v.update(psplit)
+            _v['pending_issue'] = psplit['pending_total']
         # Ofir renewals split by ענף (sector): total vs renewed (חודש) per category → %.
         ofir_rows = [r for r in rows if r['brand'] == 'אופיר']
         ofir_by_category = []
@@ -5102,7 +5125,7 @@ def api_funnel():
     conn.close()
     present = [b for b in ('גאיה', 'ווינר', 'אופיר') if any(r['brand'] == b for r in rows)]
     active = [b for b in ('גאיה', 'ווינר') if b in present]
-    out = {'month': month['name'], 'views': {}}
+    out = {'month': month['name'], 'views': {}, 'pending': _pending_split(rows)}
     if len(active) > 1:
         out['views']['גאיה + ווינר'] = _renewal_funnel([r for r in rows if r['brand'] in active])
     for b in present:
