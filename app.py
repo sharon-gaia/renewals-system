@@ -7088,19 +7088,19 @@ def touch_scan_heartbeat():
     except Exception:
         pass
 
-def check_email_inbox():
+def check_email_inbox(days_back=30):
     """Connect to IMAP, process renewal emails not yet seen (tracked by Message-ID in DB)."""
     if not _email_check_lock.acquire(blocking=False):
         print('[email-sync] בדיקה כבר רצה — דילוג')
         return 0
     try:
-        n = _check_email_inbox_impl()
+        n = _check_email_inbox_impl(days_back=days_back)
         touch_scan_heartbeat()
         return n
     finally:
         _email_check_lock.release()
 
-def _check_email_inbox_impl():
+def _check_email_inbox_impl(days_back=30):
     cfg = EMAIL_CONFIG
     if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
         return 0
@@ -7111,8 +7111,8 @@ def _check_email_inbox_impl():
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
 
-        # Search from Resend since 30 days ago (limits scan size; processed_emails prevents duplicates)
-        since_date = (datetime.datetime.now() - datetime.timedelta(days=30)).strftime('%d-%b-%Y')
+        # Search window (routine poll passes a short window to stay fast; processed_emails dedups)
+        since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
         status, data = mail.search(None, f'FROM "{cfg["sender_filter"]}" SINCE {since_date}')
         if status != 'OK':
             mail.logout()
@@ -8824,45 +8824,54 @@ def api_cert_scan():
 def email_poll_thread():
     """Background thread: check inbox every N seconds. A heartbeat is recorded after EACH step
     so a long-but-progressing cycle keeps the scanner 'alive' for the watchdog."""
+    # Routine poll scans a SHORT window so each cycle stays fast (a re-scan of a 14–30-day window
+    # re-fetches headers for hundreds of emails every 3 min → the thread stalls and the scanner
+    # falls behind). New emails always arrive same/next day, so a few days is plenty; a wider
+    # backfill is available on demand via /api/policy/scan?days= etc. + the periodic deep scan below.
+    POLL_DAYS = 4
+    _cyc = [0]
     while True:
         time.sleep(EMAIL_CONFIG['check_interval'])
+        # Once an hour, widen the window as a safety net so nothing is missed after an outage.
+        _cyc[0] += 1
+        _days = 21 if (_cyc[0] % 20 == 0) else POLL_DAYS   # ~every 20 cycles (≈1h) → 21-day sweep
         try:
-            n = check_email_inbox()
+            n = check_email_inbox(days_back=_days)
             if n:
                 print(f'[email-sync] עובדו {n} מיילים חדשים')
         except Exception as e:
             print(f'[email-sync] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            n2 = check_policy_documents()
+            n2 = check_policy_documents(days_back=_days)
             if n2:
                 print(f'[policy-docs] עובדו {n2} פוליסות חדשות')
         except Exception as e:
             print(f'[policy-docs] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            n3 = check_join_forms()
+            n3 = check_join_forms(days_back=_days)
             if n3:
                 print(f'[join-forms] נקלטו {n3} טפסי הצטרפות')
         except Exception as e:
             print(f'[join-forms] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            rp, ru = check_renewal_forms()
+            rp, ru = check_renewal_forms(days_back=_days)
             if rp:
                 print(f'[renewal-forms] עובדו {rp} טפסי חידוש ({ru} לא תואמים)')
         except Exception as e:
             print(f'[renewal-forms] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            hp = check_harel_completed()
+            hp = check_harel_completed(days_back=_days)
             if hp:
                 print(f'[harel-proposal] נקלטו {hp} השלמות פרטים להצעה')
         except Exception as e:
             print(f'[harel-proposal] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            hc = check_cert_emails()
+            hc = check_cert_emails(days_back=_days)
             if hc:
                 print(f'[harel-cert] נקלטו {hc} בקשות אישור קיום ביטוח')
         except Exception as e:
