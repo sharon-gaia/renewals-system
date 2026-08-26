@@ -2711,6 +2711,13 @@ def customers():
     if src_filter:
         query += " AND import_source=?"
         params.append(src_filter)
+    # New business belongs ONLY in 'ממתין להפקה' + the other-forms page — keep it out of the renewal
+    # work views (ממתין לטיפול / work queue / every other status filter). A name/phone search still
+    # finds anyone. (Sharon's rule: the work lists are renewals only.)
+    if status_filter != 'ממתין להפקה' and not search:
+        _nbph = ','.join('?' * len(NEW_BUSINESS_SOURCES))
+        query += f" AND COALESCE(import_source,'') NOT IN ({_nbph})"
+        params += list(NEW_BUSINESS_SOURCES)
     if search:
         like = f'%{search}%'
         name_cond, name_params = _name_search('name', search, like)
@@ -3847,10 +3854,12 @@ def queue():
         return redirect(url_for('index'))
     conn = get_db()
     bc, bp = brand_clause()
+    _nbph = ','.join('?' * len(NEW_BUSINESS_SOURCES))
     rows = conn.execute(
-        "SELECT * FROM customers WHERE month_id=? AND status='טופס התקבל'" + bc +
+        f"SELECT * FROM customers WHERE month_id=? AND status='טופס התקבל' "
+        f"AND COALESCE(import_source,'') NOT IN ({_nbph})" + bc +
         " ORDER BY form_received_at DESC",
-        [month['id']] + bp
+        [month['id']] + list(NEW_BUSINESS_SOURCES) + bp
     ).fetchall()
     # Fetch attachments per customer
     attachments = {}
