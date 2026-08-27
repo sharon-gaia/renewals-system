@@ -1688,14 +1688,10 @@ def api_reminded_but_renewed():
     conn.close()
     return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
 
-@app.route('/api/admin/free-disk', methods=['POST'])
-def api_free_disk():
-    """EMERGENCY: free space on the /data volume by deleting policy PDFs older than N days from
-    POLICY_DOCS_DIR (they've been delivered + are backed up on OneDrive). Filesystem-only — works
-    even when the DB is failing with a full-disk I/O error. Body {days:int=2}."""
-    if not _wa_api_authed():
-        return jsonify({'error': 'unauthorized'}), 403
-    days = int((request.get_json(silent=True) or {}).get('days', 2))
+def _free_old_pdfs(days=7):
+    """Delete policy/attachment PDFs older than `days` from the /data volume (they're delivered +
+    backed up on OneDrive). Filesystem-only — safe even when the DB is failing on a full disk.
+    Returns (deleted_count, freed_bytes)."""
     cutoff = time.time() - days * 86400
     freed = 0
     n = 0
@@ -1715,6 +1711,16 @@ def api_free_disk():
                         n += 1
                 except Exception:
                     pass
+    return n, freed
+
+@app.route('/api/admin/free-disk', methods=['POST'])
+def api_free_disk():
+    """EMERGENCY: free space on the /data volume by deleting policy PDFs older than N days.
+    Filesystem-only — works even when the DB is failing with a full-disk I/O error. Body {days:int=2}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int((request.get_json(silent=True) or {}).get('days', 2))
+    n, freed = _free_old_pdfs(days)
     return jsonify({'ok': True, 'deleted': n, 'freed_mb': round(freed / 1024 / 1024, 1), 'days': days})
 
 @app.route('/api/policy-lookup')
@@ -8931,6 +8937,15 @@ def email_poll_thread():
         # Once an hour, widen the window as a safety net so nothing is missed after an outage.
         _cyc[0] += 1
         _days = 21 if (_cyc[0] % 20 == 0) else POLL_DAYS   # ~every 20 cycles (≈1h) → 21-day sweep
+        # Daily disk cleanup — the /data volume once filled to 99% and took the DB down. Delete PDFs
+        # >7 days (delivered + on OneDrive) once/day (~480 cycles) + once shortly after startup.
+        if _cyc[0] == 3 or _cyc[0] % 480 == 0:
+            try:
+                _n, _fb = _free_old_pdfs(7)
+                if _n:
+                    print(f'[disk-cleanup] נמחקו {_n} PDF ישנים, שוחררו {round(_fb/1024/1024, 1)}MB')
+            except Exception as e:
+                print(f'[disk-cleanup] {e}')
         try:
             n = check_email_inbox(days_back=_days)
             if n:
