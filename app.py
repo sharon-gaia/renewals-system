@@ -5819,13 +5819,14 @@ def api_policy_relink():
     doc_id = d.get('doc_id')
     cols = ("insured_id, insured_name, phone_mobile, email, agent_number, "
             "doc_type_label, policy_number, policy_document_id")
+    cols_pr = ", ".join("pr." + c.strip() for c in cols.split(","))  # qualified — policy_number exists in both tables
     conn = get_db()
     if doc_id:
         pr = conn.execute(f"SELECT {cols} FROM policy_records WHERE policy_document_id=? LIMIT 1",
                           (doc_id,)).fetchone()
     elif idn:
         pr = conn.execute(
-            f"SELECT {cols} FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            f"SELECT {cols_pr} FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
             "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? ORDER BY pd.id DESC LIMIT 1",
             (idn.lstrip('0'),)).fetchone()
     else:
