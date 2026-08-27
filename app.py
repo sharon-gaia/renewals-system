@@ -5807,6 +5807,42 @@ def policy_sent():
         threading.Thread(target=_label_email, args=(mid['message_id'],), daemon=True).start()
     return jsonify({'ok': True})
 
+@app.route('/api/policy/relink', methods=['POST'])
+def api_policy_relink():
+    """Token: re-run new-business lead→policy linking for a ת"ז (or doc_id). Backfills a missing
+    policy number and/or upgrades a stuck 'ממתין להפקה' lead to 'הופק' — idempotent, safe to re-run.
+    Body {id_number} or {doc_id}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    idn = re.sub(r'\D', '', str(d.get('id_number', '')))
+    doc_id = d.get('doc_id')
+    cols = ("insured_id, insured_name, phone_mobile, email, agent_number, "
+            "doc_type_label, policy_number, policy_document_id")
+    conn = get_db()
+    if doc_id:
+        pr = conn.execute(f"SELECT {cols} FROM policy_records WHERE policy_document_id=? LIMIT 1",
+                          (doc_id,)).fetchone()
+    elif idn:
+        pr = conn.execute(
+            f"SELECT {cols} FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? ORDER BY pd.id DESC LIMIT 1",
+            (idn.lstrip('0'),)).fetchone()
+    else:
+        conn.close(); return jsonify({'error': 'need id_number or doc_id'}), 400
+    if not pr:
+        conn.close(); return jsonify({'error': 'no policy_record'}), 404
+    _ensure_new_customer(conn, pr)
+    conn.commit()
+    z = normalize_id_number(pr['insured_id'] or '').lstrip('0')
+    row = conn.execute(
+        "SELECT c.id, c.status, c.policy_number FROM customers c JOIN months m ON m.id=c.month_id "
+        "WHERE m.is_active=1 AND ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY c.id DESC LIMIT 1",
+        (z,)).fetchone()
+    conn.close()
+    return jsonify({'ok': True, 'policy_number': pr['policy_number'],
+                    'customer': (dict(row) if row else None)})
+
 @app.route('/api/wa/queue')
 def wa_queue():
     """Per-brand WhatsApp send list for the local sender tool (token-authed)."""
@@ -7393,14 +7429,22 @@ def _ensure_new_customer(conn, pr):
                          (idn, existing['id']))
     brand = NEW_AGENT_BRAND.get(re.sub(r'\D', '', str(pr['agent_number'] or '')), '')
     if existing:
+        pn = (pr['policy_number'] or '')
         if (existing['status'] or '') == LEAD_STATUS:
             conn.execute(
                 "UPDATE customers SET policy_number=COALESCE(NULLIF(policy_number,''),?), "
                 "status='הופק', status_changed_at=? WHERE id=?",
-                (pr['policy_number'], datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), existing['id']))
+                (pn, datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), existing['id']))
             _sync_customer_to_insured(conn, existing['id'], active=True)
             _apply_new_occupation(conn, existing['id'], pr)
             _resolve_form_queue(conn, idn, escalations=True)
+        elif pn:
+            # Self-heal: backfill a missing policy number onto an already-issued/serviced row —
+            # e.g. the number was blank at first delivery, or a later month re-sync wiped it.
+            conn.execute(
+                "UPDATE customers SET policy_number=? "
+                "WHERE id=? AND COALESCE(NULLIF(policy_number,''),'')=''",
+                (pn, existing['id']))
         return
     cur = conn.execute(
         """INSERT INTO customers (month_id, policy_number, name, id_number, phone, email, brand,
