@@ -8813,8 +8813,11 @@ def api_cert_resolve():
     if not email and ins:
         email = ins['email'] or ''
     brand = (cust['brand'] if cust else (ins['brand'] if ins else None))
+    # Resolving = make it (re-)deliverable: also clear any prior send marks so a cert that went to a
+    # wrong number re-enters the queue and is re-sent to the corrected contact.
     conn.execute("UPDATE cert_requests SET id_number=?, phone=?, email=?, brand=COALESCE(?,brand), "
-                 "customer_id=COALESCE(?,customer_id), match_status='matched' WHERE ticket=?",
+                 "customer_id=COALESCE(?,customer_id), match_status='matched', "
+                 "wa_sent_at=NULL, wa_target=NULL, email_sent_at=NULL WHERE ticket=?",
                  (idn, phone, email, brand, (cust['id'] if cust else None), ticket))
     conn.commit()
     conn.close()
