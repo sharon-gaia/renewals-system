@@ -1688,6 +1688,35 @@ def api_reminded_but_renewed():
     conn.close()
     return jsonify({'count': len(rows), 'items': [dict(r) for r in rows]})
 
+@app.route('/api/admin/free-disk', methods=['POST'])
+def api_free_disk():
+    """EMERGENCY: free space on the /data volume by deleting policy PDFs older than N days from
+    POLICY_DOCS_DIR (they've been delivered + are backed up on OneDrive). Filesystem-only — works
+    even when the DB is failing with a full-disk I/O error. Body {days:int=2}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int((request.get_json(silent=True) or {}).get('days', 2))
+    cutoff = time.time() - days * 86400
+    freed = 0
+    n = 0
+    for base_dir in (POLICY_DOCS_DIR, ATTACHMENTS_DIR):
+        if not base_dir or not os.path.isdir(base_dir):
+            continue
+        for root, _dirs, files in os.walk(base_dir):
+            for f in files:
+                if not f.lower().endswith('.pdf'):
+                    continue
+                fp = os.path.join(root, f)
+                try:
+                    if os.path.getmtime(fp) < cutoff:
+                        sz = os.path.getsize(fp)
+                        os.remove(fp)
+                        freed += sz
+                        n += 1
+                except Exception:
+                    pass
+    return jsonify({'ok': True, 'deleted': n, 'freed_mb': round(freed / 1024 / 1024, 1), 'days': days})
+
 @app.route('/api/policy-lookup')
 def api_policy_lookup():
     """Token-authed personalization lookup for the bot: a customer's OWN policy by ת"ז — returned
