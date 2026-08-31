@@ -4545,6 +4545,89 @@ def import_excel():
     return redirect(url_for('admin'))
 
 
+def _snapshot_db(tag='import'):
+    """Take a consistent point-in-time copy of the live DB (a rollback point) into the /data volume,
+    then prune old snapshots so they never fill the disk. Uses the SQLite backup API (safe on a live
+    DB). Returns the snapshot filename, or None on failure. The DB is small (~6MB) so copies are cheap."""
+    try:
+        bdir = os.path.dirname(DB_PATH) or '.'
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        fname = f'snapshot_{tag}_{ts}.db'
+        path = os.path.join(bdir, fname)
+        src = sqlite3.connect(DB_PATH)
+        dst = sqlite3.connect(path)
+        with dst:
+            src.backup(dst)
+        dst.close(); src.close()
+        # Retention: keep the newest 10 snapshots + the newest 14 daily pre-migration backups.
+        def _prune(prefix, keep):
+            try:
+                files = sorted(f for f in os.listdir(bdir)
+                               if f.startswith(prefix) and f.endswith('.db'))
+                for old in files[:-keep]:
+                    try: os.remove(os.path.join(bdir, old))
+                    except OSError: pass
+            except OSError:
+                pass
+        _prune('snapshot_', 10)
+        _prune('renewals_backup_', 14)
+        return fname
+    except Exception as e:
+        print(f'[snapshot] failed: {e}')
+        return None
+
+def _list_snapshots():
+    bdir = os.path.dirname(DB_PATH) or '.'
+    out = []
+    try:
+        for f in os.listdir(bdir):
+            if (f.startswith('snapshot_') or f.startswith('renewals_backup_')) and f.endswith('.db'):
+                fp = os.path.join(bdir, f)
+                st = os.stat(fp)
+                out.append({'file': f, 'size_mb': round(st.st_size / 1024 / 1024, 1),
+                            'created': datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')})
+    except OSError:
+        pass
+    return sorted(out, key=lambda x: x['created'], reverse=True)
+
+@app.route('/api/admin/db-snapshots')
+def api_db_snapshots():
+    """Token: list DB rollback points (pre-import snapshots + daily backups) on the volume."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    return jsonify({'snapshots': _list_snapshots()})
+
+@app.route('/api/admin/db-snapshot', methods=['POST'])
+def api_db_snapshot():
+    """Token: take a manual rollback point now. Body {tag?}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    tag = re.sub(r'[^A-Za-z0-9_]', '', str((request.get_json(silent=True) or {}).get('tag', 'manual')))[:24] or 'manual'
+    fn = _snapshot_db(tag)
+    return (jsonify({'ok': True, 'snapshot': fn}) if fn else (jsonify({'error': 'snapshot failed'}), 500))
+
+@app.route('/api/admin/db-restore', methods=['POST'])
+def api_db_restore():
+    """Token: restore the live DB from a named snapshot on the volume (a safety snapshot of the
+    CURRENT state is taken first). Body {file}. Only *.db files in the DB dir are allowed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    base = os.path.basename(str((request.get_json(silent=True) or {}).get('file', '')))
+    bdir = os.path.dirname(DB_PATH) or '.'
+    src_path = os.path.join(bdir, base)
+    if not base.endswith('.db') or not os.path.exists(src_path):
+        return jsonify({'error': 'snapshot not found'}), 404
+    safety = _snapshot_db('pre_restore')
+    try:
+        src = sqlite3.connect(src_path)
+        dst = sqlite3.connect(DB_PATH)
+        with dst:
+            src.backup(dst)
+        dst.close(); src.close()
+    except Exception as e:
+        return jsonify({'error': f'restore failed: {e}'}), 500
+    return jsonify({'ok': True, 'restored_from': base, 'safety_snapshot': safety})
+
 @app.route('/admin/import/commit/<int:pid>', methods=['POST'])
 @login_required
 @superadmin_required
@@ -4556,6 +4639,7 @@ def import_commit(pid):
         conn.close()
         flash('לא נמצאה טעינה ממתינה', 'danger')
         return redirect(url_for('admin'))
+    _snapshot_db('before_import')  # rollback point BEFORE the month transition is applied
     try:
         wb = load_workbook(io.BytesIO(p['file_blob']), data_only=True)
         count, promoted, label = _apply_import(conn, wb, p['source'], p['month_name'])
@@ -5586,6 +5670,7 @@ def api_commit_import():
         outgoing = {'name': prev['name'], 'total': total, 'renewed_active': renewed,
                     'not_renewed_inactive': total - renewed}
     before = _month_state(conn)
+    _snapshot_db('before_import')  # rollback point BEFORE the month transition is applied
     try:
         wb = load_workbook(io.BytesIO(p['file_blob']), data_only=True)
         count, promoted, label = _apply_import(conn, wb, p['source'], p['month_name'])
