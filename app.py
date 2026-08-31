@@ -130,28 +130,16 @@ GW_STATUS_OPTIONS = [
     ('ממתין לחידוש', 'ממתין לחידוש'),
     ('המשך טיפול בוואטסאפ', 'המשך טיפול בוואטסאפ'),
     ('ביקשו לחדש לבד', 'ביקשו לחדש לבד'),
+    ('ביקש לחשוב/לבדוק', 'ביקש לחשוב/לבדוק'),
     ('ממתין לאישור מיילדות', 'ממתין לאישור מיילדות'),
     ('לא רוצים לחדש', 'לא רוצים לחדש'),
 ]
-OFIR_STATUS_OPTIONS = [
-    ('', 'לא התחיל'),
-    ('תומחר', 'תומחר'),
-    ('קיבל פניה', 'קיבל פניה'),
-    ('הלקוח אישר', 'הלקוח אישר'),
-    ('חודש', 'חודש ✓'),
-    ('חודש - בוצעה שיחת מכירה', 'חודש - בוצעה שיחת מכירה ✓'),
-    ('בוטל', 'בוטל'),
-    ('לא מחדש', 'לא מחדש'),
-    ('ממתין לחידוש', 'ממתין לחידוש'),
-    ('המשך טיפול בוואטסאפ', 'המשך טיפול בוואטסאפ'),
-    ('ביקשו לחדש לבד', 'ביקשו לחדש לבד'),
-    ('ממתין לאישור מיילדות', 'ממתין לאישור מיילדות'),
-    ('פרוייקט הסתיים', 'פרוייקט הסתיים'),
-    ('רק לשלם', 'רק לשלם'),
-]
+# Ofir uses the same status set as Gaia/Winner (its own list was retired 2026-08-31 per Sharon —
+# initial status for everyone is 'ממתין לטיפול').
+OFIR_STATUS_OPTIONS = GW_STATUS_OPTIONS
 
 def status_options_for(brand):
-    return OFIR_STATUS_OPTIONS if brand == 'אופיר' else GW_STATUS_OPTIONS
+    return GW_STATUS_OPTIONS
 
 # Ofir renewal categories, split by the ענף (sector) column. Dashboard shows renewal
 # % per category. Each entry is (label, [aliases]); a row matches if any alias is a
