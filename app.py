@@ -1854,9 +1854,41 @@ def api_test_policy():
     conn.execute("INSERT INTO policy_records (policy_document_id, policy_number, doc_type_label, insured_name, "
                  "insured_id, period_start, period_end, premium, extracted_at) VALUES (?,?,?,?,?,?,?,?,?)",
                  (did, pol, 'חידוש', name, idn, ps, pe, prem, now))
+    # Optionally set up the serviceable records the bot needs — an insured master (for the phone-match
+    # security check in /api/policy-lookup) + a dashboard customer row (status 'הופק', manual). Pass
+    # phone (+ brand) to enable, mirroring a real test customer.
+    brand = (d.get('brand') or '').strip()
+    phone = re.sub(r'\D', '', str(d.get('phone') or ''))
+    email = (d.get('email') or '').strip()
+    made = {}
+    if phone:
+        iso = datetime.datetime.now().isoformat()
+        ins = conn.execute("SELECT id FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                           (idn.lstrip('0'),)).fetchone()
+        if ins:
+            conn.execute("UPDATE insureds SET name=COALESCE(NULLIF(name,''),?), phone=?, "
+                         "email=COALESCE(NULLIF(email,''),?), brand=COALESCE(NULLIF(brand,''),?), "
+                         "status='פעיל', updated_at=? WHERE id=?", (name, phone, email, brand, iso, ins['id']))
+            made['insured'] = 'updated'
+        else:
+            conn.execute("INSERT INTO insureds (id_number, name, brand, phone, email, status, created_at, updated_at) "
+                         "VALUES (?,?,?,?,?,?,?,?)", (idn, name, brand, phone, email, 'פעיל', iso, iso))
+            made['insured'] = 'created'
+        month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+        if month and brand in ('גאיה', 'ווינר', 'אופיר'):
+            cust = conn.execute("SELECT id FROM customers WHERE month_id=? AND ltrim(COALESCE(id_number,''),'0')=?",
+                                (month['id'], idn.lstrip('0'))).fetchone()
+            if cust:
+                made['customer'] = f"exists (id {cust['id']})"
+            else:
+                cid = conn.execute(
+                    "INSERT INTO customers (month_id, name, id_number, phone, email, brand, status, "
+                    "import_source, policy_number, status_changed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (month['id'], name, idn, phone, email, brand, 'הופק', 'manual', pol, now)).lastrowid
+                made['customer'] = f"created (id {cid})"
     conn.commit(); conn.close()
     return jsonify({'ok': True, 'doc_id': did, 'policy_number': pol, 'insured_id': idn,
-                    'period_start': ps, 'period_end': pe})
+                    'period_start': ps, 'period_end': pe, 'records': made})
 
 @app.route('/api/renewal-status')
 def api_renewal_status():
