@@ -48,7 +48,21 @@
             </a>
             {% endif %}
           </div>
+          {% if item.cust_id %}
+          <div class="fw-bold fs-6">
+            <a href="/customer/{{ item.cust_id }}" class="text-decoration-none text-dark">
+              {{ item.name or '(ללא שם)' }}<i class="bi bi-box-arrow-up-left ms-1 small text-primary"></i>
+            </a>
+          </div>
+          {% elif item.insured_id %}
+          <div class="fw-bold fs-6">
+            <a href="/insured/{{ item.insured_id }}" class="text-decoration-none text-dark">
+              {{ item.name or '(ללא שם)' }}<i class="bi bi-box-arrow-up-left ms-1 small text-primary"></i>
+            </a>
+          </div>
+          {% else %}
           <div class="fw-bold fs-6">{{ item.name or '(ללא שם)' }}</div>
+          {% endif %}
           {% if item.id_number %}<div class="small text-muted">ת.ז: {{ item.id_number }}
             <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline"
                     data-copy="{{ item.id_number }}" onclick="copyText(this)" title="העתק ת.ז"><i class="bi bi-clipboard"></i></button>
