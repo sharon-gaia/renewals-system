@@ -4911,8 +4911,15 @@ CAMPAIGN_CROSS_SELL = """
     <li>נמכר כתוספת לביטוח חיים</li>
     <li>החל מ-9 ₪ לחודש בלבד לכיסוי חוסן למחר</li>
   </ul>
-  <p>זה נספח קטן, אבל יכול לעשות הבדל גדול ביום שהכי תצטרכו אותו. אם תרצו לצרף אותו לחידוש — רק תגידו לנו ונחבר אתכם למנהל התחום.</p>
-  <p>המשך יום נפלא,</p>"""
+  <p>זה נספח קטן, אבל יכול לעשות הבדל גדול ביום שהכי תצטרכו אותו. אם תרצו לצרף אותו לחידוש — רק תגידו לנו ונחבר אתכם למנהל התחום.</p>"""
+
+def _seasonal_signoff():
+    """Closing line for the renewal-policy email. During the High-Holidays window (20 Aug–15 Oct)
+    it's a Rosh-Hashana greeting; the rest of the year it's the regular line. Auto-reverts."""
+    md = (datetime.date.today().month, datetime.date.today().day)
+    holiday = (8, 20) <= md <= (10, 15)
+    line = 'שתהיה לך שנה טובה, בטוחה ומתוקה,' if holiday else 'המשך יום נפלא,'
+    return f'\n  <p>{line}</p>'
 
 # Signature agency name per brand (name + registration year), shown in the renewal
 # message signature. Gaia/Winner are the active campaign brands.
@@ -7513,7 +7520,7 @@ def policy_email_html(name):
         f'<a href="{POLICY_HAREL_URL}">{POLICY_HAREL_URL}</a><br>'
         'אני זמין באופן אישי לכל שאלה או בקשה — בטלפון או בוואטסאפ.<br><br>'
         f'{POLICY_OPTIN}<br><br>'
-        f'{CAMPAIGN_CROSS_SELL}'
+        f'{CAMPAIGN_CROSS_SELL}{_seasonal_signoff()}'
         '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
         '</div>')
 
