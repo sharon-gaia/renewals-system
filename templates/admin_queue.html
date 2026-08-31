@@ -80,6 +80,16 @@
           {% if item.comments %}
           <div class="alert alert-warning py-1 px-2 mt-2 small">{{ item.comments }}</div>
           {% endif %}
+          {% if item.sharon_notes %}
+          <div class="alert alert-info py-1 px-2 mt-2 small mb-0">
+            <i class="bi bi-sticky-fill me-1"></i><strong>הערות שרון:</strong> {{ item.sharon_notes }}
+          </div>
+          {% endif %}
+          {% if item.requests_to_sharon %}
+          <div class="alert alert-secondary py-1 px-2 mt-2 small mb-0">
+            <i class="bi bi-chat-left-text me-1"></i><strong>בקשות לשרון:</strong> {{ item.requests_to_sharon }}
+          </div>
+          {% endif %}
           {% if item.doc_cid %}
           <div class="mt-2">
             <a href="/lead-doc/{{ item.doc_cid }}" target="_blank" class="btn btn-outline-primary btn-sm py-0">

@@ -3277,10 +3277,17 @@ def admin_queue():
         if mid.startswith('queue-cid-'):
             try:
                 ccid = int(mid.replace('queue-cid-', ''))
-                c = conn.execute("SELECT id_number, lead_doc_path FROM customers WHERE id=?", (ccid,)).fetchone()
-                if c and (c['lead_doc_path'] or '').strip():
-                    d['doc_cid'] = ccid
-                    d['doc_name'] = 'מסמך ' + (normalize_id_number(c['id_number']) or str(c['id_number'] or ''))
+                c = conn.execute("SELECT id_number, lead_doc_path, sharon_notes, requests_to_sharon "
+                                 "FROM customers WHERE id=?", (ccid,)).fetchone()
+                if c:
+                    if (c['lead_doc_path'] or '').strip():
+                        d['doc_cid'] = ccid
+                        d['doc_name'] = 'מסמך ' + (normalize_id_number(c['id_number']) or str(c['id_number'] or ''))
+                    # Surface the customer's private notes on the card so the admin doesn't have to
+                    # open each client to read what they jotted down.
+                    d['sharon_notes'] = (c['sharon_notes'] or '').strip()
+                    d['requests_to_sharon'] = (c['requests_to_sharon'] or '').strip()
+                    d['cust_id'] = ccid
             except (ValueError, TypeError):
                 pass
         out.append(d)
