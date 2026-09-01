@@ -6177,7 +6177,13 @@ def wa_template_queue():
     month_name = HEB_MONTHS[datetime.datetime.now().month]
     items = []
     for r in buckets['whatsapp']:
-        if r['brand'] != brand or (r['whatsapp_sent_date'] or '').strip():
+        # Skip anyone already messaged this cycle — the campaign whatsapp flag OR either reminder
+        # flag (lreom/lr25). This keeps the FIRST notice off customers who already got a reminder
+        # (e.g. the 100 who received last_reminder_eom), so nobody gets a double message.
+        already = ((r['whatsapp_sent_date'] or '').strip()
+                   or (r['lreom_sent_at'] or '').strip()
+                   or (r['lr25_sent_at'] or '').strip())
+        if r['brand'] != brand or already:
             continue
         phone = re.sub(r'\D', '', str(r['phone'] or ''))
         if phone.startswith('0'):
