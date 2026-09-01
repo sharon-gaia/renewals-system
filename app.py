@@ -4997,13 +4997,16 @@ CAMPAIGN_CROSS_SELL = """
   </ul>
   <p>זה נספח קטן, אבל יכול לעשות הבדל גדול ביום שהכי תצטרכו אותו. אם תרצו לצרף אותו לחידוש — רק תגידו לנו ונחבר אתכם למנהל התחום.</p>"""
 
-def _seasonal_signoff():
-    """Closing line for the renewal-policy email. During the High-Holidays window (20 Aug–15 Oct)
-    it's a Rosh-Hashana greeting; the rest of the year it's the regular line. Auto-reverts."""
+def _seasonal_line():
+    """Closing line for every service message I send (not the bot). During the High-Holidays
+    window (20 Aug–15 Oct) it's a Rosh-Hashana greeting; the rest of the year the regular line.
+    Auto-reverts. Shared by all policy/cert/copy/service email + free-text bodies."""
     md = (datetime.date.today().month, datetime.date.today().day)
-    holiday = (8, 20) <= md <= (10, 15)
-    line = 'שתהיה לך שנה טובה, בטוחה ומתוקה,' if holiday else 'המשך יום נפלא,'
-    return f'\n  <p>{line}</p>'
+    return 'שתהיה לך שנה טובה, בטוחה ומתוקה,' if (8, 20) <= md <= (10, 15) else 'המשך יום נפלא,'
+
+def _seasonal_signoff():
+    """HTML variant — a <p> line for RTL email bodies."""
+    return f'\n  <p>{_seasonal_line()}</p>'
 
 # Signature agency name per brand (name + registration year), shown in the renewal
 # message signature. Gaia/Winner are the active campaign brands.
@@ -7589,6 +7592,7 @@ def policy_email_body(name):
             f"ניתן למצוא את הפוליסה גם באזור האישי של חברת הראל - {POLICY_HAREL_URL}\n"
             "אני זמין באופן אישי לכל שאלה או בקשה — בטלפון או בוואטסאפ.\n\n"
             f"{POLICY_OPTIN}\n\n"
+            f"{_seasonal_line()}\n"
             f"{POLICY_EMAIL_SIGN}")
 
 def policy_email_html(name):
@@ -7618,6 +7622,7 @@ def new_policy_email_body(name):
             "אז אפשר להעביר אותה ישירות לרואה החשבון.\n"
             "אני זמין באופן אישי לכל שאלה או בקשה — בטלפון או בוואטסאפ.\n\n"
             f"{POLICY_OPTIN}\n\n"
+            f"{_seasonal_line()}\n"
             f"{POLICY_EMAIL_SIGN}")
 
 def new_policy_email_html(name):
@@ -7632,6 +7637,7 @@ def new_policy_email_html(name):
         'אז אפשר להעביר אותה ישירות לרואה החשבון.<br>'
         'אני זמין באופן אישי לכל שאלה או בקשה — בטלפון או בוואטסאפ.<br><br>'
         f'{POLICY_OPTIN}<br><br>'
+        f'{_seasonal_signoff()}'
         '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
         '</div>')
 
@@ -7653,7 +7659,8 @@ def card_update_wa_text(name, brand_key):
             "הטופס התקבל אך אמצעי הגביה אינו תקין.\n"
             "יש לעדכן גביה בקישור הבא:\n"
             f"{link}\n\n"
-            "לאחר העדכון הפוליסה תופק ותשלח אליך בהקדם.")
+            "לאחר העדכון הפוליסה תופק ותשלח אליך בהקדם.\n\n"
+            f"{_seasonal_line()}")
 
 def card_update_email_body(name, brand_key):
     greet = f"שלום {name}," if name else "שלום,"
@@ -7663,6 +7670,7 @@ def card_update_email_body(name, brand_key):
             "יש לעדכן גביה בקישור הבא:\n"
             f"{link}\n\n"
             "לאחר העדכון הפוליסה תופק ותשלח אליך בהקדם.\n\n"
+            f"{_seasonal_line()}\n"
             f"{POLICY_EMAIL_SIGN}")
 
 def card_update_email_html(name, brand_key):
@@ -7676,6 +7684,7 @@ def card_update_email_html(name, brand_key):
         'יש לעדכן גביה בקישור הבא:<br>'
         f'<a href="{link}">{link}</a><br><br>'
         'לאחר העדכון הפוליסה תופק ותשלח אליך בהקדם.<br><br>'
+        f'{_seasonal_signoff()}'
         '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
         '</div>')
 
