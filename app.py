@@ -1725,10 +1725,10 @@ def api_policy_lookup():
     def last9(p):
         return re.sub(r'\D', '', str(p or ''))[-9:]
     conn = get_db()
-    ins = conn.execute("SELECT name, brand, phone, status, period_start, period_end "
+    ins = conn.execute("SELECT name, brand, phone, status, period_start, period_end, is_midwife "
                        "FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn,)).fetchone()
     cust = conn.execute(
-        "SELECT c.name, c.brand, c.phone, c.status, c.occupation, c.premium_last_year "
+        "SELECT c.name, c.brand, c.phone, c.status, c.occupation, c.premium_last_year, c.is_midwife "
         "FROM customers c JOIN months m ON m.id=c.month_id "
         "WHERE ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY m.is_active DESC, c.id DESC LIMIT 1", (idn,)).fetchone()
     if not (ins or cust):
@@ -1756,10 +1756,17 @@ def api_policy_lookup():
         pn = re.sub(r'[^\d.]', '', str(prem))
         prem = (f"{int(float(pn)):,} ₪" if pn else None)
     status = _policy_facing_status(cust['status'] if cust else None, ins['status'] if ins else None)
+    # Midwife flag — a midwife (מיילדת) renews on a dedicated link at a different price, so the bot
+    # must answer with the midwife-specific renewal link/amount, never the standard one.
+    is_mid = bool((cust['is_midwife'] if cust else 0) or (ins['is_midwife'] if ins else 0))
+    r_amt = renewal_amount(is_mid, (cust['premium_last_year'] if cust else None))
+    renewal = {'link': renewal_link(brand, is_mid)[0],
+               'price': (f"{r_amt:,} ₪" if r_amt else None)}
     conn.close()
-    return jsonify({'found': True, 'name': name, 'brand': brand,
+    return jsonify({'found': True, 'name': name, 'brand': brand, 'is_midwife': is_mid,
                     'policy': {'status': status, 'period_start': period_start, 'period_end': period_end,
-                               'professions': professions, 'premium': prem}})
+                               'professions': professions, 'premium': prem},
+                    'renewal': renewal})
 
 @app.route('/api/policy-pdf')
 def api_policy_pdf_lookup():
@@ -1908,7 +1915,8 @@ def api_renewal_status():
         conn.close(); return jsonify({'is_due': False})
     settled = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'ממתין להפקה')
     rows = conn.execute(
-        "SELECT name, id_number, brand, status, import_source, group_owner FROM customers "
+        "SELECT name, id_number, brand, status, import_source, group_owner, is_midwife, premium_last_year "
+        "FROM customers "
         "WHERE month_id=? AND brand IN ('גאיה','ווינר') "
         "AND REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ','') LIKE ?",
         (month['id'], '%' + p9)).fetchall()
@@ -1930,7 +1938,13 @@ def api_renewal_status():
                 else datetime.date(today.year, today.month + 1, 1) - datetime.timedelta(days=1))
         pe = last.strftime('%d/%m/%Y')
     conn.close()
-    return jsonify({'is_due': True, 'name': match['name'], 'period_end': pe, 'brand': match['brand']})
+    # Midwife flag + the midwife-specific renewal link/price, so the bot answers a midwife correctly.
+    is_mid = bool(match['is_midwife'])
+    r_amt = renewal_amount(is_mid, match['premium_last_year'])
+    return jsonify({'is_due': True, 'name': match['name'], 'period_end': pe, 'brand': match['brand'],
+                    'is_midwife': is_mid,
+                    'renewal': {'link': renewal_link(match['brand'], is_mid)[0],
+                                'price': (f"{r_amt:,} ₪" if r_amt else None)}})
 
 @app.route('/api/daily-report')
 def api_daily_report():
