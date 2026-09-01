@@ -2159,7 +2159,10 @@ def _send_queue_recipients(conn, month, typ):
         items.append({'id': r['id'], 'name': r['name'] or '', 'id_number': r['id_number'] or '',
                       'phone': p972, 'brand': r['brand'],
                       'pnid': BRAND_PNID.get(r['brand'], BRAND_PNID['גאיה']),
-                      'template': tpl, 'lang': 'he', 'body_params': body})
+                      'template': tpl, 'lang': 'he', 'body_params': body,
+                      # Exclusions (midwife/VIP/group-owner/new-business) are already enforced in the
+                      # WHERE above, so this is always False here — exposed only so the bot can assert it.
+                      'is_midwife': bool(r['is_midwife'])})
     return tpl, items
 
 @app.route('/api/send-queue')
