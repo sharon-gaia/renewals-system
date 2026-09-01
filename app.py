@@ -2210,6 +2210,30 @@ def api_send_queue_sent():
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
+@app.route('/api/send-log')
+def api_send_log():
+    """Token-authed, read-only: a live view of the bot's reported sends (send_log) so we can watch
+    the round-trip. Returns totals by status + the most recent N rows. ?type= filter, ?limit= (50)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    typ = request.args.get('type', '')
+    limit = min(int(request.args.get('limit', 50)), 500)
+    conn = get_db()
+    where, params = '', []
+    if typ:
+        where = ' WHERE send_type=?'; params = [typ]
+    by_status = {r['status']: r['n'] for r in conn.execute(
+        f"SELECT COALESCE(status,'?') status, COUNT(*) n FROM send_log{where} GROUP BY status", params).fetchall()}
+    total = sum(by_status.values())
+    recent = [dict(r) for r in conn.execute(
+        f"SELECT wamid, cust_id, send_type, status, error_code, sent_at, updated_at "
+        f"FROM send_log{where} ORDER BY updated_at DESC, wamid DESC LIMIT ?", params + [limit]).fetchall()]
+    for r in recent:
+        w = r.get('wamid') or ''
+        r['wamid'] = (w[:18] + '…') if len(w) > 18 else w
+    conn.close()
+    return jsonify({'total': total, 'by_status': by_status, 'recent': recent})
+
 @app.route('/api/optout', methods=['POST'])
 def api_optout():
     """Token-authed: the bot reports a marketing opt-out (unsubscribe / 'not now'). Stored in
