@@ -1620,18 +1620,21 @@ def api_customer_lookup():
         return jsonify({'error': 'need q'}), 400
     conn = get_db()
     rows = conn.execute(
-        "SELECT c.id, m.name AS month, m.is_active, c.name, c.id_number, c.brand, c.status, "
+        "SELECT c.id, c.month_id, m.name AS month, m.is_active, c.name, c.id_number, c.brand, c.status, "
         "c.email, c.phone, c.is_midwife, c.is_vip, c.email_sent_date, c.import_source, c.policy_number, "
         "c.form_received_at "
-        "FROM customers c JOIN months m ON m.id=c.month_id "
-        "WHERE ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY m.id DESC", (q,)).fetchall()
-    ins = conn.execute("SELECT name, brand, status, email, phone FROM insureds "
-                       "WHERE ltrim(COALESCE(id_number,''),'0')=?", (q,)).fetchone()
+        "FROM customers c LEFT JOIN months m ON m.id=c.month_id "
+        "WHERE ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY c.month_id DESC", (q,)).fetchall()
+    # ALL insured master rows (fetchall) — a duplicate master (same ת"ז twice, or a variant id format)
+    # is exactly what makes a person show twice in the global search.
+    ins = conn.execute("SELECT id, id_number, name, brand, status, email, phone FROM insureds "
+                       "WHERE ltrim(COALESCE(id_number,''),'0')=?", (q,)).fetchall()
     unm = conn.execute("SELECT id, name, id_number, status, subject, received_at "
                        "FROM unmatched_submissions WHERE ltrim(COALESCE(id_number,''),'0')=?",
                        (q,)).fetchall()
     conn.close()
-    return jsonify({'customers': [dict(r) for r in rows], 'insured': (dict(ins) if ins else None),
+    return jsonify({'customers': [dict(r) for r in rows],
+                    'insureds': [dict(r) for r in ins], 'insured_count': len(ins),
                     'unmatched_submissions': [dict(r) for r in unm]})
 
 def _policy_facing_status(cust_status, ins_status):
