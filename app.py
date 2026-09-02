@@ -5970,6 +5970,53 @@ def policy_sent():
         threading.Thread(target=_label_email, args=(mid['message_id'],), daemon=True).start()
     return jsonify({'ok': True})
 
+@app.route('/api/policy/reconcile-renewals', methods=['POST'])
+def api_reconcile_renewals():
+    """Retroactive fix for Sharon's rule: a recent renewal (חידוש) policy PDF whose customer was NOT
+    advanced to a renewed/settled status → flip to 'חודש' so it auto-delivers (delivery needs
+    חודש/הופק). Body {days:int=7, dry_run:bool}. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    days = int(d.get('days', 7)); dry = bool(d.get('dry_run'))
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M')
+    RSET = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'בוטל', 'לא רוצים לחדש', 'לא מחדש')
+    ph = ','.join('?' * len(RSET))
+    conn = get_db()
+    rows = conn.execute(
+        f"""SELECT c.id, c.name, c.status, c.brand, ltrim(COALESCE(c.id_number,''),'0') AS idn,
+                   pr.period_start, pd.received_at
+            FROM policy_documents pd
+            JOIN policy_records pr ON pr.policy_document_id=pd.id
+            JOIN customers c ON ltrim(COALESCE(c.id_number,''),'0')=ltrim(COALESCE(pr.insured_id,''),'0')
+            WHERE pd.received_at>=? AND pr.doc_type_label LIKE '%חידוש%'
+              AND COALESCE(pd.whatsapp_sent_at,'')='' AND COALESCE(pd.email_sent_at,'')=''
+              AND COALESCE(c.status,'') NOT IN ({ph})
+              AND COALESCE(c.group_owner,'')='' AND COALESCE(c.import_source,'')!='test_ofir'""",
+        [cutoff] + list(RSET)).fetchall()
+    # Keep only customers with a CURRENT-cycle renewal doc (period_start ≥ 1st of next month) — never
+    # act on a stale policy (Sharon's rule).
+    seen = {}
+    for r in rows:
+        if r['id'] in seen or not _renewal_period_ok(r['period_start']):
+            continue
+        seen[r['id']] = {'id': r['id'], 'name': r['name'], 'was': r['status'], 'brand': r['brand'],
+                         'idn': r['idn'], 'period_start': r['period_start']}
+    fixed = list(seen.values())
+    if not dry:
+        now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+        for r in fixed:
+            conn.execute("UPDATE customers SET status='חודש', status_changed_at=? WHERE id=?", (now, r['id']))
+            try:
+                log_event(conn, event_key(r['idn'], f"reconcile-{r['id']}"),
+                          "סטטוס עודכן ל-'חודש' (הגיעה פוליסת חידוש)", 'system', kind='status')
+            except Exception:
+                pass
+        conn.commit()
+    conn.close()
+    return jsonify({'days': days, 'dry_run': dry, 'count': len(fixed),
+                    'fixed': [{k: v[k] for k in ('id', 'name', 'was', 'brand', 'period_start')} for v in fixed]})
+
 @app.route('/api/policy/relink', methods=['POST'])
 def api_policy_relink():
     """Token: re-run new-business lead→policy linking for a ת"ז (or doc_id). Backfills a missing
@@ -6129,7 +6176,7 @@ def api_policy_debug():
     conn = get_db()
     docs = [dict(r) for r in conn.execute(
         "SELECT pd.id AS doc_id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at, "
-        "pd.policy_number, pr.doc_type_label, pr.insured_name "
+        "pd.policy_number, pr.doc_type_label, pr.insured_name, pr.period_start, pr.period_end "
         "FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id=pd.id "
         "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? ORDER BY pd.received_at DESC", (idn,)).fetchall()]
     events = [dict(r) for r in conn.execute(
@@ -7742,6 +7789,23 @@ def _wa_brand_key(brand):
 def is_renewal_doc(doc_type_label):
     return 'חידוש' in (doc_type_label or '')
 
+def _renewal_period_ok(period_start):
+    """True if a renewal's coverage START is the 1st of NEXT month or later — i.e. it's the CURRENT
+    upcoming renewal cycle, NOT an old policy being re-scanned. Guards the auto status-flip + delivery
+    so we never send a stale policy (Sharon's rule 2026-09-02: e.g. September renewals start 01/10).
+    period_start is DD/MM/YYYY. Empty/unparseable → False (don't act)."""
+    try:
+        parts = re.split(r'[/.\-]', str(period_start or '').strip())
+        d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+        if y < 100:
+            y += 2000
+        ps = datetime.date(y, m, d)
+    except Exception:
+        return False
+    t = datetime.date.today()
+    min_start = datetime.date(t.year + 1, 1, 1) if t.month == 12 else datetime.date(t.year, t.month + 1, 1)
+    return ps >= min_start
+
 def _policy_pdf_lines(source, limit=60):
     """Raw get_display'd text lines of the policy-schedule page (diagnostics)."""
     try:
@@ -8255,6 +8319,28 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
                                              "ltrim(COALESCE(id_number,''),'0')=? AND COALESCE(brand,'')!=?",
                                              (_pbrand, _pid, _pbrand))
                             conn.commit()
+                        # Sharon's rule (2026-09-02): a renewal (חידוש) policy PDF arriving IS proof the
+                        # customer renewed. If their status wasn't advanced (e.g. 'טופס התקבל', 'ביקשו
+                        # לחדש לבד'), flip it to 'חודש' so the policy AUTO-DELIVERS (delivery needs
+                        # חודש/הופק). Never override an already-settled/declined status.
+                        if (_pid and is_renewal_doc(fields.get('doc_type_label'))
+                                and _renewal_period_ok(fields.get('period_start'))):
+                            _RSET = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'בוטל',
+                                     'לא רוצים לחדש', 'לא מחדש')
+                            _rph = ','.join('?' * len(_RSET))
+                            _flipped = conn.execute(
+                                f"UPDATE customers SET status='חודש', status_changed_at=? "
+                                f"WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                                f"AND COALESCE(status,'') NOT IN ({_rph}) "
+                                f"AND COALESCE(group_owner,'')='' AND COALESCE(import_source,'')!='test_ofir'",
+                                (datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), _pid, *_RSET)).rowcount
+                            if _flipped:
+                                try:
+                                    log_event(conn, event_key(_pid, f'renewpdf-{cur.lastrowid}'),
+                                              "סטטוס עודכן ל-'חודש' (הגיעה פוליסת חידוש)", 'system', kind='status')
+                                except Exception:
+                                    pass
+                                conn.commit()
 
             if saved_any:
                 processed += 1
