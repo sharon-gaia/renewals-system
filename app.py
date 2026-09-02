@@ -1632,9 +1632,22 @@ def api_customer_lookup():
     unm = conn.execute("SELECT id, name, id_number, status, subject, received_at "
                        "FROM unmatched_submissions WHERE ltrim(COALESCE(id_number,''),'0')=?",
                        (q,)).fetchall()
+    # SUBSTRING matches (what the global /search actually does with LIKE '%q%') — catches a malformed
+    # duplicate whose id_number/policy_number merely CONTAINS this ת"ז.
+    lk = f'%{q}%'
+    like_c = conn.execute(
+        "SELECT c.id, c.month_id, c.name, c.id_number, c.policy_number, c.brand, c.status "
+        "FROM customers c WHERE ltrim(COALESCE(c.id_number,''),'0') LIKE ? OR c.policy_number LIKE ?",
+        (lk, lk)).fetchall()
+    like_i = conn.execute(
+        "SELECT id, id_number, name, brand, policy_number FROM insureds "
+        "WHERE ltrim(COALESCE(id_number,''),'0') LIKE ? OR COALESCE(policy_number,'') LIKE ?",
+        (lk, lk)).fetchall()
     conn.close()
     return jsonify({'customers': [dict(r) for r in rows],
                     'insureds': [dict(r) for r in ins], 'insured_count': len(ins),
+                    'like_customers': [dict(r) for r in like_c],
+                    'like_insureds': [dict(r) for r in like_i],
                     'unmatched_submissions': [dict(r) for r in unm]})
 
 def _policy_facing_status(cust_status, ins_status):
