@@ -6027,6 +6027,41 @@ def policy_sent():
         threading.Thread(target=_label_email, args=(mid['message_id'],), daemon=True).start()
     return jsonify({'ok': True})
 
+@app.route('/api/policy/redownload', methods=['POST'])
+def api_policy_redownload():
+    """Recover a policy whose stored PDF went missing (e.g. deleted): drop the policy_documents row +
+    its policy_records so the source Harel email becomes re-ingestible, then re-scan —
+    check_policy_documents re-downloads + re-saves the PDF and it re-enters the delivery queue. Only
+    acts when the file is actually gone. Body {doc_id, days:int=14}. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    doc_id = d.get('doc_id')
+    days = int(d.get('days', 14))
+    if not doc_id:
+        return jsonify({'error': 'need doc_id'}), 400
+    conn = get_db()
+    row = conn.execute("SELECT filepath, policy_number FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
+    if not row:
+        conn.close(); return jsonify({'error': 'doc not found'}), 404
+    fp = row['filepath']
+    if fp and os.path.exists(fp):
+        conn.close(); return jsonify({'error': 'PDF exists — not re-downloading', 'filepath': fp}), 400
+    pol = row['policy_number']
+    conn.execute("DELETE FROM policy_records WHERE policy_document_id=?", (doc_id,))
+    conn.execute("DELETE FROM policy_documents WHERE id=?", (doc_id,))
+    conn.commit(); conn.close()
+    n = check_policy_documents(days_back=days, keep_pdf=True)
+    # Did it come back with a real file?
+    conn = get_db()
+    back = conn.execute("SELECT id, filepath FROM policy_documents WHERE policy_number=? "
+                        "ORDER BY id DESC LIMIT 1", (pol,)).fetchone()
+    recovered = bool(back and back['filepath'] and os.path.exists(back['filepath']))
+    conn.close()
+    return jsonify({'ok': True, 'deleted_doc': doc_id, 'policy_number': pol,
+                    'rescanned': n, 'recovered': recovered,
+                    'new_doc_id': (back['id'] if back else None)})
+
 @app.route('/api/policy/reconcile-renewals', methods=['POST'])
 def api_reconcile_renewals():
     """Retroactive fix for Sharon's rule: a recent renewal (חידוש) policy PDF whose customer was NOT
