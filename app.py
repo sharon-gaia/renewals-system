@@ -1678,9 +1678,24 @@ def api_reminded_but_renewed():
 
 def _free_old_pdfs(days=7):
     """Delete policy/attachment PDFs older than `days` from the /data volume (they're delivered +
-    backed up on OneDrive). Filesystem-only — safe even when the DB is failing on a full disk.
-    Returns (deleted_count, freed_bytes)."""
+    backed up on OneDrive). NEVER deletes a PDF whose policy is still PENDING delivery (that would
+    strand it with a 404). Best-effort protection: on a DB failure (the full-disk emergency) it skips
+    protection and deletes freely. Returns (deleted_count, freed_bytes)."""
     cutoff = time.time() - days * 86400
+    # Protect undelivered policies' PDFs (neither channel sent yet).
+    protected = set()
+    try:
+        _c = get_db()
+        for r in _c.execute("SELECT filepath FROM policy_documents "
+                            "WHERE COALESCE(whatsapp_sent_at,'')='' AND COALESCE(email_sent_at,'')='' "
+                            "AND COALESCE(filepath,'')!=''").fetchall():
+            try:
+                protected.add(os.path.normcase(os.path.abspath(r['filepath'])))
+            except Exception:
+                pass
+        _c.close()
+    except Exception:
+        protected = set()
     freed = 0
     n = 0
     for base_dir in (POLICY_DOCS_DIR, ATTACHMENTS_DIR):
@@ -1692,6 +1707,8 @@ def _free_old_pdfs(days=7):
                     continue
                 fp = os.path.join(root, f)
                 try:
+                    if os.path.normcase(os.path.abspath(fp)) in protected:
+                        continue
                     if os.path.getmtime(fp) < cutoff:
                         sz = os.path.getsize(fp)
                         os.remove(fp)
@@ -2207,8 +2224,48 @@ def api_send_queue_sent():
     if cid and status == 'sent' and typ in ('reminder_25', 'last_reminder_eom'):
         col = 'lreom_sent_at' if typ == 'last_reminder_eom' else 'lr25_sent_at'
         conn.execute(f"UPDATE customers SET {col}=COALESCE(NULLIF({col},''),?) WHERE id=?", (now, cid))
+        # Also mirror it into whatsapp_sent_date (the dashboard's "נשלח בוואטסאפ" indicator) + the
+        # client timeline, so bot-reported reminder sends are VISIBLE in the dashboard like the local
+        # tool's sends — otherwise a reminder only sets the internal flag and looks unsent.
+        _cr = conn.execute("SELECT id_number, whatsapp_sent_date FROM customers WHERE id=?", (cid,)).fetchone()
+        if _cr and not (_cr['whatsapp_sent_date'] or '').strip():
+            conn.execute("UPDATE customers SET whatsapp_sent_date=? WHERE id=?",
+                         (datetime.date.today().isoformat(), cid))
+            try:
+                log_event(conn, event_key(_cr['id_number'], f'sq-{cid}'),
+                          "נשלחה תזכורת חידוש בוואטסאפ (בוט)", 'וואטסאפ אוטומטי', kind='whatsapp_sent')
+            except Exception:
+                pass
     conn.commit(); conn.close()
     return jsonify({'ok': True})
+
+@app.route('/api/admin/backfill-wa-visibility', methods=['POST'])
+def api_backfill_wa_visibility():
+    """One-time: make already-sent reminder WhatsApps visible in the dashboard — stamp
+    whatsapp_sent_date from a reminder flag (lreom/lr25) for active-month customers who were messaged
+    (bot) but not marked, and log the timeline. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'error': 'no active month'}), 400
+    rows = conn.execute(
+        "SELECT id, id_number, COALESCE(NULLIF(lreom_sent_at,''), lr25_sent_at) AS rdate "
+        "FROM customers WHERE month_id=? AND COALESCE(whatsapp_sent_date,'')='' "
+        "AND (COALESCE(lreom_sent_at,'')!='' OR COALESCE(lr25_sent_at,'')!='')", (month['id'],)).fetchall()
+    n = 0
+    for r in rows:
+        d = (r['rdate'] or '')[:10] or datetime.date.today().isoformat()
+        conn.execute("UPDATE customers SET whatsapp_sent_date=? WHERE id=?", (d, r['id']))
+        try:
+            log_event(conn, event_key(r['id_number'], f"bf-{r['id']}"),
+                      "נשלחה תזכורת חידוש בוואטסאפ (בוט)", 'וואטסאפ אוטומטי', kind='whatsapp_sent')
+        except Exception:
+            pass
+        n += 1
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'backfilled': n})
 
 @app.route('/api/send-log')
 def api_send_log():
