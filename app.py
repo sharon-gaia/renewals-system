@@ -7790,10 +7790,12 @@ def is_renewal_doc(doc_type_label):
     return 'חידוש' in (doc_type_label or '')
 
 def _renewal_period_ok(period_start):
-    """True if a renewal's coverage START is the 1st of NEXT month or later — i.e. it's the CURRENT
-    upcoming renewal cycle, NOT an old policy being re-scanned. Guards the auto status-flip + delivery
-    so we never send a stale policy (Sharon's rule 2026-09-02: e.g. September renewals start 01/10).
-    period_start is DD/MM/YYYY. Empty/unparseable → False (don't act)."""
+    """True if a renewal's coverage START belongs to the CURRENT cycle, not a stale prior-year policy
+    being re-scanned. Sharon's rule (2026-09-02): a renewal's coverage begins the 1st of the month
+    after its own expiry (Sept renewals → 01/10, late Aug renewals → 01/09), so the safe global guard
+    is 'period_start ≥ the 1st of the CURRENT month' — this accepts every current-year renewal
+    (01/09/2026, 01/10/2026 …) yet blocks last-year policies (01/09/2025). period_start is DD/MM/YYYY;
+    empty/unparseable → False (don't act)."""
     try:
         parts = re.split(r'[/.\-]', str(period_start or '').strip())
         d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
@@ -7803,8 +7805,7 @@ def _renewal_period_ok(period_start):
     except Exception:
         return False
     t = datetime.date.today()
-    min_start = datetime.date(t.year + 1, 1, 1) if t.month == 12 else datetime.date(t.year, t.month + 1, 1)
-    return ps >= min_start
+    return ps >= datetime.date(t.year, t.month, 1)
 
 def _policy_pdf_lines(source, limit=60):
     """Raw get_display'd text lines of the policy-schedule page (diagnostics)."""
