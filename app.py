@@ -1622,7 +1622,8 @@ def api_customer_lookup():
     rows = conn.execute(
         "SELECT c.id, c.month_id, m.name AS month, m.is_active, c.name, c.id_number, c.brand, c.status, "
         "c.email, c.phone, c.is_midwife, c.is_vip, c.email_sent_date, c.import_source, c.policy_number, "
-        "c.form_received_at "
+        "c.form_received_at, c.whatsapp_sent_date, c.lreom_sent_at, c.lr25_sent_at, c.group_owner, "
+        "c.end_reminder_sent_date "
         "FROM customers c LEFT JOIN months m ON m.id=c.month_id "
         "WHERE ltrim(COALESCE(c.id_number,''),'0')=? ORDER BY c.month_id DESC", (q,)).fetchall()
     # ALL insured master rows (fetchall) — a duplicate master (same ת"ז twice, or a variant id format)
