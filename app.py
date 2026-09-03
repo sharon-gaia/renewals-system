@@ -6295,6 +6295,46 @@ def api_policy_debug():
     return jsonify({'idn': idn, 'doc_count': len(docs), 'docs': docs,
                     'policy_send_events': events, 'send_event_count': len(events)})
 
+@app.route('/api/campaign/audit')
+def api_campaign_audit():
+    """Read-only month audit — did every eligible renewal customer get a renewal WhatsApp? Buckets the
+    active month's Gaia/Winner customers by outcome (sent / reminder-only / opt-out / NOT REACHED) and
+    by exclusion reason (midwife→manual, VIP, new business, stop-status/group, no contact), and lists
+    the NOT-REACHED ones by name so nothing is invisible. Token-authed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    month = active_month()
+    if not month:
+        return jsonify({'error': 'no active month'}), 400
+    conn = get_db()
+    b = campaign_eligibility(conn, month['id'])
+    optout = {re.sub(r'\D', '', str(r['phone'] or '')).lstrip('0') for r in conn.execute("SELECT phone FROM optouts")}
+    sent, reminder_only, opted, not_reached = [], [], [], []
+    for r in b['whatsapp']:
+        ph = re.sub(r'\D', '', str(r['phone'] or '')).lstrip('0')
+        if (r['whatsapp_sent_date'] or '').strip():
+            sent.append(r)
+        elif (r['lreom_sent_at'] or '').strip() or (r['lr25_sent_at'] or '').strip():
+            reminder_only.append(r)
+        elif ph in optout:
+            opted.append(r)
+        else:
+            not_reached.append(r)
+    def names(rows):
+        return [{'id': x['id'], 'name': x['name'], 'brand': x['brand'], 'status': x['status'],
+                 'phone': x['phone']} for x in rows]
+    conn.close()
+    return jsonify({
+        'month': month['name'],
+        'reached': {'whatsapp_sent': len(sent), 'reminder_only': len(reminder_only)},
+        'optout': len(opted),
+        'not_reached': len(not_reached), 'not_reached_list': names(not_reached),
+        'excluded': {'midwife_manual': len(b['midwife_pending']), 'vip': len(b['vip']),
+                     'new_business': len(b['new_biz']), 'stop_status_or_group': len(b['status_excluded']),
+                     'no_contact': len(b['no_contact']), 'ofir': len(b['ofir'])},
+        'email_channel_customers': len(b['email']),
+    })
+
 @app.route('/api/campaign/new-biz-check')
 def api_campaign_new_biz_check():
     """How many active-month customers are now excluded from the renewal campaign because they
