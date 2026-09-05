@@ -1668,6 +1668,31 @@ def _policy_facing_status(cust_status, ins_status):
         return 'בתהליך חידוש'
     return 'פעילה'
 
+def _iso_date(s):
+    """DD/MM/YYYY → YYYY-MM-DD for the bot API contract; pass-through an already-ISO date; None if
+    empty/unparseable."""
+    s = str(s or '').strip()
+    if not s:
+        return None
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})', s)
+    if m:
+        return m.group(0)
+    m = re.match(r'^(\d{1,2})[/.](\d{1,2})[/.](\d{4})', s)
+    if m:
+        d, mo, y = m.groups()
+        return f'{y}-{int(mo):02d}-{int(d):02d}'
+    return None
+
+def _plain_amount(s):
+    """'750 ₪' / '1,200 ₪' → '750' / '1200' (digits only) for the bot contract; None if none."""
+    d = re.sub(r'[^\d]', '', str(s or ''))
+    return d or None
+
+def _bot_status(cust_status, ins_status):
+    """Bot contract policy status: פעיל | לא פעיל | בוטל (collapsed from the customer-facing status)."""
+    v = _policy_facing_status(cust_status, ins_status)
+    return 'בוטל' if v == 'בוטלה' else ('לא פעיל' if v == 'לא פעילה' else 'פעיל')
+
 @app.route('/api/reminded-but-renewed')
 def api_reminded_but_renewed():
     """Token-authed: active-month customers who got the 25th reminder (lr25_sent_at set) BUT already
@@ -1789,7 +1814,8 @@ def api_policy_lookup():
     if prem:
         pn = re.sub(r'[^\d.]', '', str(prem))
         prem = (f"{int(float(pn)):,} ₪" if pn else None)
-    status = _policy_facing_status(cust['status'] if cust else None, ins['status'] if ins else None)
+    # Bot API contract: simple status set + ISO dates + plain premium number.
+    status = _bot_status(cust['status'] if cust else None, ins['status'] if ins else None)
     # Midwife flag — a midwife (מיילדת) renews on a dedicated link at a different price, so the bot
     # must answer with the midwife-specific renewal link/amount, never the standard one.
     is_mid = bool((cust['is_midwife'] if cust else 0) or (ins['is_midwife'] if ins else 0))
@@ -1798,8 +1824,9 @@ def api_policy_lookup():
                'price': (f"{r_amt:,} ₪" if r_amt else None)}
     conn.close()
     return jsonify({'found': True, 'name': name, 'brand': brand, 'is_midwife': is_mid,
-                    'policy': {'status': status, 'period_start': period_start, 'period_end': period_end,
-                               'professions': professions, 'premium': prem},
+                    'policy': {'status': status,
+                               'period_start': _iso_date(period_start), 'period_end': _iso_date(period_end),
+                               'professions': professions, 'premium': _plain_amount(prem)},
                     'renewal': renewal})
 
 @app.route('/api/policy-pdf')
@@ -1975,7 +2002,7 @@ def api_renewal_status():
     # Midwife flag + the midwife-specific renewal link/price, so the bot answers a midwife correctly.
     is_mid = bool(match['is_midwife'])
     r_amt = renewal_amount(is_mid, match['premium_last_year'])
-    return jsonify({'is_due': True, 'name': match['name'], 'period_end': pe, 'brand': match['brand'],
+    return jsonify({'is_due': True, 'name': match['name'], 'period_end': _iso_date(pe), 'brand': match['brand'],
                     'is_midwife': is_mid,
                     'renewal': {'link': renewal_link(match['brand'], is_mid)[0],
                                 'price': (f"{r_amt:,} ₪" if r_amt else None)}})
