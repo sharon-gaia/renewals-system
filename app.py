@@ -6322,6 +6322,67 @@ def api_policy_debug():
     return jsonify({'idn': idn, 'doc_count': len(docs), 'docs': docs,
                     'policy_send_events': events, 'send_event_count': len(events)})
 
+@app.route('/api/admin/merge-master', methods=['POST'])
+def api_merge_master():
+    """Token: upsert historical master rows into `insureds` BY ת"ז (past-policy import). SAFE: for an
+    existing ת"ז it only advances period/status/policy when the incoming period_end is NEWER (never
+    downgrades fresher live data), fills only-empty name/phone/email/brand, and respects
+    status_override. Body {rows:[{id_number,name,phone,email,brand,policy_number,period_start,
+    period_end,doc_type}]}. Returns added/updated/skipped."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    rows = (request.get_json(silent=True) or {}).get('rows') or []
+    def pe_date(s):
+        s = str(s or '').strip()
+        m = re.match(r'^(\d{1,2})[/.](\d{1,2})[/.](\d{4})', s)
+        if m:
+            d, mo, y = m.groups()
+            try: return datetime.date(int(y), int(mo), int(d))
+            except Exception: return None
+        m = re.match(r'^(\d{4})-(\d{2})-(\d{2})', s)
+        if m:
+            try: return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except Exception: return None
+        return None
+    conn = get_db()
+    now = datetime.datetime.now().isoformat()
+    added = updated = skipped = 0
+    for r in rows:
+        idn = re.sub(r'\D', '', str(r.get('id_number') or ''))
+        if not idn:
+            skipped += 1; continue
+        idn = idn.zfill(9)
+        name = (r.get('name') or '').strip()
+        phone = re.sub(r'\D', '', str(r.get('phone') or ''))
+        email = (r.get('email') or '').strip()
+        brand = (r.get('brand') or '').strip()
+        pol = (r.get('policy_number') or '').strip()
+        ps, pe = (r.get('period_start') or ''), (r.get('period_end') or '')
+        status = 'לא פעיל' if (r.get('doc_type') or '') == 'ביטול' else 'פעיל'
+        ex = conn.execute("SELECT id, period_end, status_override FROM insureds "
+                          "WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn.lstrip('0'),)).fetchone()
+        if not ex:
+            conn.execute("INSERT INTO insureds (id_number,name,brand,phone,email,policy_number,"
+                         "period_start,period_end,status,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                         (idn, name, brand, phone, email, pol, ps, pe, status, now, now))
+            added += 1
+        else:
+            new_pe, old_pe = pe_date(pe), pe_date(ex['period_end'])
+            newer = bool(new_pe) and (not old_pe or new_pe >= old_pe)
+            sets = ["name=COALESCE(NULLIF(name,''),?)", "phone=COALESCE(NULLIF(phone,''),?)",
+                    "email=COALESCE(NULLIF(email,''),?)", "brand=COALESCE(NULLIF(brand,''),?)", "updated_at=?"]
+            vals = [name, phone, email, brand, now]
+            if newer:
+                sets += ["period_start=?", "period_end=?", "policy_number=?"]
+                vals += [ps, pe, pol]
+                if not ex['status_override']:
+                    sets += ["status=?"]; vals.append(status)
+            vals.append(ex['id'])
+            conn.execute("UPDATE insureds SET " + ",".join(sets) + " WHERE id=?", vals)
+            updated += 1
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'received': len(rows), 'added': added, 'updated': updated, 'skipped': skipped})
+
 @app.route('/api/campaign/audit')
 def api_campaign_audit():
     """Read-only month audit — did every eligible renewal customer get a renewal WhatsApp? Buckets the
