@@ -8562,7 +8562,11 @@ def label_sent_policy_emails(limit=None):
                 print(f'[gmail-label] {mid}: {e}')
             if hit:
                 found += 1
+                # Commit per row: an open write transaction across the (slow) IMAP loop held the
+                # SQLite write lock for minutes on 2026-09-06 → every /api/policy/sent failed with
+                # "database is locked" and one policy was WhatsApp'd 4 times.
                 conn.execute("UPDATE policy_documents SET gmail_labeled=? WHERE id=?", (now, r['id']))
+                conn.commit()
             else:
                 not_found += 1
                 misses.append(r['policy_number'])          # left un-marked → retried next run
@@ -8640,6 +8644,7 @@ def label_sent_cert_emails(limit=None, extra_tickets=None):
                     done.add(tk)
                     if want[tk]:
                         conn.execute("UPDATE cert_requests SET cert_labeled=? WHERE id=?", (now, want[tk]))
+                        conn.commit()   # don't hold the write lock across the IMAP loop (see policy labeler)
             except Exception as e:
                 print(f'[cert-label] uid {uid}: {e}')
         conn.commit(); conn.close()
