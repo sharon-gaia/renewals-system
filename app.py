@@ -9671,10 +9671,6 @@ def _ingest_returns(conn, rows, file_name, file_date, message_id, received_at, s
             "SELECT 1 FROM collection_returns WHERE policy_number=? AND status IN ('נשלח','טופל') "
             "AND (COALESCE(wa_sent_at,'')!='' OR COALESCE(email_sent_at,'')!='') AND received_at >= ?",
             (r['policy_number'], (datetime.date.today() - datetime.timedelta(days=60)).isoformat())).fetchone() else 0
-        conn.execute("UPDATE collection_returns SET status='הוחלף', resolved_at=?, resolved_by='system', "
-                     "resolved_note='הוחלף בהתראה חדשה יותר' WHERE policy_number=? AND status='פתוח' "
-                     "AND COALESCE(wa_sent_at,'')='' AND COALESCE(email_sent_at,'')=''",
-                     (now, r['policy_number']))
         status = 'פתוח' if m else 'לא מזוהה'
         cur = conn.execute(
             "INSERT INTO collection_returns (ref, policy_number, addition, name, brand, agent_number, reason_code, "
@@ -9696,7 +9692,40 @@ def _ingest_returns(conn, rows, file_name, file_date, message_id, received_at, s
             idkey = event_key(m.get('id_number'), 'cust-%s' % (m.get('customer_id') or 0))
             log_event(conn, idkey, f"התקבלה הודעת בעיית גבייה מהראל — פוליסה {r['policy_number']} ({item['reason']})",
                       'system', kind='collection_return')
+        _collection_reorder(conn, r['policy_number'], now)
     return added, dup
+
+def _collection_reorder(conn, policy_number=None, now=None):
+    """Sharon's rule — the NEWEST notice for a policy decides: among a policy's still-unsent open
+    notices keep only the latest (by notice date, regardless of ingestion order) as פתוח and mark
+    the rest הוחלף. Called per policy after ingest and for all policies from the scan endpoint."""
+    now = now or datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    q = ("SELECT id, policy_number, file_date, received_at, status, wa_sent_at, email_sent_at "
+         "FROM collection_returns WHERE status IN ('פתוח','הוחלף','נשלח','טופל')")
+    args = ()
+    if policy_number:
+        q += " AND policy_number=?"; args = (policy_number,)
+    groups = {}
+    for r in conn.execute(q, args).fetchall():
+        groups.setdefault(r['policy_number'], []).append(r)
+    def key(r):
+        return (_iso_date(r['file_date']) or (r['received_at'] or '')[:10] or '', r['id'])
+    for pn, rows in groups.items():
+        cand = [r for r in rows if r['status'] in ('פתוח', 'הוחלף') and not (r['wa_sent_at'] or r['email_sent_at'])]
+        if not cand:
+            continue
+        newest = max(cand, key=key)
+        # A notice already sent/handled that is NEWER than the candidate supersedes it as well —
+        # never reopen an old notice just because its newer sibling was delivered.
+        later_done = any(key(r) > key(newest) and r['status'] in ('נשלח', 'טופל') for r in rows)
+        for r in cand:
+            if r['id'] == newest['id'] and not later_done:
+                if r['status'] == 'הוחלף':
+                    conn.execute("UPDATE collection_returns SET status='פתוח', resolved_at=NULL, resolved_by=NULL, "
+                                 "resolved_note=NULL WHERE id=?", (r['id'],))
+            elif r['status'] == 'פתוח':
+                conn.execute("UPDATE collection_returns SET status='הוחלף', resolved_at=?, resolved_by='system', "
+                             "resolved_note='הוחלף בהתראה חדשה יותר', approved_at=NULL WHERE id=?", (now, r['id']))
 
 def _collection_summary_email(added, dup, file_name, source_label):
     if not added and not dup:
@@ -9960,6 +9989,8 @@ def api_collection_scan():
     finally:
         _collection_lock.release()
     conn = get_db()
+    _collection_reorder(conn)          # newest notice per policy wins, whatever the ingest order
+    conn.commit()
     out['counts'] = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM collection_returns GROUP BY status").fetchall()}
     out['items'] = [dict(r) for r in conn.execute(
         "SELECT id, name, brand, policy_number, reason_code, reason_desc, status, match_source, file_date, repeat_flag "
