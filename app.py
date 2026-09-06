@@ -919,6 +919,10 @@ def init_db():
         conn.execute("ALTER TABLE policy_documents ADD COLUMN email_sent_at TEXT")
     if 'gmail_labeled' not in [r[1] for r in conn.execute("PRAGMA table_info(policy_documents)").fetchall()]:
         conn.execute("ALTER TABLE policy_documents ADD COLUMN gmail_labeled TEXT")
+    # Past-policy archive: object key in Cloudflare R2 (encrypted bucket) for documents whose PDF is
+    # not on the Railway volume — /api/policy-pdf streams them server-side.
+    if 'r2_key' not in [r[1] for r in conn.execute("PRAGMA table_info(policy_documents)").fetchall()]:
+        conn.execute("ALTER TABLE policy_documents ADD COLUMN r2_key TEXT")
     conn.commit()
 
     # Zero-pad short numeric ID numbers to 9 digits (idempotent — once padded,
@@ -1829,6 +1833,188 @@ def api_policy_lookup():
                                'professions': professions, 'premium': _plain_amount(prem)},
                     'renewal': renewal})
 
+# ── Cloudflare R2 — encrypted archive for past-policy PDFs ───────────────────────────────────
+# Secrets live ONLY in Railway env. The laptop uploads through short-lived signed PUT URLs the
+# server issues; customers never see a signed URL — /api/policy-pdf streams the bytes server-side.
+_R2_ENV = ('R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET', 'R2_ACCOUNT_ID')
+_R2_KEY_RE = re.compile(r'^policies/\d{9}/[A-Za-z0-9_.\-]{1,80}\.pdf$')
+_R2_CLIENT = [None]
+
+def _r2_cfg():
+    """R2 settings from env, tolerant of paste whitespace. The S3 endpoint is derived from the
+    account id whenever R2_ENDPOINT doesn't carry it (the standard form is
+    https://<account_id>.r2.cloudflarestorage.com). None when incomplete."""
+    g = lambda k: (os.environ.get(k) or '').strip()
+    acct, ep, bucket = g('R2_ACCOUNT_ID'), g('R2_ENDPOINT').rstrip('/'), g('R2_BUCKET')
+    if acct and acct not in ep:
+        ep = f'https://{acct}.r2.cloudflarestorage.com'
+    if bucket and ep.endswith('/' + bucket):
+        ep = ep[:-len(bucket) - 1]
+    ak, sk = g('R2_ACCESS_KEY_ID'), g('R2_SECRET_ACCESS_KEY')
+    if not (ep and bucket and ak and sk):
+        return None
+    return {'endpoint': ep, 'bucket': bucket, 'ak': ak, 'sk': sk}
+
+def _r2():
+    """(client, bucket) — (None, None) when R2 isn't configured or boto3 is missing."""
+    cfg = _r2_cfg()
+    if not cfg:
+        return None, None
+    if _R2_CLIENT[0] is None:
+        try:
+            import boto3
+            from botocore.config import Config
+            _R2_CLIENT[0] = boto3.client(
+                's3', endpoint_url=cfg['endpoint'], aws_access_key_id=cfg['ak'],
+                aws_secret_access_key=cfg['sk'], region_name='auto',
+                config=Config(signature_version='s3v4', retries={'max_attempts': 3},
+                              connect_timeout=10, read_timeout=60))
+        except Exception as e:
+            print(f'[r2] client init failed: {type(e).__name__}', flush=True)
+            return None, None
+    return _R2_CLIENT[0], cfg['bucket']
+
+def _r2_fetch(key):
+    """Bytes of an R2 object, fetched server-side; None if unavailable."""
+    c, b = _r2()
+    if not c or not key:
+        return None
+    try:
+        return c.get_object(Bucket=b, Key=key)['Body'].read()
+    except Exception as e:
+        print(f'[r2] get failed {key}: {type(e).__name__}', flush=True)
+        return None
+
+def _serve_policy_doc(doc, safe_name):
+    """send_file for a policy_documents row — local file first, else stream from R2; None if neither."""
+    fp = doc['filepath']
+    if fp and os.path.exists(fp):
+        return send_file(fp, as_attachment=True, download_name=safe_name)
+    key = doc['r2_key'] if 'r2_key' in doc.keys() else None
+    if key:
+        data = _r2_fetch(key)
+        if data:
+            return send_file(io.BytesIO(data), as_attachment=True, download_name=safe_name,
+                             mimetype='application/pdf')
+    return None
+
+@app.route('/api/admin/r2-check')
+def api_r2_check():
+    """Token: R2 readiness — which env names are set (never values), boto3 present, bucket reachable,
+    objects under policies/ (first page), documents already registered with an r2_key."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    out = {'env_present': {k: bool((os.environ.get(k) or '').strip()) for k in _R2_ENV}}
+    try:
+        import boto3  # noqa: F401
+        out['boto3'] = True
+    except Exception:
+        out['boto3'] = False
+    cfg = _r2_cfg()
+    out['configured'] = bool(cfg)
+    if not cfg:
+        return jsonify(out), 503
+    out['bucket'] = cfg['bucket']
+    out['endpoint_derived_from_account'] = cfg['endpoint'] != (os.environ.get('R2_ENDPOINT') or '').strip().rstrip('/')
+    c, b = _r2()
+    if not c:
+        out['error'] = 'client init failed'
+        return jsonify(out), 503
+    try:
+        c.head_bucket(Bucket=b)
+        out['bucket_ok'] = True
+        r = c.list_objects_v2(Bucket=b, Prefix='policies/', MaxKeys=1000)
+        out['objects_first_page'] = r.get('KeyCount', 0)
+        out['more'] = bool(r.get('IsTruncated'))
+    except Exception as e:
+        out['bucket_ok'] = False
+        out['error'] = f'{type(e).__name__}: {str(e)[:200]}'
+    try:
+        conn = get_db()
+        out['registered_docs'] = conn.execute(
+            "SELECT COUNT(*) FROM policy_documents WHERE COALESCE(r2_key,'')!=''").fetchone()[0]
+        conn.close()
+    except Exception:
+        pass
+    return jsonify(out), (200 if out.get('bucket_ok') else 502)
+
+@app.route('/api/admin/r2-presign-put', methods=['POST'])
+def api_r2_presign_put():
+    """Token: short-lived signed PUT URLs (15 min) so the laptop uploads straight to R2 without ever
+    holding a secret. Body {keys:[...]} (≤200) — keys must be policies/<ת"ז9>/<name>.pdf."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    keys = d.get('keys') or ([d['key']] if d.get('key') else [])
+    if not keys or len(keys) > 200:
+        return jsonify({'error': '1–200 keys'}), 400
+    c, b = _r2()
+    if not c:
+        return jsonify({'error': 'R2 not configured'}), 503
+    urls, bad = {}, []
+    for k in keys:
+        k = str(k)
+        if not _R2_KEY_RE.match(k):
+            bad.append(k); continue
+        urls[k] = c.generate_presigned_url(
+            'put_object', Params={'Bucket': b, 'Key': k, 'ContentType': 'application/pdf'}, ExpiresIn=900)
+    return jsonify({'urls': urls, 'bad': bad, 'expires_in': 900})
+
+@app.route('/api/admin/r2-register', methods=['POST'])
+def api_r2_register():
+    """Token: register uploaded past-policy files as ARCHIVED policy documents so /api/policy-pdf can
+    serve veterans from R2. Body {rows:[{id_number, r2_key, filename, policy_number, doc_type,
+    period_start, period_end, name, phone?, email?}], verify?:true}. Idempotent via
+    message_id='r2:<key>'. Archived rows are stamped 'ארכיון' on BOTH delivery channels so the
+    auto-delivery queue never re-sends them, and received_at = period_start so a fresh live PDF
+    always outranks them in policy-pdf."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    rows = d.get('rows') or []
+    verify = d.get('verify', True)
+    if not rows or len(rows) > 500:
+        return jsonify({'error': '1–500 rows'}), 400
+    c, b = _r2()
+    if verify and not c:
+        return jsonify({'error': 'R2 not configured'}), 503
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    added = updated = 0
+    missing, bad = [], []
+    for r in rows:
+        key = str(r.get('r2_key') or '')
+        idn = re.sub(r'\D', '', str(r.get('id_number') or '')).zfill(9)
+        if not _R2_KEY_RE.match(key) or not is_israeli_id(idn):
+            bad.append(key or idn); continue
+        if verify:
+            try:
+                c.head_object(Bucket=b, Key=key)
+            except Exception:
+                missing.append(key); continue
+        ps = str(r.get('period_start') or '').strip()
+        recv = (_iso_date(ps) + ' 00:00') if _iso_date(ps) else now
+        pn = re.sub(r'\D', '', str(r.get('policy_number') or '')) or None
+        fname = re.sub(r'[\r\n]+', ' ', str(r.get('filename') or f'policy_{pn or idn}.pdf')).strip()
+        ex = conn.execute("SELECT id FROM policy_documents WHERE message_id=?", ('r2:' + key,)).fetchone()
+        if ex:
+            conn.execute("UPDATE policy_documents SET r2_key=?, filepath=? WHERE id=?",
+                         (key, f'r2://{b}/{key}', ex['id']))
+            updated += 1; continue
+        did = conn.execute(
+            "INSERT INTO policy_documents (filename, filepath, received_at, message_id, policy_number, "
+            "whatsapp_sent_at, email_sent_at, r2_key) VALUES (?,?,?,?,?,?,?,?)",
+            (fname, f'r2://{b}/{key}', recv, 'r2:' + key, pn, 'ארכיון', 'ארכיון', key)).lastrowid
+        conn.execute(
+            "INSERT INTO policy_records (policy_document_id, policy_number, doc_type_label, insured_name, "
+            "insured_id, phone_mobile, email, period_start, period_end, extracted_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (did, pn, str(r.get('doc_type') or '').strip() or None, str(r.get('name') or '').strip(), idn,
+             re.sub(r'\D', '', str(r.get('phone') or '')) or None, str(r.get('email') or '').strip() or None,
+             ps or None, str(r.get('period_end') or '').strip() or None, now))
+        added += 1
+    conn.commit(); conn.close()
+    return jsonify({'added': added, 'updated': updated, 'missing': missing, 'bad': bad})
+
 @app.route('/api/policy-pdf')
 def api_policy_pdf_lookup():
     """Token-authed: the customer's OWN latest policy PDF by ת"ז — phone-gated (last-9 match), so a
@@ -1853,16 +2039,16 @@ def api_policy_pdf_lookup():
     if not last9(phone_in) or last9(phone_in) not in known:
         conn.close(); return jsonify({'found': False}), 404
     rows = conn.execute(
-        "SELECT pd.filename, pd.filepath FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+        "SELECT pd.filename, pd.filepath, pd.r2_key FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
         "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? "
         "AND (pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%') "
         "ORDER BY pd.received_at DESC, pr.id DESC", (idn,)).fetchall()
     conn.close()
     for r in rows:
-        fp = r['filepath']
-        if fp and os.path.exists(fp):
-            nm = re.sub(r'[\r\n]+', ' ', (r['filename'] or 'policy.pdf')).strip() or 'policy.pdf'
-            return send_file(fp, as_attachment=True, download_name=nm)
+        nm = re.sub(r'[\r\n]+', ' ', (r['filename'] or 'policy.pdf')).strip() or 'policy.pdf'
+        resp = _serve_policy_doc(r, nm)   # local volume first, else streamed from the R2 archive
+        if resp is not None:
+            return resp
     return jsonify({'found': False, 'reason': 'no server-side file'}), 404
 
 def _make_dummy_pdf(title):
@@ -4106,7 +4292,8 @@ def download_policy_document(doc_id):
     if not doc:
         return 'לא נמצא', 404
     safe_name = re.sub(r'[\r\n]+', ' ', doc['filename']).strip()
-    return send_file(doc['filepath'], as_attachment=True, download_name=safe_name)
+    resp = _serve_policy_doc(doc, safe_name)
+    return resp if resp is not None else ('הקובץ אינו זמין בשרת', 404)
 
 
 @app.route('/reveal-card', methods=['POST'])
@@ -6015,12 +6202,13 @@ def policy_pdf(doc_id):
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
     conn = get_db()
-    doc = conn.execute('SELECT filename, filepath FROM policy_documents WHERE id=?', (doc_id,)).fetchone()
+    doc = conn.execute('SELECT filename, filepath, r2_key FROM policy_documents WHERE id=?', (doc_id,)).fetchone()
     conn.close()
-    if not doc or not doc['filepath'] or not os.path.exists(doc['filepath']):
+    if not doc:
         return jsonify({'error': 'not found'}), 404
     safe_name = re.sub(r'[\r\n]+', ' ', doc['filename']).strip()
-    return send_file(doc['filepath'], as_attachment=True, download_name=safe_name)
+    resp = _serve_policy_doc(doc, safe_name)
+    return resp if resp is not None else (jsonify({'error': 'not found'}), 404)
 
 @app.route('/api/policy/sent', methods=['POST'])
 def policy_sent():

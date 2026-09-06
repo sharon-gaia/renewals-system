@@ -9,3 +9,4 @@ pdfplumber
 python-bidi
 pyotp
 qrcode
+boto3
