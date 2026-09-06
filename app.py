@@ -9452,7 +9452,7 @@ def api_harel_proposal_scan():
 COLLECTION_SENDER = 'ComposeDoc@harel-ins.co.il'
 COLLECTION_SUBJECT_MARK = 'קובץ חוזרים'
 COLLECTION_DINA_FROM = 'veritas'
-COLLECTION_GOLIVE = datetime.date(2026, 9, 6)
+COLLECTION_GOLIVE = datetime.date(2026, 8, 20)   # Sharon wants the current open picture, not only from today
 COLLECTION_EMAIL_SUBJECT = 'בעיית גבייה בפוליסה שלך — נדרש עדכון אמצעי תשלום'
 COLLECTION_SHARON_EMAIL = os.environ.get('SHARON_EMAIL', 'sharon@gaia-ins.co.il')
 COLLECTION_REASONS = {'3': 'לא הוקמה הרשאה לחיוב בבנק', '31': 'סירוב חברת האשראי'}
@@ -9936,6 +9936,32 @@ def api_collection_ingest():
     if request.form.get('notify') == '1':
         _collection_summary_email(added, dup, f.filename or '', 'קובץ שהועלה ידנית')
     return jsonify({'parsed': len(rows), 'added': added, 'duplicates': dup})
+
+@app.route('/api/collection/scan', methods=['POST'])
+def api_collection_scan():
+    """Token: run both collection scanners now (?days=N, default 14) and report what each found —
+    for verification and catch-up loads. Errors are returned, not swallowed."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 14))
+    out = {}
+    if not _collection_lock.acquire(blocking=True, timeout=120):
+        return jsonify({'error': 'scanner busy'}), 409
+    try:
+        for name, fn in (('harel_files', _check_collection_files_impl), ('dina_notices', _check_dina_notices_impl)):
+            try:
+                out[name] = fn(days)
+            except Exception as e:
+                out[name] = f'ERROR {type(e).__name__}: {str(e)[:200]}'
+    finally:
+        _collection_lock.release()
+    conn = get_db()
+    out['counts'] = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM collection_returns GROUP BY status").fetchall()}
+    out['items'] = [dict(r) for r in conn.execute(
+        "SELECT id, name, brand, policy_number, reason_code, reason_desc, status, match_source, file_date, repeat_flag "
+        "FROM collection_returns ORDER BY id").fetchall()]
+    conn.close()
+    return jsonify(out)
 
 @app.route('/api/collection/status')
 def api_collection_status():
