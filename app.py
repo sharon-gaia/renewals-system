@@ -1864,11 +1864,25 @@ def _r2():
         try:
             import boto3
             from botocore.config import Config
-            _R2_CLIENT[0] = boto3.client(
-                's3', endpoint_url=cfg['endpoint'], aws_access_key_id=cfg['ak'],
-                aws_secret_access_key=cfg['sk'], region_name='auto',
-                config=Config(signature_version='s3v4', retries={'max_attempts': 3},
-                              connect_timeout=10, read_timeout=60))
+            def mk(ep):
+                return boto3.client(
+                    's3', endpoint_url=ep, aws_access_key_id=cfg['ak'],
+                    aws_secret_access_key=cfg['sk'], region_name='auto',
+                    config=Config(signature_version='s3v4', retries={'max_attempts': 3},
+                                  connect_timeout=10, read_timeout=60))
+            # A bucket created under the EU jurisdiction only answers on the .eu. host — the default
+            # host returns AccessDenied for everything. Probe once and remember the host that works.
+            std = cfg['endpoint']
+            eu = std.replace('.r2.cloudflarestorage.com', '.eu.r2.cloudflarestorage.com')
+            chosen = None
+            for ep in ((std, eu) if os.environ.get('R2_JURISDICTION', '').strip().lower() != 'eu' else (eu, std)):
+                cl = mk(ep)
+                try:
+                    cl.list_objects_v2(Bucket=cfg['bucket'], MaxKeys=1)
+                    chosen = cl; _R2_CLIENT.append(ep); break
+                except Exception:
+                    continue
+            _R2_CLIENT[0] = chosen or mk(std)
         except Exception as e:
             print(f'[r2] client init failed: {type(e).__name__}', flush=True)
             return None, None
