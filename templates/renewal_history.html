@@ -1,0 +1,72 @@
+{% extends 'base.html' %}
+{% block title %} — אחוזי חידוש לפי חודש{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h5 class="mb-0"><i class="bi bi-calendar3 me-2 text-primary"></i>אחוזי חידוש לפי חודש</h5>
+  <a href="/" class="btn btn-outline-secondary btn-sm">חזרה לדשבורד</a>
+</div>
+
+<div class="alert alert-info small">
+  אותו חישוב בדיוק כמו במשפך שבדשבורד: <strong>אחוז חידוש = חודש ÷ סה"כ לחידוש</strong>.
+  עסקים חדשים (ממתין להפקה / הופק / בוטל ומקורות עסק-חדש) אינם חלק מבסיס החידושים.
+  לקוח נספר בחודש שאליו נטען — חידוש מאוחר של חודש קודם נשאר בחודש שלו.
+  נתוני תרגול של אופיר אינם נספרים.
+</div>
+
+<div class="card border-0 shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0 text-center">
+      <thead class="table-light">
+        <tr>
+          <th class="text-end ps-3" rowspan="2">חודש</th>
+          {% for c in cols %}
+          <th colspan="4" class="border-start">{{ c }}</th>
+          {% endfor %}
+        </tr>
+        <tr class="small text-muted">
+          {% for c in cols %}
+          <th class="border-start fw-normal">לחידוש</th>
+          <th class="fw-normal">חודש</th>
+          <th class="fw-normal">לא מחדש</th>
+          <th class="fw-normal">אחוז חידוש</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for h in hist %}
+        <tr>
+          <td class="text-end ps-3 fw-semibold">
+            {{ h.name }}
+            {% if h.is_active %}<span class="badge bg-success ms-1">פעיל</span>{% endif %}
+            {% if h.rows == 0 %}<span class="text-muted small ms-1">(ריק)</span>{% endif %}
+          </td>
+          {% for c in cols %}
+            {% set v = h.views.get(c) %}
+            {% if v %}
+            <td class="border-start">{{ v.total }}</td>
+            <td class="text-success fw-bold">{{ v.renewed }}</td>
+            <td class="text-danger">{{ v.no_renew }}</td>
+            <td>
+              <div class="d-flex align-items-center gap-2" style="min-width:120px">
+                <div class="progress flex-grow-1" style="height:8px">
+                  <div class="progress-bar {{ 'bg-success' if v.pct >= 50 else ('bg-warning' if v.pct >= 30 else 'bg-danger') }}" style="width: {{ v.pct }}%"></div>
+                </div>
+                <span class="small fw-semibold">{{ v.pct }}%</span>
+              </div>
+            </td>
+            {% else %}
+            <td class="border-start text-muted" colspan="4">—</td>
+            {% endif %}
+          {% endfor %}
+        </tr>
+        {% else %}
+        <tr><td colspan="{{ 1 + cols|length * 4 }}" class="text-center text-muted py-4">אין חודשים במערכת.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p class="text-muted small mt-2">החודש הפעיל עדיין בעבודה — האחוז שלו ימשיך לעלות עד סוף המחזור. חודשים קודמים מוצגים כפי שנסגרו.</p>
+{% endblock %}

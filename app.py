@@ -4508,6 +4508,50 @@ def performance():
     conn.close()
     return render_template('performance.html', rows=rows, month=month, show_role=is_super)
 
+def _renewal_history(conn, brand_filter=None):
+    """Renewal funnel per month (newest first) — same _renewal_funnel as the dashboard, so the
+    numbers match what each month's dashboard showed. Views: גאיה + ווינר combined + each present
+    brand. Ofir practice rows (test_ofir) are excluded so they never distort a month."""
+    bc, bp = brand_filter if brand_filter else ('', [])
+    out = []
+    for m in conn.execute("SELECT id, name, is_active, created_at FROM months ORDER BY id DESC").fetchall():
+        rows = conn.execute("""SELECT status, brand, sector, form_received_at, import_source,
+                               call_status_1, call_status_2, call_status_3
+                               FROM customers WHERE month_id=? AND COALESCE(import_source,'')!='test_ofir'""" + bc,
+                            [m['id']] + bp).fetchall()
+        present = [b for b in ('גאיה', 'ווינר', 'אופיר') if any(r['brand'] == b for r in rows)]
+        active = [b for b in ('גאיה', 'ווינר') if b in present]
+        views = {}
+        if len(active) > 1:
+            views['גאיה + ווינר'] = _renewal_funnel([r for r in rows if r['brand'] in active])
+        for b in present:
+            views[b] = _renewal_funnel([r for r in rows if r['brand'] == b])
+        out.append({'id': m['id'], 'name': m['name'], 'is_active': bool(m['is_active']),
+                    'created_at': (m['created_at'] or '')[:10], 'rows': len(rows), 'views': views})
+    return out
+
+@app.route('/admin/renewal-history')
+@login_required
+@admin_required
+def renewal_history():
+    """Management view: renewal % of previous months side by side (Sharon's request 2026-09-02)."""
+    conn = get_db()
+    hist = _renewal_history(conn, brand_clause())
+    conn.close()
+    view_names = ['גאיה + ווינר', 'גאיה', 'ווינר', 'אופיר']
+    cols = [v for v in view_names if any(v in h['views'] for h in hist)]
+    return render_template('renewal_history.html', hist=hist, cols=cols)
+
+@app.route('/api/renewal-history')
+def api_renewal_history():
+    """Token: the same per-month funnel history as /admin/renewal-history, as JSON."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    hist = _renewal_history(conn)
+    conn.close()
+    return jsonify({'months': hist})
+
 @app.route('/api/campaign/brand-audit')
 def api_campaign_brand_audit():
     """Read-only: the WhatsApp-eligible customers of a brand in the active month, with the fields
