@@ -4538,7 +4538,8 @@ def renewal_history():
     conn = get_db()
     hist = _renewal_history(conn, brand_clause())
     conn.close()
-    view_names = ['גאיה + ווינר', 'גאיה', 'ווינר', 'אופיר']
+    # Ofir is planning-only (masked on the dashboard) — its column is left off the page.
+    view_names = ['גאיה + ווינר', 'גאיה', 'ווינר']
     cols = [v for v in view_names if any(v in h['views'] for h in hist)]
     return render_template('renewal_history.html', hist=hist, cols=cols)
 
