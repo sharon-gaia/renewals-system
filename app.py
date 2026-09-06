@@ -9805,7 +9805,7 @@ def _check_collection_files_impl(days_back=14):
                 conn.commit()
                 processed += len(added)
                 print(f'[collection] {fn}: {len(added)} חדשים, {dup} כפולים')
-                _collection_summary_email(added, dup, fn, 'קובץ חוזרים מהראל')
+                # (no per-file email — Sharon gets ONE daily 12:00 digest from the wa-sender via /api/collection/digest)
             if got_file and message_id:
                 conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
                              (message_id, datetime.datetime.now().isoformat()))
@@ -9873,7 +9873,7 @@ def _check_dina_notices_impl(days_back=14):
             processed += len(added)
             batch.extend(added)
         if batch:
-            _collection_summary_email(batch, 0, f'{len(batch)} הודעות', 'הודעות דינה נתן (הראל)')
+            print(f'[collection] דינה נתן: {len(batch)} התראות חדשות')
         conn.close()
     finally:
         try:
@@ -9997,6 +9997,31 @@ def api_collection_scan():
         "FROM collection_returns ORDER BY id").fetchall()]
     conn.close()
     return jsonify(out)
+
+@app.route('/api/collection/digest', methods=['POST'])
+def api_collection_digest():
+    """Token: items ingested since the last digest (by id watermark in app_kv) — the daily 12:00
+    "new collection problems arrived, open the dashboard" alert the wa-sender emails Sharon.
+    ?peek=1 returns without advancing the watermark."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    last_id = int(_kv_get(conn, 'collection_last_digest_id', '0') or 0)
+    new = [dict(r) for r in conn.execute(
+        "SELECT id, name, brand, policy_number, reason_code, reason_desc, status, match_source, file_date, repeat_flag "
+        "FROM collection_returns WHERE id>? AND status IN ('פתוח','לא מזוהה') ORDER BY id", (last_id,)).fetchall()]
+    for it in new:
+        it['reason'] = collection_reason_text(it['reason_code'], it['reason_desc'])
+        it['source'] = 'דינה נתן' if it['reason_code'] == 'dina' else 'קובץ הראל'
+    counts = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM collection_returns GROUP BY status").fetchall()}
+    max_id = conn.execute("SELECT COALESCE(MAX(id),0) FROM collection_returns").fetchone()[0]
+    if request.args.get('peek') != '1':
+        _kv_set(conn, 'collection_last_digest_id', max_id)
+        _kv_set(conn, 'collection_last_digest_at', datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))
+        conn.commit()
+    conn.close()
+    return jsonify({'new': new, 'new_count': len(new), 'open_total': counts.get('פתוח', 0),
+                    'unmatched_total': counts.get('לא מזוהה', 0), 'counts': counts})
 
 @app.route('/api/collection/status')
 def api_collection_status():
