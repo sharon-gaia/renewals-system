@@ -1920,15 +1920,39 @@ def api_r2_check():
     if not c:
         out['error'] = 'client init failed'
         return jsonify(out), 503
-    try:
-        c.head_bucket(Bucket=b)
-        out['bucket_ok'] = True
+    # Probe each operation separately — an object-scoped token may pass put/get/list while
+    # head_bucket is refused, and each error names the failing permission.
+    probes = {}
+    def _try(name, fn):
+        try:
+            probes[name] = fn() or 'ok'
+        except Exception as e:
+            probes[name] = f'{type(e).__name__}: {str(e)[:160]}'
+    _try('head_bucket', lambda: c.head_bucket(Bucket=b) and None)
+    def _list():
         r = c.list_objects_v2(Bucket=b, Prefix='policies/', MaxKeys=1000)
-        out['objects_first_page'] = r.get('KeyCount', 0)
-        out['more'] = bool(r.get('IsTruncated'))
-    except Exception as e:
-        out['bucket_ok'] = False
-        out['error'] = f'{type(e).__name__}: {str(e)[:200]}'
+        out['objects_first_page'] = r.get('KeyCount', 0); out['more'] = bool(r.get('IsTruncated'))
+    _try('list', _list)
+    pk = 'probe/r2-check.txt'
+    _try('put', lambda: c.put_object(Bucket=b, Key=pk, Body=b'ok', ContentType='text/plain') and None)
+    _try('get', lambda: c.get_object(Bucket=b, Key=pk)['Body'].read().decode())
+    _try('delete', lambda: c.delete_object(Bucket=b, Key=pk) and None)
+    out['probes'] = probes
+    out['bucket_ok'] = probes.get('put') == 'ok' and probes.get('get') == 'ok'
+    if not out['bucket_ok']:
+        # Bucket created under an EU jurisdiction lives on a different host — test that too.
+        try:
+            import boto3
+            from botocore.config import Config
+            cfg2 = _r2_cfg()
+            eu = cfg2['endpoint'].replace('.r2.cloudflarestorage.com', '.eu.r2.cloudflarestorage.com')
+            c2 = boto3.client('s3', endpoint_url=eu, aws_access_key_id=cfg2['ak'], aws_secret_access_key=cfg2['sk'],
+                              region_name='auto', config=Config(signature_version='s3v4', connect_timeout=10, read_timeout=30))
+            c2.list_objects_v2(Bucket=b, MaxKeys=1)
+            out['eu_jurisdiction_list'] = 'ok'
+        except Exception as e:
+            out['eu_jurisdiction_list'] = f'{type(e).__name__}: {str(e)[:120]}'
+        out['error'] = 'bucket not usable — see probes'
     try:
         conn = get_db()
         out['registered_docs'] = conn.execute(
