@@ -1,0 +1,126 @@
+{% extends 'base.html' %}
+{% block title %} — בעיות גבייה{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h5 class="mb-0"><i class="bi bi-credit-card-2-back me-2 text-danger"></i>בעיות גבייה
+    <span class="text-muted small">— חיובים שחזרו מהראל</span>
+  </h5>
+  <div class="d-flex gap-2 align-items-center">
+    {% if session.role == 'superadmin' %}
+    <form method="post" action="/admin/collection/settings" class="d-flex gap-2 align-items-center">
+      <select name="mode" class="form-select form-select-sm" style="width:auto">
+        <option value="manual" {{ 'selected' if mode == 'manual' }}>אישור ידני לכל הודעה</option>
+        <option value="auto" {{ 'selected' if mode == 'auto' }}>שליחה אוטומטית</option>
+      </select>
+      <div class="form-check form-check-inline small mb-0">
+        <input class="form-check-input" type="checkbox" name="wa_enabled" value="1" id="waOn" {{ 'checked' if wa_on }}>
+        <label class="form-check-label" for="waOn">וואטסאפ פעיל (אחרי אישור התבנית ב-Meta)</label>
+      </div>
+      <button class="btn btn-outline-primary btn-sm">שמור</button>
+    </form>
+    {% endif %}
+    <a href="/" class="btn btn-outline-secondary btn-sm">חזרה לדשבורד</a>
+  </div>
+</div>
+
+<div class="alert {{ 'alert-warning' if mode == 'manual' else 'alert-success' }} small d-flex justify-content-between flex-wrap gap-2">
+  <div>
+    {% if mode == 'manual' %}<strong>מצב: אישור ידני.</strong> הודעה יוצאת ללקוח רק אחרי לחיצה על "אשר שליחה".{% else %}<strong>מצב: אוטומטי.</strong> הודעה יוצאת ללקוח מיד עם קליטת הקובץ (בשעות שליחה בלבד); חיוב שחוזר שוב תוך 60 יום דורש אישור ידני.{% endif %}
+    ערוצים: מייל{{ ' + וואטסאפ' if wa_on else ' בלבד (וואטסאפ כבוי עד אישור התבנית)' }}.
+    מקורות: קובץ חוזרים מהראל (אוטומטי){{ ' + הודעות דינה נתן' if mailbox2 else '' }}.
+    {% if not mailbox2 %}<span class="text-muted">· תיבת המייל השנייה (דינה נתן) עדיין לא מחוברת.</span>{% endif %}
+  </div>
+  <form method="post" action="/admin/collection/upload" enctype="multipart/form-data" class="d-flex gap-1 align-items-center">
+    <input type="file" name="file" accept=".xlsx" class="form-control form-control-sm" style="width:220px" required>
+    <button class="btn btn-outline-secondary btn-sm text-nowrap">טען קובץ ידנית</button>
+  </form>
+</div>
+
+<ul class="nav nav-pills mb-3 small">
+  {% for key, label in [('open','ממתין'), ('sent','נשלח'), ('unmatched','לא מזוהה'), ('resolved','טופל'), ('all','הכל')] %}
+  <li class="nav-item"><a class="nav-link py-1 {{ 'active' if f == key }}" href="?f={{ key }}">{{ label }}
+    {% set n = {'open': counts.get('פתוח', 0), 'sent': counts.get('נשלח', 0), 'unmatched': counts.get('לא מזוהה', 0), 'resolved': counts.get('טופל', 0) + counts.get('הוחלף', 0), 'all': counts.values()|sum}[key] %}
+    <span class="badge bg-light text-dark ms-1">{{ n }}</span></a></li>
+  {% endfor %}
+  {% if f == 'open' and mode == 'manual' %}
+  <li class="nav-item ms-auto">
+    <form method="post" action="/admin/collection/approve-all" onsubmit="return confirm('לאשר שליחה לכל הממתינים המזוהים (למעט חוזרים שוב)?')">
+      <button class="btn btn-success btn-sm">אשר שליחה לכולם</button>
+    </form>
+  </li>
+  {% endif %}
+</ul>
+
+<div class="card border-0 shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0 small">
+      <thead class="table-light">
+        <tr>
+          <th class="ps-3">לקוח</th><th>מותג</th><th>פוליסה</th><th>סיבה</th><th>סכום</th><th>יתרת חוב</th>
+          <th>חיוב</th><th>כרטיס</th><th>מקור</th><th>זיהוי</th><th>מצב</th><th>פעולות</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr class="{{ 'table-warning' if r.repeat_flag and r.status == 'פתוח' else '' }}">
+          <td class="ps-3 fw-semibold">
+            {% if r.customer_id %}<a href="/customer/{{ r.customer_id }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}
+            {% if r.repeat_flag %}<span class="badge bg-warning text-dark ms-1" title="חזר שוב תוך 60 יום">חוזר</span>{% endif %}
+            <div class="text-muted">{{ r.phone }}{% if r.email %} · {{ r.email }}{% endif %}</div>
+          </td>
+          <td>{{ r.brand }}</td>
+          <td class="text-nowrap">{{ r.policy_number }}</td>
+          <td>{{ r.reason }}</td>
+          <td class="text-nowrap">{{ r.amount }}</td>
+          <td class="text-nowrap">{{ r.debt }}</td>
+          <td class="text-nowrap">{{ r.charge_date }}</td>
+          <td class="text-nowrap">{% if r.card_last4 %}•••• {{ r.card_last4 }}{% endif %}</td>
+          <td class="text-muted" title="{{ r.file_name }}">{{ 'דינה נתן' if r.reason_code == 'dina' else 'קובץ הראל' }} {{ r.file_date }}</td>
+          <td>{% if r.match_source %}<span class="badge bg-light text-dark border">{{ r.match_source }}</span>{% else %}<span class="badge bg-danger">לא מזוהה</span>{% endif %}</td>
+          <td class="text-nowrap">
+            {% if r.status == 'פתוח' %}
+              {% if r.approved_at %}<span class="badge bg-info text-dark">מאושר — ממתין לשליחה</span>{% else %}<span class="badge bg-secondary">ממתין לאישור</span>{% endif %}
+            {% elif r.status == 'נשלח' %}<span class="badge bg-success">נשלח</span>
+              <div class="text-muted">{% if r.wa_sent_at %}📱 {{ r.wa_sent_at }}{% endif %}{% if r.email_sent_at %} ✉️ {{ r.email_sent_at }}{% endif %}</div>
+            {% elif r.status == 'טופל' %}<span class="badge bg-dark">טופל</span><div class="text-muted">{{ r.resolved_note }}</div>
+            {% elif r.status == 'הוחלף' %}<span class="badge bg-light text-dark border">הוחלף</span>
+            {% else %}<span class="badge bg-danger">{{ r.status }}</span>{% endif %}
+          </td>
+          <td class="text-nowrap">
+            <form method="post" action="/admin/collection/{{ r.id }}/action" class="d-inline-flex gap-1 align-items-center">
+              <input type="hidden" name="f" value="{{ f }}">
+              {% if r.status == 'פתוח' and r.sendable and not r.approved_at %}
+                <button name="action" value="approve" class="btn btn-success btn-sm py-0">אשר שליחה</button>
+              {% elif r.status == 'פתוח' and r.approved_at %}
+                <button name="action" value="unapprove" class="btn btn-outline-secondary btn-sm py-0">בטל אישור</button>
+              {% endif %}
+              {% if r.status in ('פתוח', 'נשלח', 'לא מזוהה') %}
+                <input name="note" class="form-control form-control-sm py-0" placeholder="הערה" style="width:110px">
+                <button name="action" value="resolve" class="btn btn-outline-dark btn-sm py-0">טופל</button>
+              {% else %}
+                <button name="action" value="reopen" class="btn btn-outline-secondary btn-sm py-0">פתח מחדש</button>
+              {% endif %}
+            </form>
+            {% if r.status == 'לא מזוהה' %}
+            <form method="post" action="/admin/collection/{{ r.id }}/action" class="d-inline-flex gap-1 mt-1">
+              <input type="hidden" name="f" value="{{ f }}"><input type="hidden" name="action" value="relink">
+              <input name="id_number" class="form-control form-control-sm py-0" placeholder="ת&quot;ז לקישור" style="width:110px" required>
+              <button class="btn btn-outline-primary btn-sm py-0">קשר</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="12" class="text-center text-muted py-4">אין פריטים בתצוגה זו.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p class="text-muted small mt-2">
+  ההודעה ללקוח: "בעיית גבייה בפוליסה — הראל הודיעו לנו שהחיוב לא כובד… יש לעדכן אמצעי תשלום בקישור… במידה והסדרת את החוב, ראה הודעה זו כמבוטלת."
+  חיוב שכבר נשלחה עליו הודעה וחוזר שוב תוך 60 יום מסומן "חוזר" ודורש אישור ידני גם במצב אוטומטי.
+</p>
+{% endblock %}

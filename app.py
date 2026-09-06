@@ -975,6 +975,19 @@ def init_db():
         conn.execute("ALTER TABLE customers ADD COLUMN card_update_email_at TEXT")
     # Simple key/value store — used for the email-scanner heartbeat ('last_scan_at').
     conn.execute("CREATE TABLE IF NOT EXISTS app_kv (k TEXT PRIMARY KEY, v TEXT)")
+    # Harel "קובץ חוזרים" — returned/bounced premium charges (collection problems), one row per
+    # returned charge. status: פתוח | נשלח | טופל | לא מזוהה | הוחלף
+    conn.execute("""CREATE TABLE IF NOT EXISTS collection_returns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ref TEXT, policy_number TEXT, addition TEXT, name TEXT, brand TEXT, agent_number TEXT,
+        reason_code TEXT, reason_desc TEXT, debt TEXT, amount TEXT, charge_date TEXT, card_last4 TEXT,
+        phone TEXT, period_start TEXT, period_end TEXT, harel_customer_no TEXT,
+        file_name TEXT, file_date TEXT, message_id TEXT, received_at TEXT NOT NULL,
+        customer_id INTEGER, id_number TEXT, email TEXT, match_source TEXT,
+        status TEXT NOT NULL DEFAULT 'פתוח',
+        approved_at TEXT, approved_by TEXT, wa_sent_at TEXT, email_sent_at TEXT,
+        resolved_at TEXT, resolved_by TEXT, resolved_note TEXT, repeat_flag INTEGER DEFAULT 0,
+        UNIQUE(ref, policy_number, charge_date))""")
     conn.commit()
 
     # Default admin
@@ -9422,6 +9435,612 @@ def api_harel_proposal_scan():
 # ת"ז+phone+brand, and queue it. The wa-sender then downloads the PDF (Puppeteer types the ת"ז)
 # and delivers it (Cloud API primary, Gaia WhatsApp-Web fallback). Same sender as the proposal
 # emails — differ by SUBJECT.
+# ── Collection problems (בעיות גבייה) ────────────────────────────────────────────────────────
+# Two sources feed one table (collection_returns):
+#  1. Harel's automatic "קובץ חוזרים" email (ComposeDoc) with a GNHZTJ_*.xlsx of returned charges
+#     — arrives in the main scanning mailbox.
+#  2. Dina Natan (Harel collections) per-customer notices — arrive in Sharon's SECOND mailbox
+#     (EMAIL2_USERNAME/EMAIL2_PASSWORD, optional; the scanner is skipped when unset).
+# Customer message: WhatsApp template `collection_issue` + email, with the brand's card-update
+# link. Sending mode (app_kv collection_mode): 'manual' = Sharon approves each item on
+# /admin/collection; 'auto' = sent as soon as ingested (send hours enforced by the wa-sender).
+COLLECTION_SENDER = 'ComposeDoc@harel-ins.co.il'
+COLLECTION_SUBJECT_MARK = 'קובץ חוזרים'
+COLLECTION_DINA_FROM = 'veritas'
+COLLECTION_GOLIVE = datetime.date(2026, 9, 6)
+COLLECTION_EMAIL_SUBJECT = 'בעיית גבייה בפוליסה שלך — נדרש עדכון אמצעי תשלום'
+COLLECTION_SHARON_EMAIL = os.environ.get('SHARON_EMAIL', 'sharon@gaia-ins.co.il')
+COLLECTION_REASONS = {'3': 'לא הוקמה הרשאה לחיוב בבנק', '31': 'סירוב חברת האשראי'}
+COLLECTION_MONTHS = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר']
+_collection_lock = threading.Lock()
+
+def _kv_get(conn, k, default=None):
+    r = conn.execute("SELECT v FROM app_kv WHERE k=?", (k,)).fetchone()
+    return r[0] if r else default
+
+def _kv_set(conn, k, v):
+    conn.execute("INSERT INTO app_kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, str(v)))
+
+def collection_reason_text(code, desc):
+    return COLLECTION_REASONS.get(str(code or '').strip()) or (desc or '').strip() or 'החיוב לא כובד'
+
+def collection_wa_text(name, policy, reason, brand_key):
+    greet = f"שלום {name}," if name else "שלום,"
+    link = CARD_UPDATE_LINKS.get(brand_key, '')
+    return (f"{greet}\n\n"
+            f"בעיית גבייה בפוליסה: הראל הודיעו לנו שהחיוב עבור פוליסת אחריות מקצועית מס' {policy} לא כובד ({reason}).\n"
+            "כדי שהכיסוי יישאר בתוקף, יש לעדכן אמצעי תשלום בקישור:\n"
+            f"{link}\n\n"
+            "במידה והסדרת את החוב, ראה הודעה זו כמבוטלת.\n"
+            "לכל שאלה אנחנו כאן.\n\n"
+            f"{_seasonal_line()}")
+
+def collection_email_body(name, policy, reason, brand_key):
+    return collection_wa_text(name, policy, reason, brand_key) + "\n" + POLICY_EMAIL_SIGN
+
+def collection_email_html(name, policy, reason, brand_key):
+    greet = f"שלום {name}," if name else "שלום,"
+    link = CARD_UPDATE_LINKS.get(brand_key, '')
+    return (
+        '<div dir="rtl" style="text-align:right;font-family:Arial,Helvetica,sans-serif;'
+        'font-size:15px;line-height:1.6;color:#222;">'
+        '<h3 style="margin:0 0 12px 0;color:#b02a37;">בעיית גבייה בפוליסה</h3>'
+        f'{greet}<br><br>'
+        f"הראל הודיעו לנו שהחיוב עבור פוליסת אחריות מקצועית מס' <b>{policy}</b> לא כובד ({reason}).<br>"
+        'כדי שהכיסוי יישאר בתוקף, יש לעדכן אמצעי תשלום בקישור:<br>'
+        f'<a href="{link}">{link}</a><br><br>'
+        '<b>במידה והסדרת את החוב, ראה הודעה זו כמבוטלת.</b><br>'
+        'לכל שאלה אנחנו כאן.<br><br>'
+        f'{_seasonal_signoff()}'
+        '—<br>שרון דר<br>מנהל תחום אחריות מקצועית<br>גאיה, ווינר ואופיר'
+        '</div>')
+
+def _parse_returns_xlsx(data):
+    """Rows of Harel's GNHZTJ returned-charges workbook. The file is non-standard (openpyxl fails on
+    its sharedStrings) so the sheet XML is read directly; columns are mapped by header text."""
+    import zipfile
+    from xml.etree import ElementTree as ET
+    NS = {'m': 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+    T = '{%s}t' % NS['m']
+    z = zipfile.ZipFile(io.BytesIO(data))
+    ss = []
+    if 'xl/sharedStrings.xml' in z.namelist():
+        for si in ET.fromstring(z.read('xl/sharedStrings.xml')).findall('m:si', NS):
+            ss.append(''.join(t.text or '' for t in si.iter(T)))
+    sheet = next((n for n in z.namelist() if n.startswith('xl/worksheets/sheet')), None)
+    if not sheet:
+        return []
+    rows = []
+    for row in ET.fromstring(z.read(sheet)).iter('{%s}row' % NS['m']):
+        cells = {}
+        for c in row.findall('m:c', NS):
+            col = re.match(r'[A-Z]+', c.get('r', 'A')).group(0)
+            v, is_ = c.find('m:v', NS), c.find('m:is', NS)
+            if is_ is not None:
+                val = ''.join(x.text or '' for x in is_.iter(T))
+            elif v is None:
+                val = ''
+            elif c.get('t') == 's':
+                val = ss[int(v.text)] if int(v.text) < len(ss) else ''
+            else:
+                val = v.text or ''
+            cells[col] = val
+        rows.append(cells)
+    if len(rows) < 2:
+        return []
+    hdr = {re.sub(r'\s+', ' ', v).strip(): col for col, v in rows[0].items() if v}
+    def col(*names):
+        for n in names:
+            if n in hdr:
+                return hdr[n]
+        for n in names:
+            for h, c in hdr.items():
+                if n in h:
+                    return c
+        return None
+    C = {'policy': col('פוליסה'), 'addition': col('תוספת'), 'name': col('תאור/שם'), 'ps': col('תאריך תחילת'),
+         'pe': col('תאריך סוף'), 'debt': col('יתרת חוב'), 'ref': col('אסמכתא'), 'charge': col('תאריך חיוב'),
+         'card': col('חשבון/כרטיס'), 'amount': col('סכום בשקלים'), 'rcode': col('סיבת חזרה'),
+         'rdesc': col('תאור סיבת חזרה'), 'custno': col('מספר לקוח'), 'first': col('שם פרטי'),
+         'last': col('שם משפחה'), 'h_area': col('טלפון בית-אזור'), 'h_num': col('טלפון בית-מספר'),
+         'm_area': col('נייד-אזור'), 'm_num': col('נייד-מספר'), 'agent': col('סוכן'), 'recip': col('שם נמען')}
+    if C['rcode'] and C['rcode'] == C['rdesc']:
+        C['rcode'] = hdr.get('סיבת חזרה')
+    def g(r, k):
+        return (r.get(C[k]) or '').strip() if C.get(k) else ''
+    def d8(s):
+        s = re.sub(r'\D', '', s)
+        return f'{s[6:8]}/{s[4:6]}/{s[0:4]}' if len(s) == 8 and s[:2] == '20' else s
+    out = []
+    for r in rows[1:]:
+        pn = re.sub(r'\D', '', g(r, 'policy'))
+        if not pn:
+            continue
+        m_num, h_num = re.sub(r'\D', '', g(r, 'm_num')), re.sub(r'\D', '', g(r, 'h_num'))
+        if m_num and m_num != '0':
+            phone = re.sub(r'\D', '', g(r, 'm_area')) + m_num.zfill(7)
+        elif h_num and h_num != '0':
+            phone = re.sub(r'\D', '', g(r, 'h_area')) + h_num.zfill(7)
+        else:
+            phone = ''
+        name = re.sub(r'\s*\.\s*$', '', g(r, 'name')).strip() or f"{g(r, 'first')} {g(r, 'last')}".strip()
+        recip = g(r, 'recip')
+        out.append({'policy_number': pn, 'addition': g(r, 'addition'), 'name': name,
+                    'brand': 'ווינר' if 'ווינר' in recip else ('אופיר' if 'אופיר' in recip else 'גאיה'),
+                    'agent_number': re.sub(r'\D', '', g(r, 'agent')), 'reason_code': g(r, 'rcode'),
+                    'reason_desc': g(r, 'rdesc'), 'debt': g(r, 'debt'), 'amount': g(r, 'amount'),
+                    'charge_date': d8(g(r, 'charge')), 'card_last4': re.sub(r'\D', '', g(r, 'card'))[-4:],
+                    'phone': phone, 'period_start': d8(g(r, 'ps')), 'period_end': d8(g(r, 'pe')),
+                    'harel_customer_no': g(r, 'custno'), 'ref': g(r, 'ref')})
+    return out
+
+def _parse_dina_notice(subject, body):
+    """Dina Natan's per-customer bounce notice → row dict, or None for anything else (replies,
+    bank-transfer confirmations, requests). Only policy/name/month/reason are read — never card data."""
+    s = re.sub(r'\s+', ' ', subject or '').strip()
+    if re.match(r'^(re|תשובה|השב)\s*:', s, re.I):
+        return None
+    m = re.search(r'(?<!\d)(\d{12})(?!\d)', s)
+    if not m:
+        return None
+    b = re.sub(r'\s+', ' ', body or '')
+    b = b.split('סוכנים יקרים')[0]          # drop Dina's boilerplate footer
+    if not re.search(r'חזר|ללא אמצעי תשלום|מכתב (ראשון|שני)|טיפול משפטי|טרם שולם', b):
+        return None
+    if re.search(r'אישור העברה|העברה בנקאית|נא לגבות|נא לחייב|מספר כרטיס', b):
+        return None
+    name = re.sub(r'(?<!\d)\d{12}(?!\d)', '', s)
+    name = re.sub(r'^(fw|fwd|העברה)\s*:\s*', '', name, flags=re.I).strip(' -:.')
+    mon = re.search(r'תשלום\s+(' + '|'.join(COLLECTION_MONTHS) + ')', b)
+    if 'ללא אמצעי תשלום' in b:
+        reason = 'הפוליסה הופקה ללא אמצעי תשלום'
+    elif re.search(r'בהו.?ק|הוראת קבע', b):
+        reason = 'החיוב בהוראת הקבע חזר' + (' — לא הוקמה הרשאה' if 'הרשאה' in b else '')
+    elif 'באשראי' in b:
+        reason = 'סירוב חברת האשראי'
+    else:
+        reason = 'החיוב חזר'
+    esc = ('מכתב שני' if 'מכתב שני' in b else 'מכתב ראשון' if 'מכתב ראשון' in b
+           else 'טיפול משפטי' if 'משפטי' in b else '')
+    return {'policy_number': m.group(1), 'name': name, 'month': mon.group(1) if mon else '',
+            'reason_code': 'dina', 'reason_desc': reason + (f' · {esc}' if esc else ''),
+            'cancel_risk': 'מועמד' in b}
+
+def _match_return_customer(conn, r):
+    """Match a returned charge to our customer — by policy number (customers, then policy
+    documents → insured master), then by phone. Returns dict or None."""
+    pn = r.get('policy_number') or ''
+    def _cust_by_id(idn):
+        z = re.sub(r'\D', '', str(idn or '')).lstrip('0')
+        if not z:
+            return None
+        return conn.execute(
+            "SELECT id, id_number, email, phone, name, brand FROM customers "
+            "WHERE ltrim(COALESCE(id_number,''),'0')=? AND COALESCE(import_source,'')!='test_ofir' "
+            "ORDER BY month_id DESC, id DESC LIMIT 1", (z,)).fetchone()
+    if pn:
+        c = conn.execute(
+            "SELECT id, id_number, email, phone, name, brand FROM customers WHERE policy_number=? "
+            "AND COALESCE(import_source,'')!='test_ofir' ORDER BY month_id DESC, id DESC LIMIT 1", (pn,)).fetchone()
+        if c:
+            return {'customer_id': c['id'], 'id_number': c['id_number'], 'email': c['email'] or '',
+                    'phone': c['phone'] or '', 'brand': c['brand'] or '', 'source': 'פוליסה'}
+        pr = conn.execute(
+            "SELECT insured_id, email, phone_mobile FROM policy_records WHERE policy_number=? "
+            "AND COALESCE(insured_id,'')!='' ORDER BY id DESC LIMIT 1", (pn,)).fetchone()
+        if pr:
+            c = _cust_by_id(pr['insured_id'])
+            ins = conn.execute("SELECT email, phone, brand FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                               (re.sub(r'\D', '', pr['insured_id']).lstrip('0'),)).fetchone()
+            return {'customer_id': c['id'] if c else None, 'id_number': pr['insured_id'],
+                    'email': (c['email'] if c and c['email'] else (ins['email'] if ins else '') or pr['email'] or ''),
+                    'phone': (c['phone'] if c and c['phone'] else (ins['phone'] if ins else '') or pr['phone_mobile'] or ''),
+                    'brand': (c['brand'] if c else (ins['brand'] if ins else '')) or '', 'source': 'מסמך פוליסה'}
+    ph9 = re.sub(r'\D', '', r.get('phone') or '')[-9:]
+    if len(ph9) == 9:
+        for tbl in ('customers', 'insureds'):
+            extra = " AND COALESCE(import_source,'')!='test_ofir'" if tbl == 'customers' else ''
+            order = " ORDER BY month_id DESC, id DESC" if tbl == 'customers' else " ORDER BY id DESC"
+            c = conn.execute(f"SELECT id, id_number, email, phone, brand FROM {tbl} "
+                             f"WHERE replace(replace(replace(COALESCE(phone,''),'-',''),' ',''),'+972','0') LIKE ?{extra}{order} LIMIT 1",
+                             ('%' + ph9,)).fetchone()
+            if c:
+                return {'customer_id': c['id'] if tbl == 'customers' else None, 'id_number': c['id_number'],
+                        'email': c['email'] or '', 'phone': c['phone'] or '', 'brand': c['brand'] or '', 'source': 'טלפון'}
+    return None
+
+def _ingest_returns(conn, rows, file_name, file_date, message_id, received_at, source='harel'):
+    """Insert returned charges (idempotent on ref+policy+charge_date). A newer notice for a policy
+    SUPERSEDES an older still-unsent one (Sharon: the newest file decides). A policy that already
+    got a notice in the last 60 days is flagged repeat → needs manual approval even in auto mode."""
+    added, dup = [], 0
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    for r in rows:
+        ref = r.get('ref') or f"{source}:{r['policy_number']}:{r.get('month', '')}"
+        charge = r.get('charge_date') or ''
+        if conn.execute("SELECT 1 FROM collection_returns WHERE ref=? AND policy_number=? AND COALESCE(charge_date,'')=?",
+                        (ref, r['policy_number'], charge)).fetchone():
+            dup += 1; continue
+        m = _match_return_customer(conn, r) or {}
+        repeat = 1 if conn.execute(
+            "SELECT 1 FROM collection_returns WHERE policy_number=? AND status IN ('נשלח','טופל') "
+            "AND (COALESCE(wa_sent_at,'')!='' OR COALESCE(email_sent_at,'')!='') AND received_at >= ?",
+            (r['policy_number'], (datetime.date.today() - datetime.timedelta(days=60)).isoformat())).fetchone() else 0
+        conn.execute("UPDATE collection_returns SET status='הוחלף', resolved_at=?, resolved_by='system', "
+                     "resolved_note='הוחלף בהתראה חדשה יותר' WHERE policy_number=? AND status='פתוח' "
+                     "AND COALESCE(wa_sent_at,'')='' AND COALESCE(email_sent_at,'')=''",
+                     (now, r['policy_number']))
+        status = 'פתוח' if m else 'לא מזוהה'
+        cur = conn.execute(
+            "INSERT INTO collection_returns (ref, policy_number, addition, name, brand, agent_number, reason_code, "
+            "reason_desc, debt, amount, charge_date, card_last4, phone, period_start, period_end, harel_customer_no, "
+            "file_name, file_date, message_id, received_at, customer_id, id_number, email, match_source, status, repeat_flag) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ref, r['policy_number'], r.get('addition', ''), r.get('name', ''),
+             r.get('brand') or m.get('brand') or 'גאיה', r.get('agent_number', ''), r.get('reason_code', ''),
+             r.get('reason_desc', ''), r.get('debt', ''), r.get('amount', ''), charge, r.get('card_last4', ''),
+             r.get('phone') or m.get('phone') or '', r.get('period_start', ''), r.get('period_end', ''),
+             r.get('harel_customer_no', ''), file_name, file_date, message_id, received_at,
+             m.get('customer_id'), m.get('id_number') or '', m.get('email') or '', m.get('source') or '',
+             status, repeat))
+        item = {'id': cur.lastrowid, 'name': r.get('name', ''), 'policy': r['policy_number'], 'status': status,
+                'reason': collection_reason_text(r.get('reason_code'), r.get('reason_desc')),
+                'brand': r.get('brand') or m.get('brand') or '', 'repeat': repeat}
+        added.append(item)
+        if m.get('id_number') or m.get('customer_id'):
+            idkey = event_key(m.get('id_number'), 'cust-%s' % (m.get('customer_id') or 0))
+            log_event(conn, idkey, f"התקבלה הודעת בעיית גבייה מהראל — פוליסה {r['policy_number']} ({item['reason']})",
+                      'system', kind='collection_return')
+    return added, dup
+
+def _collection_summary_email(added, dup, file_name, source_label):
+    if not added and not dup:
+        return
+    rows = ''.join(
+        f"<tr><td>{a['name']}</td><td>{a['policy']}</td><td>{a['brand']}</td><td>{a['reason']}</td>"
+        f"<td>{'⚠️ לא מזוהה' if a['status'] == 'לא מזוהה' else ('🔁 חוזר שוב — דורש אישור' if a['repeat'] else 'ממתין לשליחה')}</td></tr>"
+        for a in added)
+    html = ('<div dir="rtl" style="font-family:Arial;font-size:14px">'
+            f'<h3>בעיות גבייה — {source_label}</h3><p>{file_name}</p>'
+            f'<p>נקלטו {len(added)} חדשים · {dup} כבר היו במערכת.</p>'
+            '<table border="1" cellpadding="4" style="border-collapse:collapse"><tr><th>שם</th><th>פוליסה</th>'
+            f'<th>מותג</th><th>סיבה</th><th>מצב</th></tr>{rows}</table>'
+            '<p>לטיפול: מסך "בעיות גבייה" בדשבורד.</p></div>')
+    try:
+        send_campaign_email(COLLECTION_SHARON_EMAIL, f'בעיות גבייה: {len(added)} חדשים ({source_label})', html)
+    except Exception as e:
+        print(f'[collection] summary email failed: {e}')
+
+def check_collection_returns(days_back=14):
+    if not _collection_lock.acquire(blocking=False):
+        return 0
+    try:
+        n = _check_collection_files_impl(days_back)
+        n += _check_dina_notices_impl(days_back)
+        return n
+    finally:
+        _collection_lock.release()
+
+def _check_collection_files_impl(days_back=14):
+    cfg = EMAIL_CONFIG
+    if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
+        return 0
+    from email.utils import parsedate_to_datetime
+    processed = 0
+    mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
+    try:
+        mail.login(cfg['username'], cfg['password'])
+        mail.select('INBOX')
+        since = max(datetime.date.today() - datetime.timedelta(days=days_back), COLLECTION_GOLIVE)
+        status, data = mail.search(None, f'FROM "{COLLECTION_SENDER}" SINCE {since.strftime("%d-%b-%Y")}')
+        if status != 'OK':
+            return 0
+        conn = get_db()
+        for mid in data[0].split():
+            _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hdr_data[0][1])
+            message_id = hdr.get('Message-ID', '').strip()
+            subject = decode_str(hdr.get('Subject', ''))
+            if COLLECTION_SUBJECT_MARK not in subject:
+                continue
+            if message_id and conn.execute('SELECT 1 FROM processed_leads WHERE message_id=?', (message_id,)).fetchone():
+                continue
+            try:
+                received_at = parsedate_to_datetime(hdr.get('Date', '')).astimezone().strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                received_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+            _, full = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(full[0][1])
+            got_file = False
+            for part in msg.walk():
+                fn = decode_str(part.get_filename() or '')
+                if not fn.lower().endswith('.xlsx'):
+                    continue
+                got_file = True
+                try:
+                    rows = _parse_returns_xlsx(part.get_payload(decode=True))
+                except Exception as e:
+                    print(f'[collection] parse failed {fn}: {e}'); continue
+                fd = re.search(r'_(\d{8})_', fn)
+                file_date = f'{fd.group(1)[6:8]}/{fd.group(1)[4:6]}/{fd.group(1)[:4]}' if fd else received_at[:10]
+                added, dup = _ingest_returns(conn, rows, fn, file_date, message_id, received_at)
+                conn.commit()
+                processed += len(added)
+                print(f'[collection] {fn}: {len(added)} חדשים, {dup} כפולים')
+                _collection_summary_email(added, dup, fn, 'קובץ חוזרים מהראל')
+            if got_file and message_id:
+                conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
+                             (message_id, datetime.datetime.now().isoformat()))
+                conn.commit()
+        conn.close()
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+    return processed
+
+def _check_dina_notices_impl(days_back=14):
+    """Second mailbox (Sharon's Gmail) — Dina Natan's per-customer notices. Skipped unless
+    EMAIL2_USERNAME/EMAIL2_PASSWORD (a Gmail app password) are set in the environment."""
+    user, pw = os.environ.get('EMAIL2_USERNAME', '').strip(), os.environ.get('EMAIL2_PASSWORD', '').strip()
+    if not user or not pw:
+        return 0
+    from email.utils import parsedate_to_datetime
+    processed = 0
+    mail = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=30)
+    try:
+        mail.login(user, pw)
+        mail.select('INBOX')
+        since = max(datetime.date.today() - datetime.timedelta(days=days_back), COLLECTION_GOLIVE)
+        status, data = mail.search(None, f'FROM "{COLLECTION_DINA_FROM}" SINCE {since.strftime("%d-%b-%Y")}')
+        if status != 'OK':
+            return 0
+        conn = get_db()
+        batch = []
+        for mid in data[0].split():
+            _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+            hdr = email_lib.message_from_bytes(hdr_data[0][1])
+            message_id = hdr.get('Message-ID', '').strip()
+            subject = decode_str(hdr.get('Subject', ''))
+            if message_id and conn.execute('SELECT 1 FROM processed_leads WHERE message_id=?', (message_id,)).fetchone():
+                continue
+            if not re.search(r'\d{12}', subject):
+                continue
+            try:
+                received_at = parsedate_to_datetime(hdr.get('Date', '')).astimezone().strftime('%Y-%m-%d %H:%M')
+            except Exception:
+                received_at = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+            _, full = mail.fetch(mid, '(BODY.PEEK[])')
+            msg = email_lib.message_from_bytes(full[0][1])
+            text = ''
+            for part in msg.walk():
+                ct = part.get_content_type()
+                if ct in ('text/plain', 'text/html') and 'attachment' not in str(part.get('Content-Disposition', '')):
+                    pl = part.get_payload(decode=True)
+                    if pl:
+                        t = pl.decode(part.get_content_charset() or 'utf-8', 'replace')
+                        text += (re.sub(r'<[^>]+>', ' ', t) if ct == 'text/html' else t) + ' '
+                        if ct == 'text/plain':
+                            break
+            row = _parse_dina_notice(subject, text)
+            if message_id:
+                conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
+                             (message_id, datetime.datetime.now().isoformat()))
+            if not row:
+                conn.commit(); continue
+            added, dup = _ingest_returns(conn, [row], f'מייל דינה נתן — {subject[:60]}', received_at[:10],
+                                         message_id, received_at, source='dina')
+            conn.commit()
+            processed += len(added)
+            batch.extend(added)
+        if batch:
+            _collection_summary_email(batch, 0, f'{len(batch)} הודעות', 'הודעות דינה נתן (הראל)')
+        conn.close()
+    finally:
+        try:
+            mail.logout()
+        except Exception:
+            pass
+    return processed
+
+def _collection_item_payload(conn, r, wa_on):
+    brand_key = _wa_brand_key(r['brand'])
+    phone = r['phone'] or ''
+    if not phone and r['customer_id']:
+        c = conn.execute("SELECT phone FROM customers WHERE id=?", (r['customer_id'],)).fetchone()
+        phone = c['phone'] if c else ''
+    email = (r['email'] or '').strip()
+    has_email = bool(email and '@' in email)
+    reason = collection_reason_text(r['reason_code'], r['reason_desc'])
+    first = (r['name'] or '').split()[0] if r['name'] else ''
+    return {'id': r['id'], 'name': r['name'], 'first_name': first, 'brand': brand_key, 'policy': r['policy_number'],
+            'reason': reason, 'phone': _policy_to972(phone), 'email': email if has_email else '',
+            'whatsapp_pending': bool(wa_on and not (r['wa_sent_at'] or '') and phone),
+            'email_pending': bool(has_email and not (r['email_sent_at'] or '')),
+            'wa_text': collection_wa_text(r['name'], r['policy_number'], reason, brand_key),
+            'wa_params': [r['name'] or '', r['policy_number'], reason],
+            'email_subject': COLLECTION_EMAIL_SUBJECT,
+            'email_body': collection_email_body(r['name'], r['policy_number'], reason, brand_key),
+            'email_html': collection_email_html(r['name'], r['policy_number'], reason, brand_key)}
+
+@app.route('/api/collection/queue')
+def api_collection_queue():
+    """Token: collection notices ready to send for a brand — approved items (manual mode) or all
+    matched non-repeat items (auto mode); each with per-channel pending flags + texts."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', '')
+    if brand not in ('gaia', 'winner'):
+        return jsonify({'error': 'bad brand'}), 400
+    brands = ['גאיה'] if brand == 'gaia' else ['ווינר', 'אופיר']
+    conn = get_db()
+    mode = _kv_get(conn, 'collection_mode', 'manual')
+    wa_on = _kv_get(conn, 'collection_wa_enabled', '0') == '1'
+    rows = conn.execute(
+        f"SELECT * FROM collection_returns WHERE status='פתוח' AND brand IN ({','.join('?' * len(brands))}) "
+        "AND (customer_id IS NOT NULL OR COALESCE(id_number,'')!='') ORDER BY id", brands).fetchall()
+    items = []
+    for r in rows:
+        if not (r['approved_at'] or (mode == 'auto' and not r['repeat_flag'])):
+            continue
+        it = _collection_item_payload(conn, r, wa_on)
+        if it['whatsapp_pending'] or it['email_pending']:
+            items.append(it)
+    conn.close()
+    return jsonify({'brand': brand, 'mode': mode, 'whatsapp_enabled': wa_on, 'count': len(items), 'items': items})
+
+@app.route('/api/collection/sent', methods=['POST'])
+def api_collection_sent():
+    """Token: mark a collection notice sent on a channel; status → נשלח once any channel is out."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    rid, channel = d.get('id'), d.get('channel')
+    if not rid or channel not in ('whatsapp', 'email'):
+        return jsonify({'error': 'need id + channel'}), 400
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    col = 'wa_sent_at' if channel == 'whatsapp' else 'email_sent_at'
+    conn = get_db()
+    r = conn.execute("SELECT * FROM collection_returns WHERE id=?", (rid,)).fetchone()
+    if not r:
+        conn.close(); return jsonify({'error': 'not found'}), 404
+    conn.execute(f"UPDATE collection_returns SET {col}=?, status=CASE WHEN status='פתוח' THEN 'נשלח' ELSE status END WHERE id=?",
+                 (now, rid))
+    ch = 'וואטסאפ' if channel == 'whatsapp' else 'מייל'
+    idkey = event_key(r['id_number'], 'cust-%s' % (r['customer_id'] or 0))
+    log_event(conn, idkey, f"נשלחה הודעת בעיית גבייה ({ch}) — פוליסה {r['policy_number']}", 'system', kind='collection_send')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/collection/ingest', methods=['POST'])
+def api_collection_ingest():
+    """Token: ingest a GNHZTJ xlsx directly (multipart 'file') — for manual loads and testing."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'need file'}), 400
+    rows = _parse_returns_xlsx(f.read())
+    fd = re.search(r'_(\d{8})_', f.filename or '')
+    file_date = f'{fd.group(1)[6:8]}/{fd.group(1)[4:6]}/{fd.group(1)[:4]}' if fd else datetime.date.today().strftime('%d/%m/%Y')
+    conn = get_db()
+    added, dup = _ingest_returns(conn, rows, f.filename or 'upload.xlsx', file_date, None,
+                                 datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))
+    conn.commit(); conn.close()
+    if request.form.get('notify') == '1':
+        _collection_summary_email(added, dup, f.filename or '', 'קובץ שהועלה ידנית')
+    return jsonify({'parsed': len(rows), 'added': added, 'duplicates': dup})
+
+@app.route('/api/collection/status')
+def api_collection_status():
+    """Token: settings + counts + whether the second mailbox is configured (names only)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    counts = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM collection_returns GROUP BY status").fetchall()}
+    out = {'mode': _kv_get(conn, 'collection_mode', 'manual'),
+           'whatsapp_enabled': _kv_get(conn, 'collection_wa_enabled', '0') == '1',
+           'mailbox2_configured': bool(os.environ.get('EMAIL2_USERNAME') and os.environ.get('EMAIL2_PASSWORD')),
+           'counts': counts}
+    conn.close()
+    return jsonify(out)
+
+@app.route('/admin/collection')
+@login_required
+@admin_required
+def admin_collection():
+    f = request.args.get('f', 'open')
+    where = {'open': "status='פתוח'", 'sent': "status='נשלח'", 'resolved': "status IN ('טופל','הוחלף')",
+             'unmatched': "status='לא מזוהה'", 'all': '1=1'}.get(f, "status='פתוח'")
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM collection_returns WHERE {where} ORDER BY id DESC LIMIT 400").fetchall()]
+    counts = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM collection_returns GROUP BY status").fetchall()}
+    mode = _kv_get(conn, 'collection_mode', 'manual')
+    wa_on = _kv_get(conn, 'collection_wa_enabled', '0') == '1'
+    conn.close()
+    for r in rows:
+        r['reason'] = collection_reason_text(r['reason_code'], r['reason_desc'])
+        r['sendable'] = r['status'] == 'פתוח' and (r['customer_id'] or r['id_number'])
+    return render_template('collection.html', rows=rows, counts=counts, f=f, mode=mode, wa_on=wa_on,
+                           mailbox2=bool(os.environ.get('EMAIL2_USERNAME') and os.environ.get('EMAIL2_PASSWORD')))
+
+@app.route('/admin/collection/settings', methods=['POST'])
+@login_required
+@superadmin_required
+def admin_collection_settings():
+    conn = get_db()
+    _kv_set(conn, 'collection_mode', 'auto' if request.form.get('mode') == 'auto' else 'manual')
+    _kv_set(conn, 'collection_wa_enabled', '1' if request.form.get('wa_enabled') == '1' else '0')
+    conn.commit(); conn.close()
+    flash('הגדרות בעיות הגבייה עודכנו', 'success')
+    return redirect(url_for('admin_collection'))
+
+@app.route('/admin/collection/<int:rid>/action', methods=['POST'])
+@login_required
+@admin_required
+def admin_collection_action(rid):
+    act = request.form.get('action', '')
+    who = session.get('display_name') or session.get('username') or 'admin'
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    if act == 'approve':
+        conn.execute("UPDATE collection_returns SET approved_at=?, approved_by=? WHERE id=? AND status='פתוח'", (now, who, rid))
+    elif act == 'unapprove':
+        conn.execute("UPDATE collection_returns SET approved_at=NULL, approved_by=NULL WHERE id=? AND status='פתוח'", (rid,))
+    elif act == 'resolve':
+        conn.execute("UPDATE collection_returns SET status='טופל', resolved_at=?, resolved_by=?, resolved_note=? WHERE id=?",
+                     (now, who, (request.form.get('note') or '').strip()[:200], rid))
+    elif act == 'reopen':
+        conn.execute("UPDATE collection_returns SET status='פתוח', resolved_at=NULL, resolved_by=NULL, resolved_note=NULL, "
+                     "approved_at=NULL, approved_by=NULL WHERE id=?", (rid,))
+    elif act == 'relink':
+        r = conn.execute("SELECT * FROM collection_returns WHERE id=?", (rid,)).fetchone()
+        idn = re.sub(r'\D', '', request.form.get('id_number') or '')
+        if r and idn:
+            c = conn.execute("SELECT id, id_number, email, phone, brand FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                             "ORDER BY month_id DESC, id DESC LIMIT 1", (idn.lstrip('0'),)).fetchone()
+            ins = conn.execute("SELECT email, phone, brand FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn.lstrip('0'),)).fetchone()
+            if c or ins:
+                conn.execute("UPDATE collection_returns SET customer_id=?, id_number=?, email=COALESCE(NULLIF(email,''),?), "
+                             "phone=COALESCE(NULLIF(phone,''),?), match_source='ידני', status=CASE WHEN status='לא מזוהה' THEN 'פתוח' ELSE status END WHERE id=?",
+                             (c['id'] if c else None, idn.zfill(9), (c['email'] if c else ins['email']) or '',
+                              (c['phone'] if c else ins['phone']) or '', rid))
+            else:
+                flash('ת"ז לא נמצאה במערכת', 'danger')
+    conn.commit(); conn.close()
+    return redirect(url_for('admin_collection', f=request.form.get('f', 'open')))
+
+@app.route('/admin/collection/approve-all', methods=['POST'])
+@login_required
+@admin_required
+def admin_collection_approve_all():
+    who = session.get('display_name') or session.get('username') or 'admin'
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    n = conn.execute("UPDATE collection_returns SET approved_at=?, approved_by=? WHERE status='פתוח' AND approved_at IS NULL "
+                     "AND (customer_id IS NOT NULL OR COALESCE(id_number,'')!='') AND repeat_flag=0", (now, who)).rowcount
+    conn.commit(); conn.close()
+    flash(f'אושרו לשליחה {n} הודעות', 'success')
+    return redirect(url_for('admin_collection'))
+
+@app.route('/admin/collection/upload', methods=['POST'])
+@login_required
+@admin_required
+def admin_collection_upload():
+    f = request.files.get('file')
+    if not f or not (f.filename or '').lower().endswith('.xlsx'):
+        flash('יש לבחור קובץ xlsx של הראל', 'danger'); return redirect(url_for('admin_collection'))
+    rows = _parse_returns_xlsx(f.read())
+    fd = re.search(r'_(\d{8})_', f.filename or '')
+    file_date = f'{fd.group(1)[6:8]}/{fd.group(1)[4:6]}/{fd.group(1)[:4]}' if fd else datetime.date.today().strftime('%d/%m/%Y')
+    conn = get_db()
+    added, dup = _ingest_returns(conn, rows, f.filename, file_date, None, datetime.datetime.now().strftime('%Y-%m-%d %H:%M'))
+    conn.commit(); conn.close()
+    flash(f'נקלטו {len(added)} חדשים, {dup} כבר היו במערכת', 'success')
+    return redirect(url_for('admin_collection'))
+
 HAREL_CERT_SENDER = 'HarelInsurance@harel-group.co.il'
 HAREL_CERT_SUBJECT_MARK = 'אישור לביטוח קיים'
 # From-today-onward only — never process certificate emails older than go-live (Sharon's rule:
@@ -9802,6 +10421,13 @@ def email_poll_thread():
                 print(f'[harel-cert] נקלטו {hc} בקשות אישור קיום ביטוח')
         except Exception as e:
             print(f'[harel-cert] שגיאת thread: {e}')
+        touch_scan_heartbeat()
+        try:
+            cr = check_collection_returns(days_back=_days)
+            if cr:
+                print(f'[collection] נקלטו {cr} חיובים חוזרים')
+        except Exception as e:
+            print(f'[collection] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
             _mwc = get_db(); mw = auto_mark_midwives(_mwc); _mwc.commit(); _mwc.close()
