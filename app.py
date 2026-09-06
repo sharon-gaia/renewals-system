@@ -9711,10 +9711,14 @@ def _collection_summary_email(added, dup, file_name, source_label):
             '<table border="1" cellpadding="4" style="border-collapse:collapse"><tr><th>שם</th><th>פוליסה</th>'
             f'<th>מותג</th><th>סיבה</th><th>מצב</th></tr>{rows}</table>'
             '<p>לטיפול: מסך "בעיות גבייה" בדשבורד.</p></div>')
-    try:
-        send_campaign_email(COLLECTION_SHARON_EMAIL, f'בעיות גבייה: {len(added)} חדשים ({source_label})', html)
-    except Exception as e:
-        print(f'[collection] summary email failed: {e}')
+    # Background: the email send can take long (Resend/SMTP) and must never stall the scanner or a
+    # request — it timed out a worker on the first catch-up scan.
+    def _go():
+        try:
+            send_campaign_email(COLLECTION_SHARON_EMAIL, f'בעיות גבייה: {len(added)} חדשים ({source_label})', html)
+        except Exception as e:
+            print(f'[collection] summary email failed: {e}')
+    threading.Thread(target=_go, daemon=True).start()
 
 def check_collection_returns(days_back=14):
     if not _collection_lock.acquire(blocking=False):
