@@ -2244,6 +2244,107 @@ def api_renewal_status():
                     'renewal': {'link': renewal_link(match['brand'], is_mid)[0],
                                 'price': (f"{r_amt:,} ₪" if r_amt else None)}})
 
+def _iso_dt(s):
+    """'YYYY-MM-DD HH:MM' / 'DD/MM/YYYY' / ISO → ISO-8601 (seconds), or None."""
+    s = str(s or '').strip()
+    if not s:
+        return None
+    m = re.match(r'^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(:\d{2})?', s)
+    if m:
+        return f"{m.group(1)}T{m.group(2)}{m.group(3) or ':00'}"
+    d = _iso_date(s)
+    return (d + 'T00:00:00') if d else None
+
+@app.route('/api/customer-context')
+def api_customer_context():
+    """Token: the OPEN proactive-message context for an inbound phone (bot interface, 2026-09-07) —
+    collection notices, renewal reminders this cycle, policies delivered recently — so the bot
+    continues the conversation instead of the new-customer script. Phone-only lookup (the sender's
+    own number); no ת"ז or card data in the response. {found:false} when nothing is open."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    p = re.sub(r'\D', '', request.args.get('phone', ''))
+    if len(p) < 9:
+        return jsonify({'found': False})
+    like = '%' + p[-9:]
+    PH = "REPLACE(REPLACE(REPLACE(COALESCE({c},''),'-',''),' ',''),'+972','0')"
+    conn = get_db()
+    today = datetime.date.today()
+    ctx, name = [], None
+    cust = conn.execute(
+        f"SELECT id, name, id_number, brand, status, month_id, import_source, group_owner, is_midwife, "
+        f"premium_last_year, whatsapp_sent_date, lreom_sent_at, lr25_sent_at FROM customers "
+        f"WHERE {PH.format(c='phone')} LIKE ? AND COALESCE(import_source,'')!='test_ofir' "
+        f"ORDER BY month_id DESC, id DESC", (like,)).fetchall()
+    cids = [c['id'] for c in cust]
+    idns = {re.sub(r'\D', '', c['id_number'] or '').lstrip('0') for c in cust if c['id_number']}
+    # 1) Collection problems — notices sent (or approved and about to go) in the last 45 days.
+    since45 = (today - datetime.timedelta(days=45)).isoformat()
+    q = (f"SELECT * FROM collection_returns WHERE status IN ('נשלח','פתוח') AND received_at >= ? "
+         f"AND ({PH.format(c='phone')} LIKE ?" + (f" OR customer_id IN ({','.join('?' * len(cids))})" if cids else '') + ") "
+         "ORDER BY id DESC")
+    seen = set()
+    for r in conn.execute(q, [since45, like] + cids).fetchall():
+        if r['policy_number'] in seen:
+            continue
+        seen.add(r['policy_number'])
+        sent = r['wa_sent_at'] or r['email_sent_at']
+        if not sent and not r['approved_at']:
+            continue                       # not yet approved → the customer hasn't heard from us
+        name = name or r['name']
+        ctx.append({'type': 'collection', 'status': 'sent' if sent else 'pending',
+                    'since': _iso_date(r['file_date']) or (r['received_at'] or '')[:10],
+                    'policy_last4': (r['policy_number'] or '')[-4:],
+                    'reason': collection_reason_text(r['reason_code'], r['reason_desc']),
+                    'amount': r['amount'] or None, 'brand': r['brand'],
+                    'action_url': CARD_UPDATE_LINKS.get(_wa_brand_key(r['brand']), ''),
+                    'message_sent_at': _iso_dt(sent),
+                    'channels': [c for c, v in (('whatsapp', r['wa_sent_at']), ('email', r['email_sent_at'])) if v]})
+    # 2) Renewal reminder sent this cycle (active month), renewal still open.
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    settled = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'ממתין להפקה')
+    for c in cust:
+        if not month or c['month_id'] != month['id'] or c['brand'] not in ('גאיה', 'ווינר'):
+            continue
+        if (c['import_source'] or '') in NEW_BUSINESS_SOURCES or (c['group_owner'] or '').strip():
+            continue
+        if (c['status'] or '') in settled:
+            continue
+        sent = c['lr25_sent_at'] or c['lreom_sent_at'] or c['whatsapp_sent_date']
+        if not sent:
+            continue
+        name = name or c['name']
+        is_mid = bool(c['is_midwife'])
+        amt = renewal_amount(is_mid, c['premium_last_year'])
+        ctx.append({'type': 'renewal_reminder', 'kind': 'last_reminder' if (c['lr25_sent_at'] or c['lreom_sent_at']) else 'first',
+                    'since': (_iso_dt(sent) or '')[:10], 'brand': c['brand'], 'month': month['name'],
+                    'is_midwife': is_mid, 'action_url': renewal_link(c['brand'], is_mid)[0],
+                    'price': (f"{amt:,} ₪" if amt else None), 'message_sent_at': _iso_dt(sent)})
+        break
+    # 3) Policy delivered in the last 14 days (WhatsApp/email) — the customer may ask about it.
+    since14 = (today - datetime.timedelta(days=14)).strftime('%Y-%m-%d')
+    idn_clause = f" OR ltrim(COALESCE(pr.insured_id,''),'0') IN ({','.join('?' * len(idns))})" if idns else ''
+    for r in conn.execute(
+            f"SELECT pd.policy_number, pd.whatsapp_sent_at, pd.email_sent_at, pr.doc_type_label, pr.insured_name "
+            f"FROM policy_documents pd JOIN policy_records pr ON pr.policy_document_id=pd.id "
+            f"WHERE COALESCE(pd.whatsapp_sent_at,'')!='ארכיון' "
+            f"AND (COALESCE(pd.whatsapp_sent_at,'') >= ? OR COALESCE(pd.email_sent_at,'') >= ?) "
+            f"AND ({PH.format(c='pr.phone_mobile')} LIKE ?{idn_clause}) ORDER BY pd.id DESC LIMIT 3",
+            [since14, since14, like] + list(idns)).fetchall():
+        sent = r['whatsapp_sent_at'] or r['email_sent_at']
+        name = name or r['insured_name']
+        ctx.append({'type': 'policy_delivery', 'since': (sent or '')[:10],
+                    'policy_last4': (r['policy_number'] or '')[-4:],
+                    'doc_type': 'חידוש' if is_renewal_doc(r['doc_type_label']) else 'חדש',
+                    'message_sent_at': _iso_dt(sent),
+                    'channels': [c for c, v in (('whatsapp', r['whatsapp_sent_at']), ('email', r['email_sent_at'])) if v]})
+    if not name and cust:
+        name = cust[0]['name']
+    conn.close()
+    if not ctx:
+        return jsonify({'found': False})
+    return jsonify({'found': True, 'name': name, 'context': ctx})
+
 @app.route('/api/daily-report')
 def api_daily_report():
     """Token-authed: the morning health-report text, computed from THIS (production) DB.
