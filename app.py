@@ -2249,11 +2249,12 @@ def _iso_dt(s):
     s = str(s or '').strip()
     if not s:
         return None
+    # Server timestamps are UTC (Railway) — say so explicitly with a 'Z' so the bot can convert.
     m = re.match(r'^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(:\d{2})?', s)
     if m:
-        return f"{m.group(1)}T{m.group(2)}{m.group(3) or ':00'}"
+        return f"{m.group(1)}T{m.group(2)}{m.group(3) or ':00'}Z"
     d = _iso_date(s)
-    return (d + 'T00:00:00') if d else None
+    return (d + 'T00:00:00Z') if d else None
 
 @app.route('/api/customer-context')
 def api_customer_context():
