@@ -67,10 +67,10 @@
           <td class="ps-3 fw-semibold">
             {% if r.customer_id %}<a href="/customer/{{ r.customer_id }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}
             {% if r.repeat_flag %}<span class="badge bg-warning text-dark ms-1" title="חזר שוב תוך 60 יום">חוזר</span>{% endif %}
-            <div class="text-muted">{{ r.phone }}{% if r.email %} · {{ r.email }}{% endif %}</div>
+            <div class="text-muted">{% if r.phone %}{{ r.phone }} <button type="button" class="btn btn-link btn-sm p-0 copy-btn" data-copy="{{ r.phone }}" title="העתק טלפון"><i class="bi bi-clipboard"></i></button>{% endif %}{% if r.email %} · {{ r.email }}{% endif %}</div>
           </td>
           <td>{{ r.brand }}</td>
-          <td class="text-nowrap">{{ r.policy_number }}</td>
+          <td class="text-nowrap">{{ r.policy_number }} <button type="button" class="btn btn-link btn-sm p-0 copy-btn" data-copy="{{ r.policy_number }}" title="העתק מספר פוליסה"><i class="bi bi-clipboard"></i></button></td>
           <td>{{ r.reason }}</td>
           <td class="text-nowrap">{{ r.amount }}</td>
           <td class="text-nowrap">{{ r.debt }}</td>
@@ -123,4 +123,19 @@
   ההודעה ללקוח: "בעיית גבייה בפוליסה — הראל הודיעו לנו שהחיוב לא כובד… יש לעדכן אמצעי תשלום בקישור… במידה והסדרת את החוב, ראה הודעה זו כמבוטלת."
   חיוב שכבר נשלחה עליו הודעה וחוזר שוב תוך 60 יום מסומן "חוזר" ודורש אישור ידני גם במצב אוטומטי.
 </p>
+<script>
+document.addEventListener('click', function (e) {
+  const b = e.target.closest('.copy-btn');
+  if (!b) return;
+  const txt = b.dataset.copy || '';
+  const done = () => { const i = b.querySelector('i'); i.className = 'bi bi-clipboard-check text-success'; setTimeout(() => { i.className = 'bi bi-clipboard'; }, 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(done).catch(() => fallback());
+  } else fallback();
+  function fallback() {
+    const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch (_) {} document.body.removeChild(ta);
+  }
+});
+</script>
 {% endblock %}
