@@ -10023,6 +10023,47 @@ def api_collection_digest():
     return jsonify({'new': new, 'new_count': len(new), 'open_total': counts.get('פתוח', 0),
                     'unmatched_total': counts.get('לא מזוהה', 0), 'counts': counts})
 
+@app.route('/api/collection/settings', methods=['POST'])
+def api_collection_settings():
+    """Token: set {mode: manual|auto, wa_enabled: 0|1} (same switches as the admin page)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    conn = get_db()
+    if d.get('mode') in ('manual', 'auto'):
+        _kv_set(conn, 'collection_mode', d['mode'])
+    if 'wa_enabled' in d:
+        _kv_set(conn, 'collection_wa_enabled', '1' if str(d['wa_enabled']) in ('1', 'true', 'True') else '0')
+    conn.commit()
+    out = {'mode': _kv_get(conn, 'collection_mode', 'manual'), 'whatsapp_enabled': _kv_get(conn, 'collection_wa_enabled', '0') == '1'}
+    conn.close()
+    return jsonify(out)
+
+@app.route('/api/collection/requeue-wa', methods=['POST'])
+def api_collection_requeue_wa():
+    """Token: re-open items that went out by EMAIL ONLY (WhatsApp was off) so the wa-sender sends
+    their WhatsApp too — approval is kept, the email is NOT resent. Body {ids:[...]} or {all:true}
+    (= every 'נשלח' item with no wa_sent_at from the last 14 days)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    conn = get_db()
+    if d.get('all'):
+        since = (datetime.date.today() - datetime.timedelta(days=14)).isoformat()
+        rows = conn.execute("SELECT id, name FROM collection_returns WHERE status='נשלח' AND COALESCE(wa_sent_at,'')='' "
+                            "AND COALESCE(email_sent_at,'')!='' AND email_sent_at >= ? AND COALESCE(phone,'')!=''", (since,)).fetchall()
+    else:
+        ids = [int(x) for x in (d.get('ids') or [])]
+        rows = conn.execute(f"SELECT id, name FROM collection_returns WHERE id IN ({','.join('?' * len(ids)) or 'NULL'}) "
+                            "AND status='נשלח' AND COALESCE(wa_sent_at,'')=''", ids).fetchall() if ids else []
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    who = 'system'
+    for r in rows:
+        conn.execute("UPDATE collection_returns SET status='פתוח', approved_at=COALESCE(approved_at,?), approved_by=COALESCE(approved_by,?) WHERE id=?",
+                     (now, who, r['id']))
+    conn.commit(); conn.close()
+    return jsonify({'requeued': [dict(r) for r in rows], 'count': len(rows)})
+
 @app.route('/api/collection/status')
 def api_collection_status():
     """Token: settings + counts + whether the second mailbox is configured (names only)."""
