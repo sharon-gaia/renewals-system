@@ -45,7 +45,7 @@ EMAIL_CONFIG = {
     'password': os.environ['EMAIL_PASSWORD'],
     'sender_filter': 'onboarding@resend.dev',
     'subject_filter': '',
-    'check_interval': 180,
+    'check_interval': 600,   # 10 min (Sharon, 2026-09-08 — Gmail quota); was 180
     'enabled': True,
 }
 
@@ -8942,6 +8942,37 @@ def _iso88598i(name):
     return None
 codecs.register(_iso88598i)
 
+def _uid_scan(mail, key, crits, full):
+    """Incremental IMAP scan (Gmail-quota fix 2026-09-08): routine cycles return only messages with a
+    UID above the stored watermark, so already-processed mail is never re-fetched; `full=True` (the
+    periodic sweep) ignores the watermark and covers the whole criteria window as a safety net.
+    Returns UIDs (bytes, oldest→newest) for use with mail.uid('FETCH', …). The watermark is stored
+    at scan time; anything a crashed cycle skips is re-covered by the next sweep. Resets on UIDVALIDITY."""
+    conn = get_db()
+    try:
+        uidv = ''
+        try:
+            r = mail.response('UIDVALIDITY')[1]
+            uidv = (r[0] if r and r[0] else b'').decode() if isinstance(r[0], bytes) else str(r[0] or '')
+        except Exception:
+            pass
+        if uidv and _kv_get(conn, key + '_uidv', '') != uidv:
+            _kv_set(conn, key + '_uidv', uidv); _kv_set(conn, key + '_last', '0'); conn.commit()
+        last = int(_kv_get(conn, key + '_last', '0') or 0)
+        found = set()
+        for crit in crits:
+            c = f'UID {last + 1}:* {crit}' if (last and not full) else crit
+            typ, data = mail.uid('SEARCH', None, c)
+            if typ == 'OK' and data and data[0]:
+                for u in data[0].split():
+                    if full or int(u) > last:
+                        found.add(int(u))
+        if found:
+            _kv_set(conn, key + '_last', str(max(max(found), last))); conn.commit()
+        return [str(u).encode() for u in sorted(found)]
+    finally:
+        conn.close()
+
 def _search_policy_emails(mail, since_date, extra=''):
     """Search INBOX for policy emails from ANY known policy sender (Harel + Ofir relay),
     returning de-duplicated message sequence numbers (oldest→newest). `extra` appends extra
@@ -8982,11 +9013,14 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
         mail.select('INBOX')
 
         since_date = (datetime.datetime.now() - datetime.timedelta(days=days_back)).strftime('%d-%b-%Y')
-        mids = _search_policy_emails(mail, since_date)
+        # Incremental (UID watermark): routine cycles fetch only NEW policy emails; the periodic
+        # wide sweep (days_back > routine) re-covers the whole window as a safety net.
+        mids = _uid_scan(mail, 'uid_policy', [f'FROM "{s}" SINCE {since_date}' for s in POLICY_EMAIL_SENDERS],
+                         full=(days_back > 7))
 
         conn = get_db()
         for mid in mids:
-            _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
+            _, hdr_data = mail.uid('FETCH', mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
             hdr = email_lib.message_from_bytes(hdr_data[0][1])
             message_id = hdr.get('Message-ID', '').strip()
             subject = decode_str(hdr.get('Subject', ''))
@@ -9005,7 +9039,7 @@ def _check_policy_documents_impl(days_back=30, keep_pdf=True):
             # No early skip: new-business policies arrive with a generic subject
             # ("הודעה מהראל…") and carry the policy number in the attachment filename instead.
 
-            _, full_data = mail.fetch(mid, '(BODY.PEEK[])')
+            _, full_data = mail.uid('FETCH', mid, '(BODY.PEEK[])')
             msg = email_lib.message_from_bytes(full_data[0][1])
 
             saved_any = False
@@ -10764,10 +10798,14 @@ def email_poll_thread():
         time.sleep(EMAIL_CONFIG['check_interval'])
         # Once an hour, widen the window as a safety net so nothing is missed after an outage.
         _cyc[0] += 1
-        _days = 21 if (_cyc[0] % 20 == 0) else POLL_DAYS   # ~every 20 cycles (≈1h) → 21-day sweep
+        # Cadence is interval-relative (10-min cycles since 2026-09-08): hourly 21-day sweep (the
+        # safety net behind the UID watermarks), daily disk cleanup, low-urgency scanners every 2nd cycle.
+        _per_hour = max(1, int(3600 / EMAIL_CONFIG['check_interval']))
+        _days = 21 if (_cyc[0] % _per_hour == 0) else POLL_DAYS
+        _slow = (_cyc[0] % 2 == 0)
         # Daily disk cleanup — the /data volume once filled to 99% and took the DB down. Delete PDFs
-        # >7 days (delivered + on OneDrive) once/day (~480 cycles) + once shortly after startup.
-        if _cyc[0] == 3 or _cyc[0] % 480 == 0:
+        # >7 days (delivered + on OneDrive) once/day + once shortly after startup.
+        if _cyc[0] == 3 or _cyc[0] % (_per_hour * 24) == 0:
             try:
                 _n, _fb = _free_old_pdfs(7)
                 if _n:
@@ -10803,14 +10841,14 @@ def email_poll_thread():
             print(f'[renewal-forms] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            hp = check_harel_completed(days_back=_days)
+            hp = check_harel_completed(days_back=_days) if _slow else 0
             if hp:
                 print(f'[harel-proposal] נקלטו {hp} השלמות פרטים להצעה')
         except Exception as e:
             print(f'[harel-proposal] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            hc = check_cert_emails(days_back=_days)
+            hc = check_cert_emails(days_back=_days) if _slow else 0
             if hc:
                 print(f'[harel-cert] נקלטו {hc} בקשות אישור קיום ביטוח')
         except Exception as e:
@@ -10835,14 +10873,14 @@ def email_poll_thread():
             print(f'[midwife] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            lr = label_sent_policy_emails()
+            lr = label_sent_policy_emails() if _slow else {}
             if lr.get('found'):
                 print(f"[gmail-label] תויגו ואורכבו {lr['found']} מיילי פוליסות שנשלחו")
         except Exception as e:
             print(f'[gmail-label] שגיאת thread: {e}')
         touch_scan_heartbeat()
         try:
-            cl = label_sent_cert_emails()
+            cl = label_sent_cert_emails() if _slow else {}
             if cl.get('found'):
                 print(f"[cert-label] תויגו ואורכבו {cl['found']} מיילי אישורי ביטוח שנשלחו")
         except Exception as e:
