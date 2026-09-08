@@ -2348,6 +2348,28 @@ def api_customer_context():
         return jsonify({'found': False})
     return jsonify({'found': True, 'name': name, 'context': ctx})
 
+@app.route('/api/policy/requeue-wa', methods=['POST'])
+def api_policy_requeue_wa():
+    """Token: clear the WhatsApp marker of a policy document so the delivery queue sends it again on
+    WhatsApp only (email untouched) — for a send that was rejected (bad number) and stamped as
+    handled. Body {doc_id}. Returns the queue phone the sender will now use."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    doc_id = (request.get_json(silent=True) or {}).get('doc_id')
+    if not doc_id:
+        return jsonify({'error': 'need doc_id'}), 400
+    conn = get_db()
+    r = conn.execute("SELECT id, whatsapp_sent_at, email_sent_at FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
+    if not r:
+        conn.close(); return jsonify({'error': 'not found'}), 404
+    conn.execute("UPDATE policy_documents SET whatsapp_sent_at=NULL WHERE id=?", (doc_id,))
+    conn.commit()
+    items = [it for b in ('gaia', 'winner') for it in _policy_queue_items(conn, b) if it['doc_id'] == int(doc_id)]
+    conn.close()
+    return jsonify({'ok': True, 'was_whatsapp_sent_at': r['whatsapp_sent_at'], 'email_sent_at': r['email_sent_at'],
+                    'queued': [{'name': it['name'], 'phone': it['phone'], 'brand': it['brand'],
+                                'whatsapp_pending': it['whatsapp_pending']} for it in items]})
+
 @app.route('/api/policy/recent-closures')
 def api_recent_closures():
     """Token: customers whose status became closed (חודש/הופק) since ?since=YYYY-MM-DD HH:MM for
@@ -6384,7 +6406,17 @@ def _policy_queue_items(conn, brand_key):
                 "AND ltrim(COALESCE(id_number,''),'0')=? ORDER BY id DESC LIMIT 1", (key,)).fetchone()
             if lead and (lead['form_received_at'] or '')[:10] <= '2026-08-01' and key not in _POLICY_FORCE_IDS:
                 continue  # (a forced ת"ז overrides the backlog guard — explicit re-send)
+            # Phone: the customer's OWN number (join form / CRM — the one they used with the bot)
+            # beats the number printed on the Harel PDF, which can be a landline or mis-parsed
+            # (2026-09-07: PDF said '07-3002481' → Cloud API rejected, customer's 050 was ignored).
             real_phone = _policy_to972(r['phone_mobile'])
+            cp = conn.execute("SELECT phone FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                              "AND COALESCE(phone,'')!='' AND COALESCE(import_source,'')!='test_ofir' "
+                              "ORDER BY month_id DESC, id DESC LIMIT 1", (key,)).fetchone()
+            cust_phone = _policy_to972(cp['phone']) if cp else ''
+            _mobile = lambda p: bool(re.fullmatch(r'9725\d{8}', p or ''))
+            if _mobile(cust_phone) or (cust_phone and not _mobile(real_phone)):
+                real_phone = cust_phone
             real_email = (r['pr_email'] or '').strip()
             if not real_email:
                 ce = conn.execute("SELECT email FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
