@@ -10804,8 +10804,10 @@ def email_poll_thread():
     POLL_DAYS = 4
     _cyc = [0]
     _coll_slot = [None]   # last "date-hour" slot the collection scanners ran in
+    NIGHT_INTERVAL = 1800   # 21:00–07:00 Israel: every 30 min (Sharon, 2026-09-08 — nothing is sent at night anyway)
     while True:
-        time.sleep(EMAIL_CONFIG['check_interval'])
+        _h = _israel_now().hour
+        time.sleep(NIGHT_INTERVAL if (_h >= 21 or _h < 7) else EMAIL_CONFIG['check_interval'])
         # Once an hour, widen the window as a safety net so nothing is missed after an outage.
         _cyc[0] += 1
         # Cadence is interval-relative (10-min cycles since 2026-09-08): hourly 21-day sweep (the
