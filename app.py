@@ -9872,9 +9872,19 @@ def _check_collection_files_impl(days_back=14):
         mail.login(cfg['username'], cfg['password'])
         mail.select('INBOX')
         since = max(datetime.date.today() - datetime.timedelta(days=days_back), COLLECTION_GOLIVE)
-        status, data = mail.search(None, f'FROM "{COLLECTION_SENDER}" SINCE {since.strftime("%d-%b-%Y")}')
-        if status != 'OK':
-            return 0
+        # Gmail-side filter to the few xlsx emails only — a plain FROM search returned EVERY Harel
+        # policy email (hundreds) and fetching all their headers each cycle exhausted Gmail's IMAP
+        # command quota. Fallback to FROM/SINCE + subject check if X-GM-RAW is unavailable.
+        ndays = max(1, (datetime.date.today() - since).days + 1)
+        try:
+            status, data = mail.search(None, 'X-GM-RAW',
+                                       f'"from:{COLLECTION_SENDER} filename:xlsx newer_than:{ndays}d"')
+            if status != 'OK':
+                raise ValueError(status)
+        except Exception:
+            status, data = mail.search(None, f'FROM "{COLLECTION_SENDER}" SINCE {since.strftime("%d-%b-%Y")}')
+            if status != 'OK':
+                return 0
         conn = get_db()
         for mid in data[0].split():
             _, hdr_data = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT DATE)])')
@@ -10656,13 +10666,17 @@ def email_poll_thread():
         except Exception as e:
             print(f'[harel-cert] שגיאת thread: {e}')
         touch_scan_heartbeat()
-        try:
-            cr = check_collection_returns(days_back=_days)
-            if cr:
-                print(f'[collection] נקלטו {cr} חיובים חוזרים')
-        except Exception as e:
-            print(f'[collection] שגיאת thread: {e}')
-        touch_scan_heartbeat()
+        # Collection scanners every ~30 min only (10 cycles) — running them every cycle on top of the
+        # other scanners tripped Gmail's "exceeded command or bandwidth limits" on 2026-09-08 and
+        # took ALL scanners down. The 12:00 digest triggers a scan explicitly anyway.
+        if _cyc[0] % 10 == 0:
+            try:
+                cr = check_collection_returns(days_back=_days)
+                if cr:
+                    print(f'[collection] נקלטו {cr} חיובים חוזרים')
+            except Exception as e:
+                print(f'[collection] שגיאת thread: {e}')
+            touch_scan_heartbeat()
         try:
             _mwc = get_db(); mw = auto_mark_midwives(_mwc); _mwc.commit(); _mwc.close()
             if mw['customers'] or mw['insureds']:
