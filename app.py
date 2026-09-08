@@ -923,6 +923,8 @@ def init_db():
     # not on the Railway volume — /api/policy-pdf streams them server-side.
     if 'r2_key' not in [r[1] for r in conn.execute("PRAGMA table_info(policy_documents)").fetchall()]:
         conn.execute("ALTER TABLE policy_documents ADD COLUMN r2_key TEXT")
+    # Archive rows never came from an email — mark them so no Gmail labeler/sweep ever touches them.
+    conn.execute("UPDATE policy_documents SET gmail_labeled='n/a' WHERE message_id LIKE 'r2:%' AND COALESCE(gmail_labeled,'')=''")
     conn.commit()
 
     # Zero-pad short numeric ID numbers to 9 digits (idempotent — once padded,
@@ -8703,7 +8705,11 @@ def label_sent_policy_emails(limit=None):
         if not cfg['enabled'] or not cfg['imap_server'] or not cfg['password']:
             return {'processed': 0, 'found': 0, 'not_found': 0, 'misses': []}
         conn = get_db()
+        # Only rows that came from a real email (Message-ID '<…>'): the 2,812 R2-archive rows carry
+        # message_id 'r2:…' + sent_at 'ארכיון' and were swept here EVERY cycle (2,812 Gmail searches
+        # per cycle, never found) — that is what tripped Gmail's command quota on 2026-09-08.
         q = ("SELECT id, message_id, policy_number FROM policy_documents WHERE COALESCE(message_id,'')!='' "
+             "AND message_id NOT LIKE 'r2:%' AND COALESCE(whatsapp_sent_at,'')!='ארכיון' "
              "AND COALESCE(gmail_labeled,'')='' AND (COALESCE(whatsapp_sent_at,'')!='' "
              "OR COALESCE(email_sent_at,'')!='') ORDER BY id DESC")
         if limit:
