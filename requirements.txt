@@ -10,3 +10,4 @@ python-bidi
 pyotp
 qrcode
 boto3
+tzdata

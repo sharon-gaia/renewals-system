@@ -9743,6 +9743,15 @@ COLLECTION_EMAIL_SUBJECT = 'בעיית גבייה בפוליסה שלך — נד
 COLLECTION_SHARON_EMAIL = os.environ.get('SHARON_EMAIL', 'sharon@gaia-ins.co.il')
 COLLECTION_REASONS = {'3': 'לא הוקמה הרשאה לחיוב בבנק', '31': 'סירוב חברת האשראי'}
 COLLECTION_MONTHS = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר']
+COLLECTION_SCAN_HOURS = (8, 12, 16)   # Israel local hours the collection scanners run (Sharon, 2026-09-08)
+
+def _israel_now():
+    """Current time in Israel (server clock is UTC). zoneinfo handles DST; fallback UTC+3."""
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.datetime.now(ZoneInfo('Asia/Jerusalem'))
+    except Exception:
+        return datetime.datetime.utcnow() + datetime.timedelta(hours=3)
 _collection_lock = threading.Lock()
 
 def _kv_get(conn, k, default=None):
@@ -10794,6 +10803,7 @@ def email_poll_thread():
     # backfill is available on demand via /api/policy/scan?days= etc. + the periodic deep scan below.
     POLL_DAYS = 4
     _cyc = [0]
+    _coll_slot = [None]   # last "date-hour" slot the collection scanners ran in
     while True:
         time.sleep(EMAIL_CONFIG['check_interval'])
         # Once an hour, widen the window as a safety net so nothing is missed after an outage.
@@ -10857,7 +10867,11 @@ def email_poll_thread():
         # Collection scanners every ~30 min only (10 cycles) — running them every cycle on top of the
         # other scanners tripped Gmail's "exceeded command or bandwidth limits" on 2026-09-08 and
         # took ALL scanners down. The 12:00 digest triggers a scan explicitly anyway.
-        if _cyc[0] % 10 == 0:
+        # Collection scanners at fixed Israel hours only — 08:00 / 12:00 / 16:00 (Sharon, 2026-09-08);
+        # once per hour-slot (the 12:00 wa-sender digest also triggers /api/collection/scan).
+        _iln = _israel_now(); _slot = f'{_iln:%Y-%m-%d}-{_iln.hour}'
+        if _iln.hour in COLLECTION_SCAN_HOURS and _coll_slot[0] != _slot:
+            _coll_slot[0] = _slot
             try:
                 cr = check_collection_returns(days_back=_days)
                 if cr:
