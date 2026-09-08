@@ -2357,12 +2357,15 @@ def api_recent_closures():
         return jsonify({'error': 'unauthorized'}), 403
     brand = request.args.get('brand', 'ווינר')
     since = request.args.get('since', '')
+    field = 'form_received_at' if request.args.get('field') == 'form_received_at' else 'status_changed_at'
+    any_status = request.args.get('any_status') == '1'
     conn = get_db()
+    status_clause = '' if any_status else "AND c.status IN ('חודש','חודש - בוצעה שיחת מכירה','הופק') "
     rows = conn.execute(
-        "SELECT c.id, c.name, c.id_number, c.phone, c.email, c.brand, c.status, c.status_changed_at, c.handled_by, m.name AS month "
+        "SELECT c.id, c.name, c.id_number, c.phone, c.email, c.brand, c.status, c.status_changed_at, c.form_received_at, c.handled_by, m.name AS month "
         "FROM customers c JOIN months m ON m.id=c.month_id "
-        "WHERE c.brand=? AND c.status IN ('חודש','חודש - בוצעה שיחת מכירה','הופק') AND COALESCE(c.status_changed_at,'') >= ? "
-        "AND COALESCE(c.import_source,'')!='test_ofir' ORDER BY c.status_changed_at", (brand, since)).fetchall()
+        f"WHERE c.brand=? {status_clause}AND COALESCE(c.{field},'') >= ? "
+        f"AND COALESCE(c.import_source,'')!='test_ofir' ORDER BY c.{field}", (brand, since)).fetchall()
     out = []
     for c in rows:
         idn = re.sub(r'\D', '', c['id_number'] or '').lstrip('0')
