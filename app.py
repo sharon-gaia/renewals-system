@@ -7025,6 +7025,10 @@ def api_scan_health():
         'policy_docs_7d': one("SELECT COUNT(*) FROM policy_documents WHERE received_at >= ?", d7),
         'last_join_lead': one("SELECT MAX(form_received_at) FROM customers WHERE import_source='join_form'"),
         'join_leads_7d': one("SELECT COUNT(*) FROM customers WHERE import_source='join_form' AND form_received_at >= ?", d7d),
+        # Gmail throttle guard state (see _GuardedIMAP4_SSL): when blocked, the scanners pause on purpose.
+        'imap_blocked_until': (_IMAP_BLOCK['until'].strftime('%Y-%m-%d %H:%M') if _imap_blocked() else None),
+        'imap_throttle_count': _IMAP_BLOCK['count'],
+        'imap_last_throttle': (_IMAP_BLOCK['last_throttle'].strftime('%Y-%m-%d %H:%M') if _IMAP_BLOCK['last_throttle'] else None),
     }
     # Scanner heartbeat: when did a scan last COMPLETE. scan_age_minutes is computed server-side
     # (avoids client timezone issues) — the watchdog uses it to detect a stalled scanner.
@@ -8049,6 +8053,80 @@ def _save_attachments(msg, customer_id):
 
 
 _email_check_lock = threading.Lock()
+
+# ── Gmail IMAP throttle guard ─────────────────────────────────────────────────────────────────
+# 2026-09-08: Gmail answered every IMAP command with "[ALERT] Account exceeded command or bandwidth
+# limits" for ~1.5h and ALL scanners kept hammering it every 3 min (which prolongs the block).
+# Every imaplib.IMAP4_SSL in this app now goes through _GuardedIMAP4_SSL: a throttle reply starts a
+# back-off (15→30→60→120 min) during which new IMAP sessions are refused locally (no Gmail traffic),
+# and Sharon gets ONE alert email per block. Visible in /api/scan-health (imap_blocked_until).
+_IMAP_BLOCK = {'until': None, 'backoff_min': 15, 'last_throttle': None, 'count': 0, 'last_error': ''}
+_IMAP_THROTTLE_MARKS = ('exceeded command or bandwidth', 'too many simultaneous connections', 'rate limit')
+
+def _imap_blocked():
+    u = _IMAP_BLOCK['until']
+    return bool(u and datetime.datetime.now() < u)
+
+def _note_throttle(e):
+    msg = str(e)
+    if not any(m in msg.lower() for m in _IMAP_THROTTLE_MARKS):
+        return
+    now = datetime.datetime.now()
+    _IMAP_BLOCK['count'] += 1
+    _IMAP_BLOCK['last_error'] = msg[:200]
+    if _imap_blocked():
+        return
+    # Escalate only if the previous block was recent; otherwise start again at 15 min.
+    if _IMAP_BLOCK['last_throttle'] and (now - _IMAP_BLOCK['last_throttle']) > datetime.timedelta(hours=3):
+        _IMAP_BLOCK['backoff_min'] = 15
+    mins = _IMAP_BLOCK['backoff_min']
+    _IMAP_BLOCK['until'] = now + datetime.timedelta(minutes=mins)
+    _IMAP_BLOCK['last_throttle'] = now
+    _IMAP_BLOCK['backoff_min'] = min(mins * 2, 120)
+    until = _IMAP_BLOCK['until'].strftime('%H:%M')
+    print(f'[imap-guard] Gmail חסם קצב — כל הסורקים בהשהיה {mins} דק׳ (עד {until} UTC)', flush=True)
+    def _alert():
+        try:
+            send_campaign_email(
+                COLLECTION_SHARON_EMAIL, f'⚠️ Gmail חסם זמנית את סורק המיילים — השהיה {mins} דק׳',
+                '<div dir="rtl" style="font-family:Arial;font-size:14px">'
+                f'<p>Gmail החזיר: <code>{msg[:160]}</code></p>'
+                f'<p>כל סורקי המייל (פוליסות, טפסים, אישורים, גבייה) מושהים {mins} דקות עד {until} (UTC) כדי לא להאריך את החסימה, ואז מנסים שוב לבד.</p>'
+                '<p>אם זה חוזר יותר מפעמיים ביום — צריך להפחית עומס (ראה זיכרון "gmail-imap-quota").</p></div>')
+        except Exception as ex:
+            print(f'[imap-guard] alert email failed: {ex}')
+    threading.Thread(target=_alert, daemon=True).start()
+
+_OrigIMAP4_SSL = imaplib.IMAP4_SSL
+
+class _GuardedIMAP4_SSL(_OrigIMAP4_SSL):
+    def __init__(self, *a, **k):
+        if _imap_blocked():
+            raise RuntimeError(f"imap-guard: Gmail בהשהיה עד {_IMAP_BLOCK['until']:%H:%M} UTC (חסימת קצב)")
+        super().__init__(*a, **k)
+
+    def _simple_command(self, name, *args):
+        try:
+            return super()._simple_command(name, *args)
+        except imaplib.IMAP4.error as e:      # includes .abort (server BYE [ALERT] ...)
+            _note_throttle(e)
+            raise
+
+    def _command_complete(self, name, tag):
+        # A throttle usually comes back as a NO response (no exception) — inspect it too.
+        try:
+            typ, dat = super()._command_complete(name, tag)
+        except imaplib.IMAP4.error as e:
+            _note_throttle(e)
+            raise
+        if typ != 'OK':
+            try:
+                _note_throttle(b' '.join(d for d in (dat or []) if isinstance(d, bytes)).decode('utf-8', 'replace'))
+            except Exception:
+                pass
+        return typ, dat
+
+imaplib.IMAP4_SSL = _GuardedIMAP4_SSL
 
 def touch_scan_heartbeat():
     """Record that the scanner is alive/progressing (last_scan_at). Called after EACH scan step
