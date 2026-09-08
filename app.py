@@ -2348,6 +2348,37 @@ def api_customer_context():
         return jsonify({'found': False})
     return jsonify({'found': True, 'name': name, 'context': ctx})
 
+@app.route('/api/policy/recent-closures')
+def api_recent_closures():
+    """Token: customers whose status became closed (חודש/הופק) since ?since=YYYY-MM-DD HH:MM for
+    ?brand=, with their latest deliverable policy document + per-channel delivery stamps — to audit
+    'did everyone who closed get their policy?'."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    brand = request.args.get('brand', 'ווינר')
+    since = request.args.get('since', '')
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT c.id, c.name, c.id_number, c.phone, c.email, c.brand, c.status, c.status_changed_at, c.handled_by, m.name AS month "
+        "FROM customers c JOIN months m ON m.id=c.month_id "
+        "WHERE c.brand=? AND c.status IN ('חודש','חודש - בוצעה שיחת מכירה','הופק') AND COALESCE(c.status_changed_at,'') >= ? "
+        "AND COALESCE(c.import_source,'')!='test_ofir' ORDER BY c.status_changed_at", (brand, since)).fetchall()
+    out = []
+    for c in rows:
+        idn = re.sub(r'\D', '', c['id_number'] or '').lstrip('0')
+        doc = conn.execute(
+            "SELECT pd.id, pd.received_at, pd.whatsapp_sent_at, pd.email_sent_at, pd.filepath, pd.r2_key, pd.policy_number, pr.doc_type_label "
+            "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? AND (pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%') "
+            "AND COALESCE(pd.whatsapp_sent_at,'')!='ארכיון' ORDER BY pd.received_at DESC, pd.id DESC LIMIT 1", (idn,)).fetchone() if idn else None
+        out.append({'id': c['id'], 'name': c['name'], 'phone': c['phone'], 'email': c['email'], 'status': c['status'],
+                    'status_changed_at': c['status_changed_at'], 'handled_by': c['handled_by'], 'month': c['month'],
+                    'doc': ({'id': doc['id'], 'received_at': doc['received_at'], 'whatsapp_sent_at': doc['whatsapp_sent_at'],
+                             'email_sent_at': doc['email_sent_at'], 'doc_type': doc['doc_type_label'],
+                             'file_available': bool((doc['filepath'] and os.path.exists(doc['filepath'])) or doc['r2_key'])} if doc else None)})
+    conn.close()
+    return jsonify({'brand': brand, 'since': since, 'count': len(out), 'items': out})
+
 @app.route('/api/daily-report')
 def api_daily_report():
     """Token-authed: the morning health-report text, computed from THIS (production) DB.
