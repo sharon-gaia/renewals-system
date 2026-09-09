@@ -9878,33 +9878,41 @@ def _parse_dina_notice(subject, body):
     """Dina Natan's per-customer bounce notice → row dict, or None for anything else (replies,
     bank-transfer confirmations, requests). Only policy/name/month/reason are read — never card data."""
     s = re.sub(r'\s+', ' ', subject or '').strip()
-    if re.match(r'^(re|תשובה|השב)\s*:', s, re.I):
-        return None
+    is_reply = bool(re.match(r'^(re|תשובה|השב)\s*:', s, re.I))
     m = re.search(r'(?<!\d)(\d{12})(?!\d)', s)
     if not m:
         return None
+    # Only Dina's NEWEST text counts: cut at the quoted thread / her boilerplate footer. A "RE:"
+    # from Dina is an ESCALATION on the same policy ("פוליסה מתבטלת ב-24/9", "יצא מכתב ראשון",
+    # "גם זה") — 2026-09-09: ליז שטח's cancellation warning was skipped because replies were ignored.
     b = re.sub(r'\s+', ' ', body or '')
-    b = b.split('סוכנים יקרים')[0]          # drop Dina's boilerplate footer
-    if not re.search(r'חזר|ללא אמצעי תשלום|מכתב (ראשון|שני)|טיפול משפטי|טרם שולם', b):
+    b = re.split(r'סוכנים יקרים|From:|מאת:|Sent:|-----Original|נשלח:', b)[0].strip()
+    NOTICE = r'חזר|ללא אמצעי תשלום|מכתב (ראשון|שני)|טיפול משפטי|טרם שולם|מתבטל|יבוטל|תתבטל|לביטול|גם זה|תזכורת|אי תשלום'
+    if not re.search(NOTICE, b):
         return None
-    if re.search(r'אישור העברה|העברה בנקאית|נא לגבות|נא לחייב|מספר כרטיס', b):
+    if re.search(r'אישור העברה|העברה בנקאית|נא לגבות|נא לחייב|מספר כרטיס|תוקף:', b):
         return None
     name = re.sub(r'(?<!\d)\d{12}(?!\d)', '', s)
-    name = re.sub(r'^(fw|fwd|העברה)\s*:\s*', '', name, flags=re.I).strip(' -:.')
+    name = re.sub(r'^(re|fw|fwd|העברה|תשובה)\s*:\s*', '', name, flags=re.I).strip(' -:.')
     mon = re.search(r'תשלום\s+(' + '|'.join(COLLECTION_MONTHS) + ')', b)
-    if 'ללא אמצעי תשלום' in b:
+    cancel = re.search(r'(?:מתבטל\w*|יבוטל|תתבטל)\s*ב-?\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)', b)
+    if cancel:
+        reason = f'הפוליסה תתבטל ב-{cancel.group(1)} בגלל אי תשלום'
+    elif 'ללא אמצעי תשלום' in b:
         reason = 'הפוליסה הופקה ללא אמצעי תשלום'
     elif re.search(r'בהו.?ק|הוראת קבע', b):
         reason = 'החיוב בהוראת הקבע חזר' + (' — לא הוקמה הרשאה' if 'הרשאה' in b else '')
     elif 'באשראי' in b:
         reason = 'סירוב חברת האשראי'
+    elif re.search(r'גם זה|תזכורת|טרם שולם', b):
+        reason = 'תזכורת מהראל — החוב טרם הוסדר'
     else:
         reason = 'החיוב חזר'
     esc = ('מכתב שני' if 'מכתב שני' in b else 'מכתב ראשון' if 'מכתב ראשון' in b
            else 'טיפול משפטי' if 'משפטי' in b else '')
     return {'policy_number': m.group(1), 'name': name, 'month': mon.group(1) if mon else '',
             'reason_code': 'dina', 'reason_desc': reason + (f' · {esc}' if esc else ''),
-            'cancel_risk': 'מועמד' in b}
+            'cancel_risk': bool(cancel) or 'מועמד' in b, 'is_reply': is_reply}
 
 def _match_return_customer(conn, r):
     """Match a returned charge to our customer — by policy number (customers, then policy
@@ -10167,13 +10175,17 @@ def _check_dina_notices_impl(days_back=14):
                         if ct == 'text/plain':
                             break
             row = _parse_dina_notice(subject, text)
+            if not row:
+                continue   # not a notice (reply of ours, bank transfer, card details…) — NOT marked, so a
+                           # parser improvement can pick it up later; the 3×/day scan makes re-parsing cheap
+            if row.get('is_reply'):
+                # An escalation on an already-known policy — its own row, keyed by the email date.
+                row['ref'] = f"dina:{row['policy_number']}:{received_at[:10]}"
+            added, dup = _ingest_returns(conn, [row], f'מייל דינה נתן — {subject[:60]}', received_at[:10],
+                                         message_id, received_at, source='dina')
             if message_id:
                 conn.execute('INSERT OR IGNORE INTO processed_leads (message_id, processed_at) VALUES (?,?)',
                              (message_id, datetime.datetime.now().isoformat()))
-            if not row:
-                conn.commit(); continue
-            added, dup = _ingest_returns(conn, [row], f'מייל דינה נתן — {subject[:60]}', received_at[:10],
-                                         message_id, received_at, source='dina')
             conn.commit()
             processed += len(added)
             batch.extend(added)
@@ -10327,6 +10339,48 @@ def api_collection_digest():
     conn.close()
     return jsonify({'new': new, 'new_count': len(new), 'open_total': counts.get('פתוח', 0),
                     'unmatched_total': counts.get('לא מזוהה', 0), 'counts': counts})
+
+@app.route('/api/collection/rescan-dina', methods=['POST'])
+def api_collection_rescan_dina():
+    """Token: re-parse Dina Natan's messages of the last ?days=N (default 21) — un-marks in
+    processed_leads every Dina message that never produced a collection row (skipped by an older
+    parser), then runs the mailbox-2 scanner. Returns what was added."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 21))
+    user, pw = os.environ.get('EMAIL2_USERNAME', '').strip(), os.environ.get('EMAIL2_PASSWORD', '').strip()
+    if not user or not pw:
+        return jsonify({'error': 'mailbox 2 not configured'}), 503
+    unmarked = 0
+    mail = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=30)
+    try:
+        mail.login(user, pw); mail.select('INBOX')
+        since = (datetime.date.today() - datetime.timedelta(days=days)).strftime('%d-%b-%Y')
+        status, data = mail.search(None, f'FROM "{COLLECTION_DINA_FROM}" SINCE {since}')
+        conn = get_db()
+        for mid in (data[0].split() if status == 'OK' else []):
+            _, hd = mail.fetch(mid, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])')
+            message_id = email_lib.message_from_bytes(hd[0][1]).get('Message-ID', '').strip()
+            if message_id and not conn.execute("SELECT 1 FROM collection_returns WHERE message_id=?", (message_id,)).fetchone():
+                unmarked += conn.execute("DELETE FROM processed_leads WHERE message_id=?", (message_id,)).rowcount
+        conn.commit(); conn.close()
+    finally:
+        try: mail.logout()
+        except Exception: pass
+    before = get_db().execute("SELECT COALESCE(MAX(id),0) FROM collection_returns").fetchone()[0]
+    if not _collection_lock.acquire(blocking=True, timeout=120):
+        return jsonify({'error': 'scanner busy'}), 409
+    try:
+        n = _check_dina_notices_impl(days)
+    finally:
+        _collection_lock.release()
+    conn = get_db()
+    _collection_reorder(conn); conn.commit()
+    items = [dict(r) for r in conn.execute(
+        "SELECT id, name, policy_number, reason_desc, status, match_source, file_date, repeat_flag FROM collection_returns WHERE id>? ORDER BY id",
+        (before,)).fetchall()]
+    conn.close()
+    return jsonify({'unmarked': unmarked, 'ingested': n, 'added': items})
 
 @app.route('/api/collection/settings', methods=['POST'])
 def api_collection_settings():
