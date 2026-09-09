@@ -10876,8 +10876,8 @@ def email_poll_thread():
             _coll_slot[0] = _slot
             try:
                 cr = check_collection_returns(days_back=_days)
-                if cr:
-                    print(f'[collection] נקלטו {cr} חיובים חוזרים')
+                # Always log the scheduled run so "did 08:00 happen?" is answerable from the logs.
+                print(f'[collection] סריקה מתוזמנת {_iln.hour:02d}:00 — {cr} חיובים חוזרים חדשים')
             except Exception as e:
                 print(f'[collection] שגיאת thread: {e}')
             touch_scan_heartbeat()
