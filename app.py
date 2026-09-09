@@ -10492,6 +10492,9 @@ def _match_payment_updates(conn=None):
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     since = (datetime.date.today() - datetime.timedelta(days=60)).isoformat()
     auto = _kv_get(conn, 'collection_forward_mode', 'manual') == 'auto'
+    # Undo matches to forms OLDER than the notice (not yet forwarded) — see the rule below.
+    conn.execute("UPDATE collection_returns SET payment_update_at=NULL, payment_update_sid=NULL, forward_requested_at=NULL "
+                 "WHERE COALESCE(payment_update_at,'')!='' AND COALESCE(forward_sent_at,'')='' AND payment_update_at < received_at")
     n = 0
     for f in conn.execute("SELECT id, id_number, phone, received_at FROM unmatched_submissions "
                           "WHERE subject LIKE '%עדכון אמצעי תשלום%' AND COALESCE(received_at,'') >= ? ORDER BY id",
@@ -10505,9 +10508,11 @@ def _match_payment_updates(conn=None):
             conds.append("REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ','') LIKE ?"); args.append('%' + ph9)
         if not conds:
             continue
+        # Only a form submitted AFTER the Harel notice counts as its resolution (an older card update
+        # from renewal time is unrelated — first run matched two such forms from July/August).
         for r in conn.execute(f"SELECT id FROM collection_returns WHERE ({' OR '.join(conds)}) "
                               "AND COALESCE(payment_update_at,'')='' AND status IN ('פתוח','נשלח','לא מזוהה') "
-                              "AND received_at >= ?", args + [since]).fetchall():
+                              "AND received_at >= ? AND received_at <= ?", args + [since, f['received_at'] or now]).fetchall():
             conn.execute("UPDATE collection_returns SET payment_update_at=?, payment_update_sid=?, approved_at=NULL, "
                          "forward_requested_at=COALESCE(forward_requested_at, ?) WHERE id=?",
                          (f['received_at'] or now, f['id'], now if auto else None, r['id']))
