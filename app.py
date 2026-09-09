@@ -9887,15 +9887,23 @@ def _parse_dina_notice(subject, body):
     # "גם זה") — 2026-09-09: ליז שטח's cancellation warning was skipped because replies were ignored.
     b = re.sub(r'\s+', ' ', body or '')
     b = re.split(r'סוכנים יקרים|From:|מאת:|Sent:|-----Original|נשלח:', b)[0].strip()
+    # Sharon (2026-09-09): "you scan and display anyway — at most it's a double check" → ingest EVERY
+    # Dina message that names a policy. Payment confirmations / card updates become INFO rows
+    # (status טופל, never sent to the customer); everything else waits for approval.
     NOTICE = r'חזר|ללא אמצעי תשלום|מכתב (ראשון|שני)|טיפול משפטי|טרם שולם|מתבטל|יבוטל|תתבטל|לביטול|גם זה|תזכורת|אי תשלום'
-    if not re.search(NOTICE, b):
-        return None
-    if re.search(r'אישור העברה|העברה בנקאית|נא לגבות|נא לחייב|מספר כרטיס|תוקף:', b):
-        return None
     name = re.sub(r'(?<!\d)\d{12}(?!\d)', '', s)
     name = re.sub(r'^(re|fw|fwd|העברה|תשובה)\s*:\s*', '', name, flags=re.I).strip(' -:.')
+    if re.search(r'אישור העברה|העברה בנקאית|נא לגבות|נא לחייב|מספר כרטיס|תוקף:|אשראי חדש|שולם|הוסדר', b):
+        return {'policy_number': m.group(1), 'name': name, 'month': '', 'reason_code': 'dina',
+                'reason_desc': 'עדכון מדינה נתן — אישור תשלום/העברה/אמצעי תשלום (מידע, לא נשלח ללקוח)',
+                'cancel_risk': False, 'is_reply': is_reply, 'info': True}
     mon = re.search(r'תשלום\s+(' + '|'.join(COLLECTION_MONTHS) + ')', b)
     cancel = re.search(r'(?:מתבטל\w*|יבוטל|תתבטל)\s*ב-?\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)', b)
+    if not re.search(NOTICE, b):
+        snippet = re.sub(r'\[cid:[^\]]*\]', '', b).strip()[:70]
+        return {'policy_number': m.group(1), 'name': name, 'month': '', 'reason_code': 'dina',
+                'reason_desc': 'הודעה מדינה נתן: ' + (snippet or '(ללא טקסט)'),
+                'cancel_risk': False, 'is_reply': is_reply}
     if cancel:
         reason = f'הפוליסה תתבטל ב-{cancel.group(1)} בגלל אי תשלום'
     elif 'ללא אמצעי תשלום' in b:
@@ -9974,19 +9982,22 @@ def _ingest_returns(conn, rows, file_name, file_date, message_id, received_at, s
             "SELECT 1 FROM collection_returns WHERE policy_number=? AND status IN ('נשלח','טופל') "
             "AND (COALESCE(wa_sent_at,'')!='' OR COALESCE(email_sent_at,'')!='') AND received_at >= ?",
             (r['policy_number'], (datetime.date.today() - datetime.timedelta(days=60)).isoformat())).fetchone() else 0
-        status = 'פתוח' if m else 'לא מזוהה'
+        info = bool(r.get('info'))
+        status = 'טופל' if info else ('פתוח' if m else 'לא מזוהה')
         cur = conn.execute(
             "INSERT INTO collection_returns (ref, policy_number, addition, name, brand, agent_number, reason_code, "
             "reason_desc, debt, amount, charge_date, card_last4, phone, period_start, period_end, harel_customer_no, "
-            "file_name, file_date, message_id, received_at, customer_id, id_number, email, match_source, status, repeat_flag) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "file_name, file_date, message_id, received_at, customer_id, id_number, email, match_source, status, repeat_flag, "
+            "resolved_at, resolved_by, resolved_note) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (ref, r['policy_number'], r.get('addition', ''), r.get('name', ''),
              r.get('brand') or m.get('brand') or 'גאיה', r.get('agent_number', ''), r.get('reason_code', ''),
              r.get('reason_desc', ''), r.get('debt', ''), r.get('amount', ''), charge, r.get('card_last4', ''),
              r.get('phone') or m.get('phone') or '', r.get('period_start', ''), r.get('period_end', ''),
              r.get('harel_customer_no', ''), file_name, file_date, message_id, received_at,
              m.get('customer_id'), m.get('id_number') or '', m.get('email') or '', m.get('source') or '',
-             status, repeat))
+             status, repeat,
+             now if info else None, 'system' if info else None, 'מידע מדינה נתן — לא נשלח ללקוח' if info else None))
         item = {'id': cur.lastrowid, 'name': r.get('name', ''), 'policy': r['policy_number'], 'status': status,
                 'reason': collection_reason_text(r.get('reason_code'), r.get('reason_desc')),
                 'brand': r.get('brand') or m.get('brand') or '', 'repeat': repeat}
@@ -10188,9 +10199,8 @@ def _check_dina_notices_impl(days_back=14):
             if not row:
                 continue   # not a notice (reply of ours, bank transfer, card details…) — NOT marked, so a
                            # parser improvement can pick it up later; the 3×/day scan makes re-parsing cheap
-            if row.get('is_reply'):
-                # An escalation on an already-known policy — its own row, keyed by the email date.
-                row['ref'] = f"dina:{row['policy_number']}:{received_at[:10]}"
+            # Every Dina message is its own row, keyed by policy + email date (escalations, info…).
+            row['ref'] = f"dina:{row['policy_number']}:{received_at[:10]}"
             added, dup = _ingest_returns(conn, [row], f'מייל דינה נתן — {subject[:60]}', received_at[:10],
                                          message_id, received_at, source='dina')
             if message_id:
