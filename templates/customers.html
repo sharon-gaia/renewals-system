@@ -117,6 +117,10 @@
   <thead>
     <tr style="background:#1a1a2e; color:#fff;">
       <th class="px-3 py-2">שם</th>
+      <th class="px-3 py-2 d-none d-md-table-cell text-nowrap">
+        <a href="{{ sort_toggle_url }}" class="text-decoration-none text-dark" title="מיון לפי תאריך יצירה">נוצר
+          {% if sort == 'created_desc' %}<i class="bi bi-sort-down"></i>{% elif sort == 'created_asc' %}<i class="bi bi-sort-up"></i>{% else %}<i class="bi bi-arrow-down-up text-muted" style="font-size:.75rem"></i>{% endif %}</a>
+      </th>
       <th class="px-3 py-2 d-none d-sm-table-cell">טלפון</th>
       <th class="px-3 py-2 d-none d-md-table-cell">מותג</th>
       <th class="px-3 py-2" style="min-width:150px">סטטוס</th>
@@ -142,6 +146,9 @@
         </div>
         <i class="bi bi-pencil-square text-secondary" style="font-size:0.85rem; flex-shrink:0"></i>
       </a>
+    </td>
+    <td class="px-3 d-none d-md-table-cell text-nowrap small text-muted" title="{{ c.created_at or '' }}">
+      {% if c.created_at %}{{ c.created_at[8:10] }}/{{ c.created_at[5:7] }} <span class="text-secondary">{{ c.created_at[11:16] }}</span>{% else %}—{% endif %}
     </td>
     <td class="px-3 d-none d-sm-table-cell">
       <a href="https://wa.me/972{{ c.phone|replace('-','')|replace('0','',1) }}" target="_blank" class="text-decoration-none">

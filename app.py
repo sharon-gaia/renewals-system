@@ -977,6 +977,16 @@ def init_db():
         conn.execute("ALTER TABLE customers ADD COLUMN card_update_email_at TEXT")
     # Simple key/value store — used for the email-scanner heartbeat ('last_scan_at').
     conn.execute("CREATE TABLE IF NOT EXISTS app_kv (k TEXT PRIMARY KEY, v TEXT)")
+    # customers.created_at (Sharon 2026-09-09: "אין שדה תאריך יצירה" — list views sort by it).
+    # Backfill: form date → status-change date → the month's load date. New rows get it by trigger.
+    if 'created_at' not in [r[1] for r in conn.execute("PRAGMA table_info(customers)").fetchall()]:
+        conn.execute("ALTER TABLE customers ADD COLUMN created_at TEXT")
+    conn.execute("""UPDATE customers SET created_at = COALESCE(NULLIF(form_received_at,''), NULLIF(status_changed_at,''),
+                    (SELECT substr(m.created_at,1,16) FROM months m WHERE m.id=customers.month_id))
+                    WHERE COALESCE(created_at,'')=''""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS customers_set_created_at AFTER INSERT ON customers
+                    WHEN NEW.created_at IS NULL OR NEW.created_at=''
+                    BEGIN UPDATE customers SET created_at=strftime('%Y-%m-%d %H:%M','now') WHERE id=NEW.id; END""")
     # Harel "קובץ חוזרים" — returned/bounced premium charges (collection problems), one row per
     # returned charge. status: פתוח | נשלח | טופל | לא מזוהה | הוחלף
     conn.execute("""CREATE TABLE IF NOT EXISTS collection_returns (
@@ -3413,14 +3423,20 @@ def customers():
         query += " AND (" + name_cond + " OR phone LIKE ? OR policy_number LIKE ?)"
         params += name_params + [like, like]
 
-    query += " ORDER BY name"
+    # Sort: a status view is a work queue → newest-created first by default (Sharon 2026-09-09), so
+    # what just arrived is on top and what's been sitting is below; ?sort=created_asc|created_desc|name.
+    sort = request.args.get('sort', '') or ('created_desc' if (status_filter or src_filter) else 'name')
+    order = {'created_desc': "COALESCE(created_at,'') DESC, name", 'created_asc': "COALESCE(created_at,'') ASC, name"}.get(sort, 'name')
+    query += f" ORDER BY {order}"
 
     conn = get_db()
     rows = conn.execute(query, params).fetchall()
     conn.close()
+    _a = request.args.to_dict(); _a['sort'] = 'created_asc' if sort == 'created_desc' else 'created_desc'
     return render_template('customers.html', customers=rows, month=month,
                            brand_filter=brand_filter, status_filter=status_filter,
-                           midwife_filter=midwife_filter, search=search,
+                           midwife_filter=midwife_filter, search=search, sort=sort,
+                           sort_toggle_url=url_for('customers', **_a),
                            statuses=STATUSES, is_archived=is_archived)
 
 @app.route('/customer/add', methods=['POST'])
