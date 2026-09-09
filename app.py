@@ -9891,11 +9891,15 @@ def _parse_dina_notice(subject, body):
     # Dina message that names a policy. Payment confirmations / card updates become INFO rows
     # (status טופל, never sent to the customer); everything else waits for approval.
     NOTICE = r'חזר|ללא אמצעי תשלום|מכתב (ראשון|שני)|טיפול משפטי|טרם שולם|מתבטל|יבוטל|תתבטל|לביטול|גם זה|תזכורת|אי תשלום'
+    if re.search(r'מענה אוטומטי|בחופש|out of office|automatic reply', s + ' ' + b, re.I):
+        return None                                  # vacation auto-replies carry no information
     name = re.sub(r'(?<!\d)\d{12}(?!\d)', '', s)
-    name = re.sub(r'^(re|fw|fwd|העברה|תשובה)\s*:\s*', '', name, flags=re.I).strip(' -:.')
-    if re.search(r'אישור העברה|העברה בנקאית|נא לגבות|נא לחייב|מספר כרטיס|תוקף:|אשראי חדש|שולם|הוסדר', b):
+    name = re.sub(r'^((re|fw|fwd|העברה|תשובה)\s*:\s*)+', '', name, flags=re.I).strip(' -:.')
+    # Settlement / payment-method updates from Dina ("בוצע", "טופל", bank transfer, new card…) are
+    # INFO — they mean the debt is being handled, and must never trigger a "you owe" message.
+    if re.search(r'אישור העברה|העברה בנקאית|נא לגבות|נא לחייב|מספר כרטיס|תוקף:|אשראי חדש|שולם|הוסדר|^\W*(הי\s*)?בוצע|^\W*טופל|נגבה|חויב', b):
         return {'policy_number': m.group(1), 'name': name, 'month': '', 'reason_code': 'dina',
-                'reason_desc': 'עדכון מדינה נתן — אישור תשלום/העברה/אמצעי תשלום (מידע, לא נשלח ללקוח)',
+                'reason_desc': 'עדכון מדינה נתן — התשלום/אמצעי התשלום טופל ("' + re.sub(r'\[cid:[^\]]*\]', '', b).strip()[:40] + '")',
                 'cancel_risk': False, 'is_reply': is_reply, 'info': True}
     mon = re.search(r'תשלום\s+(' + '|'.join(COLLECTION_MONTHS) + ')', b)
     cancel = re.search(r'(?:מתבטל\w*|יבוטל|תתבטל)\s*ב-?\s*(\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)', b)
@@ -9940,18 +9944,19 @@ def _match_return_customer(conn, r):
             "AND COALESCE(import_source,'')!='test_ofir' ORDER BY month_id DESC, id DESC LIMIT 1", (pn,)).fetchone()
         if c:
             return {'customer_id': c['id'], 'id_number': c['id_number'], 'email': c['email'] or '',
-                    'phone': c['phone'] or '', 'brand': c['brand'] or '', 'source': 'פוליסה'}
+                    'phone': c['phone'] or '', 'brand': c['brand'] or '', 'name': c['name'] or '', 'source': 'פוליסה'}
         pr = conn.execute(
-            "SELECT insured_id, email, phone_mobile FROM policy_records WHERE policy_number=? "
+            "SELECT insured_id, email, phone_mobile, insured_name FROM policy_records WHERE policy_number=? "
             "AND COALESCE(insured_id,'')!='' ORDER BY id DESC LIMIT 1", (pn,)).fetchone()
         if pr:
             c = _cust_by_id(pr['insured_id'])
-            ins = conn.execute("SELECT email, phone, brand FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
+            ins = conn.execute("SELECT email, phone, brand, name FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
                                (re.sub(r'\D', '', pr['insured_id']).lstrip('0'),)).fetchone()
             return {'customer_id': c['id'] if c else None, 'id_number': pr['insured_id'],
                     'email': (c['email'] if c and c['email'] else (ins['email'] if ins else '') or pr['email'] or ''),
                     'phone': (c['phone'] if c and c['phone'] else (ins['phone'] if ins else '') or pr['phone_mobile'] or ''),
-                    'brand': (c['brand'] if c else (ins['brand'] if ins else '')) or '', 'source': 'מסמך פוליסה'}
+                    'brand': (c['brand'] if c else (ins['brand'] if ins else '')) or '',
+                    'name': (c['name'] if c else (ins['name'] if ins else '')) or pr['insured_name'] or '', 'source': 'מסמך פוליסה'}
     ph9 = re.sub(r'\D', '', r.get('phone') or '')[-9:]
     if len(ph9) == 9:
         for tbl in ('customers', 'insureds'):
@@ -9978,6 +9983,10 @@ def _ingest_returns(conn, rows, file_name, file_date, message_id, received_at, s
                         (ref, r['policy_number'], charge)).fetchone():
             dup += 1; continue
         m = _match_return_customer(conn, r) or {}
+        # Dina's subjects aren't always "<policy> <name>" — prefer the CRM name whenever we matched.
+        if source == 'dina' and m.get('name') and (
+                not r.get('name') or re.search(r'העברה|תשלום|הוראת|מענה|FW|RE|פוליסה|חוב|:', r.get('name') or '', re.I)):
+            r['name'] = m['name']
         repeat = 1 if conn.execute(
             "SELECT 1 FROM collection_returns WHERE policy_number=? AND status IN ('נשלח','טופל') "
             "AND (COALESCE(wa_sent_at,'')!='' OR COALESCE(email_sent_at,'')!='') AND received_at >= ?",
@@ -9998,6 +10007,11 @@ def _ingest_returns(conn, rows, file_name, file_date, message_id, received_at, s
              m.get('customer_id'), m.get('id_number') or '', m.get('email') or '', m.get('source') or '',
              status, repeat,
              now if info else None, 'system' if info else None, 'מידע מדינה נתן — לא נשלח ללקוח' if info else None))
+        if info:
+            # Dina confirmed the payment was handled → close this policy's still-open notices.
+            conn.execute("UPDATE collection_returns SET status='טופל', resolved_at=?, resolved_by='system', "
+                         "resolved_note='דינה נתן אישרה שהתשלום טופל' WHERE policy_number=? AND id!=? "
+                         "AND status IN ('פתוח','לא מזוהה')", (now, r['policy_number'], cur.lastrowid))
         item = {'id': cur.lastrowid, 'name': r.get('name', ''), 'policy': r['policy_number'], 'status': status,
                 'reason': collection_reason_text(r.get('reason_code'), r.get('reason_desc')),
                 'brand': r.get('brand') or m.get('brand') or '', 'repeat': repeat}
@@ -10257,7 +10271,8 @@ def api_collection_queue():
         "AND (customer_id IS NOT NULL OR COALESCE(id_number,'')!='') ORDER BY id", brands).fetchall()
     items = []
     for r in rows:
-        if not (r['approved_at'] or (mode == 'auto' and not r['repeat_flag'])):
+        unclassified = (r['reason_desc'] or '').startswith('הודעה מדינה נתן:')
+        if not (r['approved_at'] or (mode == 'auto' and not r['repeat_flag'] and not unclassified)):
             continue
         it = _collection_item_payload(conn, r, wa_on)
         if it['whatsapp_pending'] or it['email_pending']:
@@ -10372,6 +10387,16 @@ def api_collection_rescan_dina():
     if not user or not pw:
         return jsonify({'error': 'mailbox 2 not configured'}), 503
     unmarked = 0
+    # ?reset_from=<id>: drop Dina rows created by an older parser (id >= X, never sent) so they are
+    # rebuilt by the current one — their messages are un-marked below because they no longer have rows.
+    reset_from = request.args.get('reset_from')
+    if reset_from:
+        c0 = get_db()
+        dropped = c0.execute("DELETE FROM collection_returns WHERE id>=? AND reason_code='dina' "
+                             "AND COALESCE(wa_sent_at,'')='' AND COALESCE(email_sent_at,'')=''", (int(reset_from),)).rowcount
+        c0.commit(); c0.close()
+    else:
+        dropped = 0
     mail = imaplib.IMAP4_SSL('imap.gmail.com', 993, timeout=30)
     try:
         mail.login(user, pw); mail.select('INBOX')
@@ -10400,7 +10425,7 @@ def api_collection_rescan_dina():
         "SELECT id, name, policy_number, reason_desc, status, match_source, file_date, repeat_flag FROM collection_returns WHERE id>? ORDER BY id",
         (before,)).fetchall()]
     conn.close()
-    return jsonify({'unmarked': unmarked, 'ingested': n, 'added': items})
+    return jsonify({'dropped': dropped, 'unmarked': unmarked, 'ingested': n, 'added': items})
 
 @app.route('/api/collection/settings', methods=['POST'])
 def api_collection_settings():
@@ -10530,8 +10555,10 @@ def admin_collection_approve_all():
     who = session.get('display_name') or session.get('username') or 'admin'
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     conn = get_db()
+    # Unclassified Dina text ("הודעה מדינה נתן: …") is never mass-approved — each needs an explicit click.
     n = conn.execute("UPDATE collection_returns SET approved_at=?, approved_by=? WHERE status='פתוח' AND approved_at IS NULL "
-                     "AND (customer_id IS NOT NULL OR COALESCE(id_number,'')!='') AND repeat_flag=0", (now, who)).rowcount
+                     "AND (customer_id IS NOT NULL OR COALESCE(id_number,'')!='') AND repeat_flag=0 "
+                     "AND reason_desc NOT LIKE 'הודעה מדינה נתן:%'", (now, who)).rowcount
     conn.commit(); conn.close()
     flash(f'אושרו לשליחה {n} הודעות', 'success')
     return redirect(url_for('admin_collection'))
