@@ -17,6 +17,11 @@
         <input class="form-check-input" type="checkbox" name="wa_enabled" value="1" id="waOn" {{ 'checked' if wa_on }}>
         <label class="form-check-label" for="waOn">וואטסאפ פעיל (אחרי אישור התבנית ב-Meta)</label>
       </div>
+      <select name="forward_mode" class="form-select form-select-sm" style="width:auto" title="העברת טופס עדכון אמצעי תשלום לגבייה הראל">
+        <option value="manual" {{ 'selected' if fwd_mode == 'manual' }}>העברה לגבייה — באישורי</option>
+        <option value="auto" {{ 'selected' if fwd_mode == 'auto' }}>העברה לגבייה — אוטומטית</option>
+      </select>
+      <input name="forward_to" class="form-control form-control-sm" style="width:300px" value="{{ fwd_to }}" title="נמעני ההעברה (מופרדים בפסיק)">
       <button class="btn btn-outline-primary btn-sm">שמור</button>
     </form>
     {% endif %}
@@ -38,9 +43,9 @@
 </div>
 
 <ul class="nav nav-pills mb-3 small">
-  {% for key, label in [('open','ממתין'), ('sent','נשלח'), ('unmatched','לא מזוהה'), ('resolved','טופל'), ('all','הכל')] %}
+  {% for key, label in [('open','ממתין'), ('payment','💳 עדכוני תשלום'), ('sent','נשלח'), ('unmatched','לא מזוהה'), ('resolved','טופל'), ('all','הכל')] %}
   <li class="nav-item"><a class="nav-link py-1 {{ 'active' if f == key }}" href="?f={{ key }}">{{ label }}
-    {% set n = {'open': counts.get('פתוח', 0), 'sent': counts.get('נשלח', 0), 'unmatched': counts.get('לא מזוהה', 0), 'resolved': counts.get('טופל', 0) + counts.get('הוחלף', 0), 'all': counts.values()|sum}[key] %}
+    {% set n = {'open': counts.get('פתוח', 0), 'payment': counts.get('payment', 0), 'sent': counts.get('נשלח', 0), 'unmatched': counts.get('לא מזוהה', 0), 'resolved': counts.get('טופל', 0) + counts.get('הוחלף', 0), 'all': (counts.values()|sum) - counts.get('payment', 0)}[key] %}
     <span class="badge bg-light text-dark ms-1">{{ n }}</span></a></li>
   {% endfor %}
   {% if f == 'open' and mode == 'manual' %}
@@ -86,6 +91,11 @@
             {% elif r.status == 'טופל' %}<span class="badge bg-dark">טופל</span><div class="text-muted">{{ r.resolved_note }}</div>
             {% elif r.status == 'הוחלף' %}<span class="badge bg-light text-dark border">הוחלף</span>
             {% else %}<span class="badge bg-danger">{{ r.status }}</span>{% endif %}
+            {% if r.payment_update_at %}
+              <div class="mt-1"><span class="badge bg-primary">💳 התקבל עדכון אמצעי תשלום {{ r.payment_update_at }}</span>
+                {% if r.forward_sent_at %}<div class="text-muted">הועבר לגבייה הראל {{ r.forward_sent_at }}</div>
+                {% elif r.forward_requested_at %}<div class="text-muted">ממתין להעברה לגבייה (תוך דקות)</div>{% endif %}</div>
+            {% endif %}
           </td>
           <td class="text-nowrap">
             <form method="post" action="/admin/collection/{{ r.id }}/action" class="d-inline-flex gap-1 align-items-center">
@@ -94,6 +104,10 @@
                 <button name="action" value="approve" class="btn btn-success btn-sm py-0">אשר שליחה</button>
               {% elif r.status == 'פתוח' and r.approved_at %}
                 <button name="action" value="unapprove" class="btn btn-outline-secondary btn-sm py-0">בטל אישור</button>
+              {% endif %}
+              {% if r.payment_update_at and not r.forward_sent_at %}
+                {% if r.forward_requested_at %}<button name="action" value="unforward" class="btn btn-outline-secondary btn-sm py-0">בטל העברה</button>
+                {% else %}<button name="action" value="forward" class="btn btn-primary btn-sm py-0">העבר לגבייה הראל</button>{% endif %}
               {% endif %}
               {% if r.status in ('פתוח', 'נשלח', 'לא מזוהה') %}
                 <input name="note" class="form-control form-control-sm py-0" placeholder="הערה" style="width:110px">

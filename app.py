@@ -990,6 +990,12 @@ def init_db():
         approved_at TEXT, approved_by TEXT, wa_sent_at TEXT, email_sent_at TEXT,
         resolved_at TEXT, resolved_by TEXT, resolved_note TEXT, repeat_flag INTEGER DEFAULT 0,
         UNIQUE(ref, policy_number, charge_date))""")
+    # Website "עדכון אמצעי תשלום" form cross-match (Sharon 2026-09-09): when a debtor submits the
+    # payment-update form, flag the notice and (manually / automatically) forward the form to Harel collections.
+    _cr_cols = [r[1] for r in conn.execute("PRAGMA table_info(collection_returns)").fetchall()]
+    for _c in ('payment_update_at TEXT', 'payment_update_sid INTEGER', 'forward_requested_at TEXT', 'forward_sent_at TEXT'):
+        if _c.split()[0] not in _cr_cols:
+            conn.execute(f"ALTER TABLE collection_returns ADD COLUMN {_c}")
     conn.commit()
 
     # Default admin
@@ -10344,9 +10350,10 @@ def api_collection_scan():
     _collection_reorder(conn)          # newest notice per policy wins, whatever the ingest order
     conn.commit()
     out['counts'] = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM collection_returns GROUP BY status").fetchall()}
+    _match_payment_updates(conn); conn.commit()
     out['items'] = [dict(r) for r in conn.execute(
-        "SELECT id, name, brand, policy_number, reason_code, reason_desc, status, match_source, file_date, repeat_flag "
-        "FROM collection_returns ORDER BY id").fetchall()]
+        "SELECT id, name, brand, policy_number, reason_code, reason_desc, status, match_source, file_date, repeat_flag, "
+        "payment_update_at, forward_requested_at, forward_sent_at FROM collection_returns ORDER BY id").fetchall()]
     conn.close()
     return jsonify(out)
 
@@ -10439,6 +10446,10 @@ def api_collection_settings():
         _kv_set(conn, 'collection_mode', d['mode'])
     if 'wa_enabled' in d:
         _kv_set(conn, 'collection_wa_enabled', '1' if str(d['wa_enabled']) in ('1', 'true', 'True') else '0')
+    if d.get('forward_mode') in ('manual', 'auto'):
+        _kv_set(conn, 'collection_forward_mode', d['forward_mode'])
+    if d.get('forward_to'):
+        _kv_set(conn, 'collection_forward_to', str(d['forward_to']).strip())
     conn.commit()
     out = {'mode': _kv_get(conn, 'collection_mode', 'manual'), 'whatsapp_enabled': _kv_get(conn, 'collection_wa_enabled', '0') == '1'}
     conn.close()
@@ -10469,6 +10480,115 @@ def api_collection_requeue_wa():
     conn.commit(); conn.close()
     return jsonify({'requeued': [dict(r) for r in rows], 'count': len(rows)})
 
+COLLECTION_FORWARD_DEFAULT_TO = 'dinal@veritas-ins.co.il, rivka@veritas-ins.co.il'
+
+def _match_payment_updates(conn=None):
+    """Cross-match website 'עדכון אמצעי תשלום' forms (they land in unmatched_submissions) with
+    collection notices of the last 60 days by ת"ז, then phone → stamp payment_update_at/sid on the
+    notice. In forward_mode=auto the forward to Harel collections is requested immediately
+    (Sharon: a payment update after a debt notice is by definition the resolution). DB-only."""
+    own = conn is None
+    conn = conn or get_db()
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    since = (datetime.date.today() - datetime.timedelta(days=60)).isoformat()
+    auto = _kv_get(conn, 'collection_forward_mode', 'manual') == 'auto'
+    n = 0
+    for f in conn.execute("SELECT id, id_number, phone, received_at FROM unmatched_submissions "
+                          "WHERE subject LIKE '%עדכון אמצעי תשלום%' AND COALESCE(received_at,'') >= ? ORDER BY id",
+                          (since,)).fetchall():
+        idn = re.sub(r'\D', '', f['id_number'] or '').lstrip('0')
+        ph9 = re.sub(r'\D', '', f['phone'] or '')[-9:]
+        conds, args = [], []
+        if idn:
+            conds.append("ltrim(COALESCE(id_number,''),'0')=?"); args.append(idn)
+        if len(ph9) == 9:
+            conds.append("REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ','') LIKE ?"); args.append('%' + ph9)
+        if not conds:
+            continue
+        for r in conn.execute(f"SELECT id FROM collection_returns WHERE ({' OR '.join(conds)}) "
+                              "AND COALESCE(payment_update_at,'')='' AND status IN ('פתוח','נשלח','לא מזוהה') "
+                              "AND received_at >= ?", args + [since]).fetchall():
+            conn.execute("UPDATE collection_returns SET payment_update_at=?, payment_update_sid=?, approved_at=NULL, "
+                         "forward_requested_at=COALESCE(forward_requested_at, ?) WHERE id=?",
+                         (f['received_at'] or now, f['id'], now if auto else None, r['id']))
+            n += 1
+    if own:
+        conn.commit(); conn.close()
+    return n
+
+@app.route('/api/collection/forward-queue')
+def api_collection_forward_queue():
+    """Token: payment-update forms waiting to be forwarded to Harel collections (the wa-sender sends
+    them — the server can't email from Railway)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    to = _kv_get(conn, 'collection_forward_to', COLLECTION_FORWARD_DEFAULT_TO)
+    items = []
+    for r in conn.execute("SELECT cr.id, cr.name, cr.policy_number, cr.brand, cr.payment_update_at, cr.payment_update_sid, "
+                          "us.message_id, us.subject FROM collection_returns cr LEFT JOIN unmatched_submissions us ON us.id=cr.payment_update_sid "
+                          "WHERE COALESCE(cr.forward_requested_at,'')!='' AND COALESCE(cr.forward_sent_at,'')='' ORDER BY cr.id").fetchall():
+        items.append({'id': r['id'], 'name': r['name'], 'policy_number': r['policy_number'], 'brand': r['brand'],
+                      'received_at': r['payment_update_at'], 'submission_id': r['payment_update_sid'],
+                      'message_id': r['message_id'], 'subject': r['subject'], 'to': to})
+    conn.close()
+    return jsonify({'count': len(items), 'items': items})
+
+@app.route('/api/collection/forward-eml/<int:rid>')
+def api_collection_forward_eml(rid):
+    """Token: the original form email (raw RFC822) for a forward — fetched from the main mailbox by
+    Message-ID, so the forward to Harel carries the form exactly as received."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    r = conn.execute("SELECT us.message_id FROM collection_returns cr JOIN unmatched_submissions us ON us.id=cr.payment_update_sid "
+                     "WHERE cr.id=?", (rid,)).fetchone()
+    conn.close()
+    if not r or not r['message_id']:
+        return jsonify({'error': 'no message id'}), 404
+    cfg = EMAIL_CONFIG
+    raw = None
+    try:
+        mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
+        mail.login(cfg['username'], cfg['password'])
+        for box in ('INBOX', '"[Gmail]/All Mail"', '"[Gmail]/כל הדואר"'):
+            try:
+                if mail.select(box)[0] != 'OK':
+                    continue
+                typ, data = mail.search(None, 'HEADER', 'Message-ID', f'"{r["message_id"].strip()}"')
+                if typ == 'OK' and data and data[0].split():
+                    _, full = mail.fetch(data[0].split()[0], '(BODY.PEEK[])')
+                    raw = full[0][1]; break
+            except Exception:
+                continue
+        mail.logout()
+    except Exception as e:
+        return jsonify({'error': f'imap: {type(e).__name__}'}), 502
+    if not raw:
+        return jsonify({'error': 'email not found'}), 404
+    from flask import Response
+    return Response(raw, mimetype='message/rfc822')
+
+@app.route('/api/collection/forward-sent', methods=['POST'])
+def api_collection_forward_sent():
+    """Token: the form was forwarded to Harel collections → close the notice as handled."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    rid = (request.get_json(silent=True) or {}).get('id')
+    if not rid:
+        return jsonify({'error': 'need id'}), 400
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    r = conn.execute("SELECT * FROM collection_returns WHERE id=?", (rid,)).fetchone()
+    if not r:
+        conn.close(); return jsonify({'error': 'not found'}), 404
+    conn.execute("UPDATE collection_returns SET forward_sent_at=?, status='טופל', resolved_at=?, resolved_by='system', "
+                 "resolved_note='התקבל עדכון אמצעי תשלום — הועבר לגבייה הראל' WHERE id=?", (now, now, rid))
+    idkey = event_key(r['id_number'], 'cust-%s' % (r['customer_id'] or 0))
+    log_event(conn, idkey, f"טופס עדכון אמצעי תשלום הועבר לגבייה הראל — פוליסה {r['policy_number']}", 'system', kind='collection_forward')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
 @app.route('/api/collection/status')
 def api_collection_status():
     """Token: settings + counts + whether the second mailbox is configured (names only)."""
@@ -10489,18 +10609,25 @@ def api_collection_status():
 def admin_collection():
     f = request.args.get('f', 'open')
     where = {'open': "status='פתוח'", 'sent': "status='נשלח'", 'resolved': "status IN ('טופל','הוחלף')",
-             'unmatched': "status='לא מזוהה'", 'all': '1=1'}.get(f, "status='פתוח'")
+             'unmatched': "status='לא מזוהה'", 'all': '1=1',
+             'payment': "COALESCE(payment_update_at,'')!='' AND COALESCE(forward_sent_at,'')=''"}.get(f, "status='פתוח'")
     conn = get_db()
+    _match_payment_updates(conn); conn.commit()
     rows = [dict(r) for r in conn.execute(
         f"SELECT * FROM collection_returns WHERE {where} ORDER BY id DESC LIMIT 400").fetchall()]
     counts = {r[0]: r[1] for r in conn.execute("SELECT status, COUNT(*) FROM collection_returns GROUP BY status").fetchall()}
+    counts['payment'] = conn.execute("SELECT COUNT(*) FROM collection_returns WHERE COALESCE(payment_update_at,'')!='' "
+                                     "AND COALESCE(forward_sent_at,'')=''").fetchone()[0]
     mode = _kv_get(conn, 'collection_mode', 'manual')
     wa_on = _kv_get(conn, 'collection_wa_enabled', '0') == '1'
+    fwd_mode = _kv_get(conn, 'collection_forward_mode', 'manual')
+    fwd_to = _kv_get(conn, 'collection_forward_to', COLLECTION_FORWARD_DEFAULT_TO)
     conn.close()
     for r in rows:
         r['reason'] = collection_reason_text(r['reason_code'], r['reason_desc'])
         r['sendable'] = r['status'] == 'פתוח' and (r['customer_id'] or r['id_number'])
     return render_template('collection.html', rows=rows, counts=counts, f=f, mode=mode, wa_on=wa_on,
+                           fwd_mode=fwd_mode, fwd_to=fwd_to,
                            mailbox2=bool(os.environ.get('EMAIL2_USERNAME') and os.environ.get('EMAIL2_PASSWORD')))
 
 @app.route('/admin/collection/settings', methods=['POST'])
@@ -10510,6 +10637,9 @@ def admin_collection_settings():
     conn = get_db()
     _kv_set(conn, 'collection_mode', 'auto' if request.form.get('mode') == 'auto' else 'manual')
     _kv_set(conn, 'collection_wa_enabled', '1' if request.form.get('wa_enabled') == '1' else '0')
+    _kv_set(conn, 'collection_forward_mode', 'auto' if request.form.get('forward_mode') == 'auto' else 'manual')
+    if (request.form.get('forward_to') or '').strip():
+        _kv_set(conn, 'collection_forward_to', request.form.get('forward_to').strip())
     conn.commit(); conn.close()
     flash('הגדרות בעיות הגבייה עודכנו', 'success')
     return redirect(url_for('admin_collection'))
@@ -10532,6 +10662,11 @@ def admin_collection_action(rid):
     elif act == 'reopen':
         conn.execute("UPDATE collection_returns SET status='פתוח', resolved_at=NULL, resolved_by=NULL, resolved_note=NULL, "
                      "approved_at=NULL, approved_by=NULL WHERE id=?", (rid,))
+    elif act == 'forward':
+        conn.execute("UPDATE collection_returns SET forward_requested_at=? WHERE id=? AND COALESCE(payment_update_at,'')!='' "
+                     "AND COALESCE(forward_sent_at,'')=''", (now, rid))
+    elif act == 'unforward':
+        conn.execute("UPDATE collection_returns SET forward_requested_at=NULL WHERE id=? AND COALESCE(forward_sent_at,'')=''", (rid,))
     elif act == 'relink':
         r = conn.execute("SELECT * FROM collection_returns WHERE id=?", (rid,)).fetchone()
         idn = re.sub(r'\D', '', request.form.get('id_number') or '')
@@ -10933,6 +11068,12 @@ def email_poll_thread():
         except Exception as e:
             print(f'[email-sync] שגיאת thread: {e}')
         touch_scan_heartbeat()
+        try:
+            pm = _match_payment_updates()          # DB-only cross-match of payment-update forms
+            if pm:
+                print(f'[collection] {pm} טופסי עדכון אמצעי תשלום הוצלבו עם בעיות גבייה')
+        except Exception as e:
+            print(f'[collection] payment-update match: {e}')
         try:
             n2 = check_policy_documents(days_back=_days)
             if n2:
