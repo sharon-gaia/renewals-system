@@ -28,7 +28,7 @@
   <div>
     {% if mode == 'manual' %}<strong>מצב: אישור ידני.</strong> הודעה יוצאת ללקוח רק אחרי לחיצה על "אשר שליחה".{% else %}<strong>מצב: אוטומטי.</strong> הודעה יוצאת ללקוח מיד עם קליטת הקובץ (בשעות שליחה בלבד); חיוב שחוזר שוב תוך 60 יום דורש אישור ידני.{% endif %}
     ערוצים: מייל{{ ' + וואטסאפ' if wa_on else ' בלבד (וואטסאפ כבוי עד אישור התבנית)' }}.
-    מקורות: קובץ חוזרים מהראל (אוטומטי){{ ' + הודעות דינה נתן' if mailbox2 else '' }}.
+    מקורות: קובץ חוזרים מהראל (אוטומטי){{ ' + מיילי גבייה הראל (דינה/רבקה)' if mailbox2 else '' }}.
     {% if not mailbox2 %}<span class="text-muted">· תיבת המייל השנייה (דינה נתן) עדיין לא מחוברת.</span>{% endif %}
   </div>
   <form method="post" action="/admin/collection/upload" enctype="multipart/form-data" class="d-flex gap-1 align-items-center">
@@ -76,7 +76,7 @@
           <td class="text-nowrap">{{ r.debt }}</td>
           <td class="text-nowrap">{{ r.charge_date }}</td>
           <td class="text-nowrap">{% if r.card_last4 %}•••• {{ r.card_last4 }}{% endif %}</td>
-          <td class="text-muted" title="{{ r.file_name }}">{{ 'דינה נתן' if r.reason_code == 'dina' else 'קובץ הראל' }} {{ r.file_date }}</td>
+          <td class="text-muted" title="{{ r.file_name }}">{{ 'גבייה הראל (דינה/רבקה)' if r.reason_code == 'dina' else 'קובץ הראל' }} {{ r.file_date }}</td>
           <td>{% if r.match_source %}<span class="badge bg-light text-dark border">{{ r.match_source }}</span>{% else %}<span class="badge bg-danger">לא מזוהה</span>{% endif %}</td>
           <td class="text-nowrap">
             {% if r.status == 'פתוח' %}
