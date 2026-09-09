@@ -10018,6 +10018,16 @@ def _collection_reorder(conn, policy_number=None, now=None):
         if not cand:
             continue
         newest = max(cand, key=key)
+        # Carry a cancellation deadline forward: a later "תזכורת" must not hide "תתבטל ב-24/9".
+        nr = conn.execute("SELECT reason_desc FROM collection_returns WHERE id=?", (newest['id'],)).fetchone()
+        if nr and 'תתבטל' not in (nr['reason_desc'] or ''):
+            older = conn.execute("SELECT reason_desc FROM collection_returns WHERE policy_number=? AND id!=? "
+                                 "AND reason_desc LIKE '%תתבטל%' ORDER BY id DESC LIMIT 1", (pn, newest['id'])).fetchone()
+            if older:
+                cut = re.search(r'הפוליסה תתבטל ב-[\d./]+ בגלל אי תשלום', older['reason_desc'] or '')
+                if cut:
+                    conn.execute("UPDATE collection_returns SET reason_desc=? WHERE id=?",
+                                 (f"{cut.group(0)} · {nr['reason_desc']}", newest['id']))
         # A notice already sent/handled that is NEWER than the candidate supersedes it as well —
         # never reopen an old notice just because its newer sibling was delivered.
         later_done = any(key(r) > key(newest) and r['status'] in ('נשלח', 'טופל') for r in rows)
