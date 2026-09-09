@@ -69,7 +69,8 @@
               </span>
             </td>
           </tr>
-          <tr><th>פוליסה</th><td>{{ c.policy_number or '—' }}</td></tr>
+          <tr><th>פוליסה</th><td>{{ c.policy_number or '—' }}{% if c.policy_number %}
+                <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline" onclick="copyField(this)" data-copy="{{ c.policy_number }}" title="העתק מספר פוליסה"><i class="bi bi-clipboard"></i></button>{% endif %}</td></tr>
           <tr><th>ת.ז</th>
             <td class="inline-edit" data-field="id_number">
               <span class="ie-view">{{ c.id_number or '—' }}
