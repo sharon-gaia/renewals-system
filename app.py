@@ -10692,6 +10692,23 @@ def api_wa_inbound_doc():
     return jsonify({'ok': True, 'id': sid, 'category': meta['category'], 'matched': bool(idn),
                     'stored_doc': bool(doc_key)})
 
+@app.route('/api/wa/inbound-list')
+def api_wa_inbound_list():
+    """Token: WhatsApp-forwarded inbound rows (cert_add / insurance_cert) of the last ?days=N, for
+    verification. Never returns card data."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 7))
+    since = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, received_at, subject, name, id_number, phone, status, doc_filename, "
+        "CASE WHEN COALESCE(doc_r2_key,'')!='' THEN 1 ELSE 0 END AS has_doc, message_id "
+        "FROM unmatched_submissions WHERE subject LIKE 'וואטסאפ | %' AND received_at >= ? ORDER BY id DESC",
+        (since,)).fetchall()]
+    conn.close()
+    return jsonify({'count': len(rows), 'items': rows})
+
 @app.route('/api/wa/inbound-doc/retract', methods=['POST'])
 def api_wa_inbound_doc_retract():
     """Token: remove a WhatsApp inbound the bot forwarded by mistake (by wamid), incl. its R2 object."""
