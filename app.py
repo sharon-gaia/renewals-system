@@ -10709,6 +10709,28 @@ def api_wa_inbound_list():
     conn.close()
     return jsonify({'count': len(rows), 'items': rows})
 
+@app.route('/api/wa/inbound-digest', methods=['POST'])
+def api_wa_inbound_digest():
+    """Token: WhatsApp inbound rows added since the last digest (id watermark in app_kv). The
+    wa-sender calls this on a slow cadence and emails Sharon ONE summary only when there are new
+    ones — no per-item email, no Gmail/IMAP load. ?peek=1 doesn't advance the watermark."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    last = int(_kv_get(conn, 'wa_inbound_last_digest_id', '0') or 0)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, received_at, subject, name, id_number, phone, "
+        "CASE WHEN COALESCE(doc_r2_key,'')!='' THEN 1 ELSE 0 END AS has_doc "
+        "FROM unmatched_submissions WHERE subject LIKE 'וואטסאפ | %' AND id>? AND status!='טופל' ORDER BY id",
+        (last,)).fetchall()]
+    for r in rows:
+        r['category'] = guess_category(r['subject'], 'form')
+    max_id = conn.execute("SELECT COALESCE(MAX(id),0) FROM unmatched_submissions WHERE subject LIKE 'וואטסאפ | %'").fetchone()[0]
+    if request.args.get('peek') != '1' and rows:
+        _kv_set(conn, 'wa_inbound_last_digest_id', max_id); conn.commit()
+    conn.close()
+    return jsonify({'new_count': len(rows), 'items': rows})
+
 @app.route('/api/wa/inbound-doc/retract', methods=['POST'])
 def api_wa_inbound_doc_retract():
     """Token: remove a WhatsApp inbound the bot forwarded by mistake (by wamid), incl. its R2 object."""
