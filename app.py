@@ -126,6 +126,8 @@ GW_STATUS_OPTIONS = [
     ('חודש', 'חודש ✓'),
     ('חודש - בוצעה שיחת מכירה', 'חודש - בוצעה שיחת מכירה ✓'),
     ('התקבל חידוש - כ.א לא תקין', '⚠️ התקבל חידוש - כ.א לא תקין'),
+    ('בתהליך הפקה - חוסר גביה', '🔧 בתהליך הפקה - חוסר גביה'),
+    ('בתהליך הפקה - חוסר תעודה', '🔧 בתהליך הפקה - חוסר תעודה'),
     ('נוצר קשר עם לקוח', 'נוצר קשר עם לקוח'),
     ('ממתין לחידוש', 'ממתין לחידוש'),
     ('המשך טיפול בוואטסאפ', 'המשך טיפול בוואטסאפ'),
@@ -9816,7 +9818,12 @@ def _scan_rest_now(now_il):
             last = nxt
         else:
             break
-    if today == last and now_il.hour >= 20:
+    # Resume at מוצאי: 21:00 in summer (DST — Shabbat ends late), 20:00 in winter (Sharon 2026-09-10).
+    try:
+        resume_h = 21 if now_il.dst() else 20
+    except Exception:
+        resume_h = 20
+    if today == last and now_il.hour >= resume_h:
         return False           # motzaei shabbat/chag — resume
     return True
 
