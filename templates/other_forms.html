@@ -118,6 +118,11 @@
               {% if item.full.comments %}
               <div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">{{ item.full.comments }}</div>
               {% endif %}
+              {% if item.full.doc_r2_key %}
+              <a href="/admin/other-forms/{{ item.full.id }}/wa-doc" target="_blank" class="btn btn-sm btn-primary mt-2">
+                <i class="bi bi-file-earmark-arrow-down me-1"></i>צפייה במסמך שהתקבל בוואטסאפ{% if item.full.doc_filename %} ({{ item.full.doc_filename }}){% endif %}
+              </a>
+              {% endif %}
             {% endif %}
           </div>
         </td>

@@ -1006,6 +1006,12 @@ def init_db():
     for _c in ('payment_update_at TEXT', 'payment_update_sid INTEGER', 'forward_requested_at TEXT', 'forward_sent_at TEXT'):
         if _c.split()[0] not in _cr_cols:
             conn.execute(f"ALTER TABLE collection_returns ADD COLUMN {_c}")
+    # WhatsApp inbound docs the bot forwards (Sharon 2026-09-10): certificate additions +
+    # insurance-certificate requests → the "טפסים שאינם חידושים" tab, so they aren't chased in WhatsApp.
+    _us_cols = [r[1] for r in conn.execute("PRAGMA table_info(unmatched_submissions)").fetchall()]
+    for _c in ('doc_r2_key TEXT', 'doc_filename TEXT'):
+        if _c.split()[0] not in _us_cols:
+            conn.execute(f"ALTER TABLE unmatched_submissions ADD COLUMN {_c}")
     conn.commit()
 
     # Default admin
@@ -3893,9 +3899,18 @@ def lead_doc_view(cid):
                 f"<b>מסמך {idn}</b>.</div>"), 404
     return send_file(r['lead_doc_path'], download_name=os.path.basename(r['lead_doc_path']))
 
+WA_DOC_TYPES = {
+    'cert_add':      {'subject': 'וואטסאפ | הוספת תעודה',      'category': 'הוספת תעודה'},
+    'insurance_cert': {'subject': 'וואטסאפ | בקשת אישור ביטוח', 'category': 'בקשת אישור ביטוח'},
+}
+
 def guess_category(subject, source):
     """Rough auto-tag for the 'other forms' catch-all — a hint, not a strict classifier."""
     text = subject or ''
+    if 'הוספת תעודה' in text:
+        return 'הוספת תעודה'
+    if 'אישור ביטוח' in text or 'אישור קיום' in text:
+        return 'בקשת אישור ביטוח'
     if any(k in text for k in ['כרטיס אשראי', 'אשראי', 'עדכון פרטי תשלום', 'שינוי אמצעי']):
         return 'עדכון אמצעי תשלום'
     if source == 'policy':
@@ -10609,6 +10624,93 @@ def api_collection_forward_sent():
     log_event(conn, idkey, f"טופס עדכון אמצעי תשלום הועבר לגבייה הראל — פוליסה {r['policy_number']}", 'system', kind='collection_forward')
     conn.commit(); conn.close()
     return jsonify({'ok': True})
+
+@app.route('/api/wa/inbound-doc', methods=['POST'])
+def api_wa_inbound_doc():
+    """Token: the bot forwards a WhatsApp inbound that isn't a renewal — a certificate the customer
+    sent to add to their policy (type=cert_add) or an insurance-certificate request
+    (type=insurance_cert) — so it shows in the 'טפסים שאינם חידושים' tab instead of being chased in
+    WhatsApp (Sharon 2026-09-10). Accepts multipart (with an optional `file`) or JSON. Matches the
+    customer by phone. Idempotent on `wamid`. The attachment is streamed to the R2 archive."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.form if request.form else (request.get_json(silent=True) or {})
+    typ = (d.get('type') or '').strip()
+    if typ not in WA_DOC_TYPES:
+        return jsonify({'error': "type must be cert_add | insurance_cert"}), 400
+    phone = re.sub(r'\D', '', str(d.get('phone') or ''))
+    if not phone:
+        return jsonify({'error': 'need phone'}), 400
+    wamid = (d.get('wamid') or '').strip()
+    mid = 'wa:' + wamid if wamid else 'wa:%s:%s:%s' % (typ, phone, datetime.datetime.now().strftime('%Y%m%d%H%M%S'))
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    if conn.execute("SELECT id FROM unmatched_submissions WHERE message_id=?", (mid,)).fetchone():
+        conn.close(); return jsonify({'ok': True, 'duplicate': True})
+    # Match the sender to a customer/insured by phone (last 9) for name/ת"ז + the "open file" action.
+    ph9 = phone[-9:]
+    cust = conn.execute(
+        "SELECT id_number, name, brand, email FROM customers WHERE "
+        "REPLACE(REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ',''),'+972','0') LIKE ? "
+        "AND COALESCE(import_source,'')!='test_ofir' ORDER BY month_id DESC, id DESC LIMIT 1", ('%' + ph9,)).fetchone()
+    if not cust:
+        cust = conn.execute(
+            "SELECT id_number, name, brand, email FROM insureds WHERE "
+            "REPLACE(REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ',''),'+972','0') LIKE ? ORDER BY id DESC LIMIT 1",
+            ('%' + ph9,)).fetchone()
+    name = (d.get('name') or (cust['name'] if cust else '') or '').strip()
+    idn = (cust['id_number'] if cust else '') or ''
+    brand = (d.get('brand') or (cust['brand'] if cust else '') or '').strip()
+    email = (cust['email'] if cust else '') or ''
+    comments = (d.get('text') or d.get('comments') or '').strip()
+    meta = WA_DOC_TYPES[typ]
+    # Optional attachment → R2 (durable, server-side stream; never on the small Railway volume).
+    doc_key = doc_name = None
+    f = request.files.get('file') if request.files else None
+    if f and f.filename:
+        raw = f.read()
+        ext = os.path.splitext(f.filename)[1].lower() or '.pdf'
+        doc_name = re.sub(r'[\r\n/\\]+', ' ', f.filename).strip()[:120]
+        key = f'wa-inbound/{ph9}/{re.sub(r"[^A-Za-z0-9]", "", wamid) or datetime.datetime.now().strftime("%Y%m%d%H%M%S")}{ext}'
+        c, b = _r2()
+        if c:
+            try:
+                c.put_object(Bucket=b, Key=key, Body=raw,
+                             ContentType=f.mimetype or 'application/octet-stream')
+                doc_key = key
+            except Exception as e:
+                print(f'[wa-inbound] R2 put failed: {type(e).__name__}', flush=True)
+    conn.execute(
+        "INSERT INTO unmatched_submissions (received_at, subject, name, id_number, phone, email, brand, "
+        "comments, message_id, doc_r2_key, doc_filename, status) VALUES (?,?,?,?,?,?,?,?,?,?,?, 'ממתין')",
+        (now, meta['subject'], name, idn, phone, email, brand, comments, mid, doc_key, doc_name))
+    sid = conn.execute("SELECT id FROM unmatched_submissions WHERE message_id=?", (mid,)).fetchone()['id']
+    if idn:
+        log_event(conn, event_key(idn, 'sub-%d' % sid),
+                  f"התקבל בוואטסאפ: {meta['category']}" + (f" — {doc_name}" if doc_name else ''), 'system', kind='wa_inbound')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'id': sid, 'category': meta['category'], 'matched': bool(idn),
+                    'stored_doc': bool(doc_key)})
+
+@app.route('/admin/other-forms/<int:sid>/wa-doc')
+@login_required
+@admin_required
+def other_forms_wa_doc(sid):
+    """Stream a WhatsApp-forwarded document (certificate / cert request) from the R2 archive."""
+    conn = get_db()
+    r = conn.execute("SELECT doc_r2_key, doc_filename FROM unmatched_submissions WHERE id=?", (sid,)).fetchone()
+    conn.close()
+    if not r or not r['doc_r2_key']:
+        return 'אין מסמך', 404
+    data = _r2_fetch(r['doc_r2_key'])
+    if not data:
+        return 'המסמך אינו זמין', 404
+    name = r['doc_filename'] or 'document'
+    ext = os.path.splitext(name)[1].lower()
+    mimes = {'.pdf': 'application/pdf', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png'}
+    return send_file(io.BytesIO(data), download_name=name,
+                     mimetype=mimes.get(ext, 'application/octet-stream'),
+                     as_attachment=ext not in ('.pdf', '.jpg', '.jpeg', '.png'))
 
 @app.route('/api/collection/status')
 def api_collection_status():
