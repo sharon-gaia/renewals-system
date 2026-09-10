@@ -10692,6 +10692,27 @@ def api_wa_inbound_doc():
     return jsonify({'ok': True, 'id': sid, 'category': meta['category'], 'matched': bool(idn),
                     'stored_doc': bool(doc_key)})
 
+@app.route('/api/wa/inbound-doc/retract', methods=['POST'])
+def api_wa_inbound_doc_retract():
+    """Token: remove a WhatsApp inbound the bot forwarded by mistake (by wamid), incl. its R2 object."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    wamid = ((request.get_json(silent=True) or {}).get('wamid') or '').strip()
+    if not wamid:
+        return jsonify({'error': 'need wamid'}), 400
+    conn = get_db()
+    r = conn.execute("SELECT id, doc_r2_key FROM unmatched_submissions WHERE message_id=?", ('wa:' + wamid,)).fetchone()
+    if not r:
+        conn.close(); return jsonify({'ok': True, 'not_found': True})
+    if r['doc_r2_key']:
+        c, b = _r2()
+        if c:
+            try: c.delete_object(Bucket=b, Key=r['doc_r2_key'])
+            except Exception: pass
+    conn.execute("DELETE FROM unmatched_submissions WHERE id=?", (r['id'],))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'deleted': r['id']})
+
 @app.route('/admin/other-forms/<int:sid>/wa-doc')
 @login_required
 @admin_required
