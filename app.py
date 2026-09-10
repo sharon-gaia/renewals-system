@@ -9782,6 +9782,44 @@ COLLECTION_REASONS = {'3': 'לא הוקמה הרשאה לחיוב בבנק', '31
 COLLECTION_MONTHS = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני', 'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר']
 COLLECTION_SCAN_HOURS = (8, 12, 16)   # Israel local hours the collection scanners run (Sharon, 2026-09-08)
 
+_REST_CACHE = {'dates': set(), 'at': 0.0}
+
+def _rest_dates():
+    """Set of holiday dates (YYYY-MM-DD) from no_send_dates, cached 1h to avoid a DB hit per cycle."""
+    now = time.time()
+    if now - _REST_CACHE['at'] > 3600:
+        try:
+            c = get_db()
+            _REST_CACHE['dates'] = {r[0] for r in c.execute("SELECT date FROM no_send_dates").fetchall()}
+            c.close(); _REST_CACHE['at'] = now
+        except Exception:
+            pass
+    return _REST_CACHE['dates']
+
+def _scan_rest_now(now_il):
+    """True when email scanning should pause (Sharon 2026-09-10: no scans Fri/Sat + holidays; resume
+    only at מוצאי שבת/חג). A rest day = Friday, Saturday, or a no_send_dates holiday. On the LAST day
+    of a consecutive rest run, scanning resumes at 20:00 (מוצאי). Everything the scan would have
+    caught is picked up by the incremental UID scan the moment it resumes; nothing is sent at night
+    anyway."""
+    hol = _rest_dates()
+    def is_rest(d):
+        return d.weekday() in (4, 5) or d.strftime('%Y-%m-%d') in hol   # Fri=4, Sat=5
+    today = now_il.date()
+    if not is_rest(today):
+        return False
+    # Walk to the last consecutive rest day; resume at 20:00 of that day (motzaei).
+    last = today
+    for _ in range(12):
+        nxt = last + datetime.timedelta(days=1)
+        if is_rest(nxt):
+            last = nxt
+        else:
+            break
+    if today == last and now_il.hour >= 20:
+        return False           # motzaei shabbat/chag — resume
+    return True
+
 def _israel_now():
     """Current time in Israel (server clock is UTC). zoneinfo handles DST; fallback UTC+3."""
     try:
@@ -11230,6 +11268,17 @@ def email_poll_thread():
         time.sleep(NIGHT_INTERVAL if (_h >= 21 or _h < 7) else EMAIL_CONFIG['check_interval'])
         # Once an hour, widen the window as a safety net so nothing is missed after an outage.
         _cyc[0] += 1
+        # Shabbat / holiday rest: no email scanning Fri/Sat + no_send_dates holidays; resume only at
+        # מוצאי שבת/חג (Sharon 2026-09-10). Heartbeat still ticks so the watchdog stays calm; the
+        # incremental UID scan catches everything up the moment it resumes. Payment-update matching
+        # (DB-only, no Gmail) still runs so nothing stalls.
+        if _scan_rest_now(_israel_now()):
+            touch_scan_heartbeat()
+            try: _match_payment_updates()
+            except Exception: pass
+            if _cyc[0] % 6 == 1:
+                print(f'[scan] מנוחת שבת/חג — סריקות מושהות (חידוש במוצאי שבת/חג)', flush=True)
+            continue
         # Cadence is interval-relative (10-min cycles since 2026-09-08): hourly 21-day sweep (the
         # safety net behind the UID watermarks), daily disk cleanup, low-urgency scanners every 2nd cycle.
         _per_hour = max(1, int(3600 / EMAIL_CONFIG['check_interval']))
