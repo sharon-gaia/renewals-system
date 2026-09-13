@@ -10737,6 +10737,50 @@ def api_wa_inbound_doc():
     return jsonify({'ok': True, 'id': sid, 'category': meta['category'], 'matched': bool(idn),
                     'stored_doc': bool(doc_key)})
 
+@app.route('/api/admin/form-institutions')
+def api_form_institutions():
+    """Token: distinct values customers filled in the form's institution field ("מוסד / ארגון" and
+    close variants), with counts — the input list for building the certificate-reading system.
+    Scans every stored form: customers.lead_form_json + unmatched_submissions.raw_fields."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    KEYS = ('מוסד / ארגון', 'מוסד הסמכה', 'מוסד', 'מוסד לימודים', 'שם הארגון', 'מוסד לימוד')
+    from collections import Counter
+    counts, examples = Counter(), {}
+    def take(js):
+        if not js:
+            return
+        try:
+            f = json.loads(js)
+        except Exception:
+            return
+        if not isinstance(f, dict):
+            return
+        for k in KEYS:
+            v = f.get(k)
+            if v is None:
+                continue
+            v = re.sub(r'\s+', ' ', str(v)).strip()
+            if not v or v in ('—', '-', 'לא', 'אין', 'ללא'):
+                continue
+            counts[v] += 1
+            examples.setdefault(v, k)
+            break     # one institution value per form (first matching key)
+    conn = get_db()
+    try:
+        for r in conn.execute("SELECT lead_form_json FROM customers WHERE COALESCE(lead_form_json,'')!=''").fetchall():
+            take(r['lead_form_json'])
+    except Exception:
+        pass
+    try:
+        for r in conn.execute("SELECT raw_fields FROM unmatched_submissions WHERE COALESCE(raw_fields,'')!=''").fetchall():
+            take(r['raw_fields'])
+    except Exception:
+        pass
+    conn.close()
+    items = [{'institution': k, 'count': c, 'field': examples.get(k)} for k, c in counts.most_common()]
+    return jsonify({'distinct': len(items), 'total_filled': sum(counts.values()), 'items': items})
+
 @app.route('/api/wa/inbound-list')
 def api_wa_inbound_list():
     """Token: WhatsApp-forwarded inbound rows (cert_add / insurance_cert) of the last ?days=N, for
