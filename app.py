@@ -11171,7 +11171,7 @@ def api_wa_inbound_list():
     since = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
     conn = get_db()
     rows = [dict(r) for r in conn.execute(
-        "SELECT id, received_at, subject, name, id_number, phone, status, doc_filename, "
+        "SELECT id, received_at, subject, name, id_number, phone, status, doc_filename, comments, admin_note, "
         "CASE WHEN COALESCE(doc_r2_key,'')!='' THEN 1 ELSE 0 END AS has_doc, message_id "
         "FROM unmatched_submissions WHERE subject LIKE 'וואטסאפ | %' AND received_at >= ? ORDER BY id DESC",
         (since,)).fetchall()]
