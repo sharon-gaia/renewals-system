@@ -11088,6 +11088,14 @@ def api_wa_inbound_doc():
     brand = (d.get('brand') or (cust['brand'] if cust else '') or '').strip()
     email = (cust['email'] if cust else '') or ''
     comments = (d.get('text') or d.get('comments') or '').strip()
+    # Safety net over the bot's classification: it labels ANY attached document as cert_add, but most
+    # of those are certificate-of-insurance requests (Sharon 2026-09-14 — "אישור קיום ביטוח זה תור
+    # בפני עצמו"). If what the customer wrote/attached says so explicitly, route it to that queue.
+    _hay = f"{comments} {(request.files.get('file').filename if request.files.get('file') else '')}"
+    if typ == 'cert_add' and any(k in _hay for k in
+                                 ('אישור ביטוח', 'אישור קיום', 'א.ק.ב', 'אק"ב', 'חתום לטובת',
+                                  'תחתמו', 'לחתום על האישור', 'אישור על קיום')):
+        typ = 'insurance_cert'
     meta = WA_DOC_TYPES[typ]
     # Optional attachment → R2 (durable, server-side stream; never on the small Railway volume).
     doc_key = doc_name = None
