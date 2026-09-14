@@ -664,7 +664,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS group_owner_policies (
             doc_id INTEGER PRIMARY KEY, id_number TEXT, name TEXT, owner TEXT, owner_phone TEXT,
             brand TEXT, policy_number TEXT, received_at TEXT, redacted_key TEXT, redacted_at TEXT,
-            redact_areas INTEGER, approved_at TEXT, approved_by TEXT, sent_at TEXT, skipped_at TEXT
+            redact_areas INTEGER, approved_at TEXT, approved_by TEXT, sent_at TEXT, skipped_at TEXT,
+            custom_message TEXT
         );
         -- (each policy of a therapist insured by a centre is price-redacted, held for approval,
         --  then forwarded to the owner — Sharon 2026-09-14)
@@ -1023,6 +1024,8 @@ def init_db():
             conn.execute(f"ALTER TABLE collection_returns ADD COLUMN {_c}")
     # WhatsApp inbound docs the bot forwards (Sharon 2026-09-10): certificate additions +
     # insurance-certificate requests → the "טפסים שאינם חידושים" tab, so they aren't chased in WhatsApp.
+    if 'custom_message' not in [r[1] for r in conn.execute("PRAGMA table_info(group_owner_policies)").fetchall()]:
+        conn.execute("ALTER TABLE group_owner_policies ADD COLUMN custom_message TEXT")
     _us_cols = [r[1] for r in conn.execute("PRAGMA table_info(unmatched_submissions)").fetchall()]
     for _c in ('doc_r2_key TEXT', 'doc_filename TEXT',
                # cert-add → "טופל ושליחה בוואטסאפ": send the updated policy after issuance (Sharon 2026-09-14)
@@ -3106,7 +3109,9 @@ def api_group_owner_send_queue():
          'owner_phone': _policy_to972(r['owner_phone']), 'brand_key': _wa_brand_key(r['brand'] or ''),
          'policy_number': r['policy_number'], 'pdf_url': f"/api/group-owner/redacted/{r['doc_id']}",
          'filename': f"{r['name']} - פוליסה.pdf",
-         'caption': f"שלום, מצורפת הפוליסה של {r['name']} 📄\n{_seasonal_line()}"} for r in rows]})
+         # Sharon's own wording when he typed one at approval time, else the standard line.
+         'caption': (r['custom_message'] or '').strip()
+                    or f"שלום, מצורפת הפוליסה של {r['name']} 📄\n{_seasonal_line()}"} for r in rows]})
 
 @app.route('/api/group-owner/policy-sent', methods=['POST'])
 def api_group_owner_policy_sent():
@@ -3184,9 +3189,11 @@ def special_tracks_action(doc_id, action):
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     conn = get_db()
     if action == 'approve':
-        conn.execute("UPDATE group_owner_policies SET approved_at=?, approved_by=? WHERE doc_id=? AND COALESCE(sent_at,'')=''",
-                     (now, who, doc_id))
-        flash('אושר — הפוליסה (ללא מחיר) תישלח למרכז בריצה הקרובה', 'success')
+        msg = (request.form.get('custom_message') or '').strip()[:900]
+        conn.execute("UPDATE group_owner_policies SET approved_at=?, approved_by=?, custom_message=? "
+                     "WHERE doc_id=? AND COALESCE(sent_at,'')=''", (now, who, msg or None, doc_id))
+        flash('אושר — הפוליסה (ללא מחיר) תישלח למרכז בריצה הקרובה' +
+              (' עם ההודעה האישית שכתבת' if msg else ''), 'success')
     elif action == 'unapprove':
         conn.execute("UPDATE group_owner_policies SET approved_at=NULL, approved_by=NULL WHERE doc_id=? AND COALESCE(sent_at,'')=''", (doc_id,))
     elif action == 'skip':

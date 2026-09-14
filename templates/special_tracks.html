@@ -57,14 +57,17 @@
             </a>
             {% endif %}
             {% if not p.approved_at %}
-            <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/approve" class="d-inline"
+            <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/approve" class="d-inline-block align-top"
                   onsubmit="return confirm('לאשר שליחת הפוליסה (ללא מחיר) ל{{ p.owner }}?{{ '' if send_on else ' — שים לב: מתג השליחה כבוי, זה רק יסמן כמאושר.' }}')">
+              <textarea name="custom_message" rows="3" class="form-control form-control-sm mb-1" style="min-width:270px"
+                        placeholder="הודעה אישית ל{{ p.owner }} (אופציונלי — אם תשאיר ריק יישלח נוסח סטנדרטי)">היי {{ p.owner.split(' ')[0] }}, מצורפת הפוליסה של {{ p.name }}, ללא הצגת המחיר.</textarea>
               <button class="btn btn-success btn-sm py-0">{{ 'אשר ושלח' if send_on else 'אשר (לא יישלח — מתג כבוי)' }}</button>
             </form>
             {% else %}
             <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/unapprove" class="d-inline">
               <button class="btn btn-outline-secondary btn-sm py-0">בטל אישור</button>
             </form>
+            {% if p.custom_message %}<div class="small text-muted mt-1" style="max-width:280px"><i class="bi bi-chat-left-text me-1"></i>{{ p.custom_message }}</div>{% endif %}
             {% endif %}
             <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/skip" class="d-inline">
               <button class="btn btn-outline-danger btn-sm py-0" title="לא לשלוח">הסר</button>
