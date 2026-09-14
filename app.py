@@ -1011,7 +1011,9 @@ def init_db():
     # WhatsApp inbound docs the bot forwards (Sharon 2026-09-10): certificate additions +
     # insurance-certificate requests → the "טפסים שאינם חידושים" tab, so they aren't chased in WhatsApp.
     _us_cols = [r[1] for r in conn.execute("PRAGMA table_info(unmatched_submissions)").fetchall()]
-    for _c in ('doc_r2_key TEXT', 'doc_filename TEXT'):
+    for _c in ('doc_r2_key TEXT', 'doc_filename TEXT',
+               # cert-add → "טופל ושליחה בוואטסאפ": send the updated policy after issuance (Sharon 2026-09-14)
+               'wa_send_requested_at TEXT', 'wa_send_by TEXT', 'wa_sent_at TEXT', 'wa_send_doc_id INTEGER'):
         if _c.split()[0] not in _us_cols:
             conn.execute(f"ALTER TABLE unmatched_submissions ADD COLUMN {_c}")
     conn.commit()
@@ -3938,11 +3940,21 @@ def other_forms():
                    "AND COALESCE(email,'') != 'monitor-check@example.com' "
                    "AND COALESCE(name,'') != 'MONITOR-CHECK-DO-NOT-PROCESS' ")
     show = request.args.get('show', 'active')
-    wanted = {'done': ('טופל',), 'all': FORM_QUEUE_STATUSES}.get(show, ('ממתין', 'בטיפול'))
-    ph = ','.join('?' * len(wanted))
+    WA = "וואטסאפ | %"
+    # "בקשות לקוח — טופל": handled WhatsApp-inbound requests (cert additions / insurance-cert), filed
+    # away after handling/sending so the active queue stays clean (Sharon 2026-09-14). The generic
+    # "טופלו" tab keeps the rest; pending WhatsApp requests still show in 'active'.
+    if show == 'customer_done':
+        where, params = "status='טופל' AND subject LIKE ? ", [WA]
+    elif show == 'done':
+        where, params = "status='טופל' AND subject NOT LIKE ? ", [WA]
+    elif show == 'all':
+        where, params = "status IN (%s) " % ','.join('?' * len(FORM_QUEUE_STATUSES)), list(FORM_QUEUE_STATUSES)
+    else:
+        where, params = "status IN ('ממתין','בטיפול') ", []
     for r in conn.execute(
-        f"SELECT * FROM unmatched_submissions WHERE status IN ({ph}) " + not_monitor + bc +
-        " ORDER BY received_at DESC", list(wanted) + bp
+        f"SELECT * FROM unmatched_submissions WHERE {where}" + not_monitor + bc +
+        " ORDER BY received_at DESC", params + bp
     ).fetchall():
         d = dict(r)
         rows.append({
@@ -3959,6 +3971,9 @@ def other_forms():
         counts[st] = conn.execute(
             "SELECT COUNT(*) FROM unmatched_submissions WHERE status=? " + not_monitor + bc,
             [st] + bp).fetchone()[0]
+    counts['customer_done'] = conn.execute(
+        "SELECT COUNT(*) FROM unmatched_submissions WHERE status='טופל' AND subject LIKE ? " + not_monitor + bc,
+        ['וואטסאפ | %'] + bp).fetchone()[0]
 
     rows.sort(key=lambda x: x['received_at'] or '', reverse=True)
     conn.close()
@@ -9827,6 +9842,21 @@ def _scan_rest_now(now_il):
         return False           # motzaei shabbat/chag — resume
     return True
 
+def _send_blocked_today():
+    """Reason (str) that customer sends are blocked today — Friday/Saturday/holiday — else None.
+    Same rule as /api/wa/send-ok, used to gate the cert-update send queue."""
+    try:
+        d = _israel_now().date()
+    except Exception:
+        d = datetime.date.today()
+    if d.weekday() == 4:
+        return 'שישי'
+    if d.weekday() == 5:
+        return 'שבת'
+    if d.strftime('%Y-%m-%d') in _rest_dates():
+        return 'חג'
+    return None
+
 def _israel_now():
     """Current time in Israel (server clock is UTC). zoneinfo handles DST; fallback UTC+3."""
     try:
@@ -10797,6 +10827,138 @@ def api_wa_inbound_list():
         (since,)).fetchall()]
     conn.close()
     return jsonify({'count': len(rows), 'items': rows})
+
+@app.route('/admin/other-forms/<int:sid>/wa-send', methods=['POST'])
+@login_required
+@admin_required
+def other_forms_wa_send(sid):
+    """Button 'טופל ושליחה בוואטסאפ' on a הוספת-תעודה form (Sharon 2026-09-14): mark handled AND arm
+    the automatic WhatsApp send of the UPDATED policy. Nothing is sent unless this is clicked; the
+    send goes out on the next system run (send-hours + no weekend/holiday), and delivers the LATEST
+    policy copy issued for the customer (covers 2 changes → the last one)."""
+    who = session.get('display_name') or session.get('username') or 'admin'
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    r = conn.execute("SELECT id, subject, id_number, name FROM unmatched_submissions WHERE id=?", (sid,)).fetchone()
+    if not r:
+        conn.close(); return jsonify({'error': 'not found'}), 404
+    if not re.sub(r'\D', '', r['id_number'] or ''):
+        conn.close(); return jsonify({'error': 'no id_number — link a customer first'}), 400
+    conn.execute("UPDATE unmatched_submissions SET status='טופל', wa_send_requested_at=?, wa_send_by=?, wa_sent_at=NULL "
+                 "WHERE id=?", (now, who, sid))
+    log_event(conn, event_key(r['id_number'], 'sub-%d' % sid),
+              "סומן 'טופל ושליחה בוואטסאפ' — העתק הפוליסה המעודכן יישלח ללקוח", 'system', kind='cert_update_arm')
+    conn.commit(); conn.close()
+    if request.form:
+        flash('סומן לשליחה — העתק הפוליסה המעודכן יישלח בוואטסאפ בריצה הקרובה (שעות שליחה, לא בשבת/חג).', 'success')
+        return redirect(request.referrer or url_for('other_forms'))
+    return jsonify({'ok': True})
+
+def _cert_update_candidate(conn, idn, requested_at):
+    """The updated-policy document to deliver for an armed cert-add: the NEWEST deliverable (חדש/חידוש/
+    תוספת) policy_document for the ת"ז received on/after the request — the last copy issued (Sharon:
+    covers 2 changes, send only the last). Returns a policy_documents row or None."""
+    z = re.sub(r'\D', '', idn or '').lstrip('0')
+    if not z:
+        return None
+    # Floor: the request day-start, so a policy re-issued the same day (after the request) qualifies
+    # while an old pre-request policy does not.
+    floor = (requested_at or '')[:10] + ' 00:00'
+    return conn.execute(
+        "SELECT pd.id, pd.filename, pd.policy_number, pd.received_at, pd.r2_key, pd.filepath "
+        "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+        "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? AND COALESCE(pd.whatsapp_sent_at,'')!='ארכיון' "
+        "AND (pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%' OR pr.doc_type_label LIKE '%תוספת%') "
+        "AND pd.received_at >= ? ORDER BY pd.received_at DESC, pd.id DESC LIMIT 1", (z, floor)).fetchone()
+
+@app.route('/api/wa/cert-update-queue')
+def api_cert_update_queue():
+    """Token: armed cert-add rows whose updated policy has arrived and is ready to send. Empty on
+    Fri/Sat/holiday (customer sends blocked). The wa-sender delivers the PDF then calls cert-update-sent."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    if _send_blocked_today():
+        return jsonify({'blocked': _send_blocked_today(), 'count': 0, 'items': []})
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, name, id_number, phone, email, brand, wa_send_requested_at FROM unmatched_submissions "
+        "WHERE subject LIKE '%הוספת תעודה%' AND COALESCE(wa_send_requested_at,'')!='' AND COALESCE(wa_sent_at,'')='' "
+        "ORDER BY id").fetchall()
+    items = []
+    for r in rows:
+        doc = _cert_update_candidate(conn, r['id_number'], r['wa_send_requested_at'])
+        if not doc:
+            continue                 # updated policy not scanned yet → wait for a later run
+        phone = _policy_to972(r['phone'])
+        if not phone:
+            ins = conn.execute("SELECT phone FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                               (re.sub(r'\D', '', r['id_number']).lstrip('0'),)).fetchone()
+            phone = _policy_to972(ins['phone']) if ins and ins['phone'] else ''
+        if not phone:
+            continue
+        brand = r['brand'] or ''
+        if not brand:
+            ins = conn.execute("SELECT brand FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                               (re.sub(r'\D', '', r['id_number']).lstrip('0'),)).fetchone()
+            brand = (ins['brand'] if ins else '') or 'גאיה'
+        email = (r['email'] if 'email' in r.keys() else '') or ''
+        if not email:
+            for tbl in ('customers', 'insureds'):
+                er = conn.execute(f"SELECT email FROM {tbl} WHERE ltrim(COALESCE(id_number,''),'0')=? AND COALESCE(email,'')!='' "
+                                  "ORDER BY id DESC LIMIT 1", (re.sub(r'\D', '', r['id_number']).lstrip('0'),)).fetchone()
+                if er and er['email']:
+                    email = er['email'].strip(); break
+        cap = (f"שלום {r['name'] or ''}," if r['name'] else "שלום,") + "\n\n" + \
+              "מצורפת הפוליסה המעודכנת לאחר הוספת התעודה שביקשת 📄\n" + _seasonal_line()
+        items.append({'id': r['id'], 'name': r['name'], 'phone': phone, 'brand': brand,
+                      'brand_key': _wa_brand_key(brand), 'doc_id': doc['id'],
+                      'pdf_url': f"/api/policy/pdf/{doc['id']}", 'policy_number': doc['policy_number'],
+                      'received_at': doc['received_at'], 'filename': 'הפוליסה המעודכנת שלך.pdf', 'caption': cap,
+                      'email': email if ('@' in email) else '',
+                      'email_subject': 'הפוליסה המעודכנת שלך',
+                      'email_body': cap + "\n" + POLICY_EMAIL_SIGN})
+    conn.close()
+    return jsonify({'count': len(items), 'items': items})
+
+@app.route('/api/wa/cert-update-preview')
+def api_cert_update_preview():
+    """Token (diagnostic): for a cert-add submission ?id=, show which updated-policy copy WOULD be
+    sent (newest deliverable doc after the request) — without arming. Verifies the match before use."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    sid = request.args.get('id')
+    conn = get_db()
+    r = conn.execute("SELECT id, name, id_number, phone, received_at, wa_send_requested_at, wa_sent_at "
+                     "FROM unmatched_submissions WHERE id=?", (sid,)).fetchone()
+    if not r:
+        conn.close(); return jsonify({'error': 'not found'}), 404
+    floor_ref = r['wa_send_requested_at'] or r['received_at']
+    doc = _cert_update_candidate(conn, r['id_number'], floor_ref)
+    conn.close()
+    return jsonify({'submission': {'id': r['id'], 'name': r['name'], 'id_number': r['id_number'],
+                                   'received_at': r['received_at'], 'armed_at': r['wa_send_requested_at'],
+                                   'sent_at': r['wa_sent_at']},
+                    'would_send': (dict(doc) if doc else None)})
+
+@app.route('/api/wa/cert-update-sent', methods=['POST'])
+def api_cert_update_sent():
+    """Token: the updated policy was delivered → mark the cert-add row sent (once)."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    sid, doc_id = d.get('id'), d.get('doc_id')
+    if not sid:
+        return jsonify({'error': 'need id'}), 400
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    r = conn.execute("SELECT id_number, name FROM unmatched_submissions WHERE id=?", (sid,)).fetchone()
+    if not r:
+        conn.close(); return jsonify({'error': 'not found'}), 404
+    conn.execute("UPDATE unmatched_submissions SET wa_sent_at=?, wa_send_doc_id=? WHERE id=?", (now, doc_id, sid))
+    log_event(conn, event_key(r['id_number'], 'sub-%s' % sid),
+              "העתק הפוליסה המעודכן נשלח ללקוח בוואטסאפ (לאחר הוספת תעודה)", 'system', kind='cert_update_send')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
 
 @app.route('/api/wa/inbound-digest', methods=['POST'])
 def api_wa_inbound_digest():

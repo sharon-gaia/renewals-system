@@ -26,6 +26,9 @@
   <a href="?show=done" class="btn btn-sm {{ 'btn-primary' if show == 'done' else 'btn-outline-primary' }}">
     טופלו <span class="badge bg-light text-dark ms-1">{{ counts['טופל'] }}</span>
   </a>
+  <a href="?show=customer_done" class="btn btn-sm {{ 'btn-primary' if show == 'customer_done' else 'btn-outline-primary' }}">
+    <i class="bi bi-whatsapp me-1"></i>בקשות לקוח — טופל <span class="badge bg-light text-dark ms-1">{{ counts['customer_done'] }}</span>
+  </a>
   <a href="?show=all" class="btn btn-sm {{ 'btn-primary' if show == 'all' else 'btn-outline-primary' }}">הכל</a>
 </div>
 
@@ -91,6 +94,19 @@
           {% else %}
           <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'ממתין')">החזר לתור</button>
           {% endif %}
+          {% if item.category == 'הוספת תעודה' %}
+          <br>
+          {% if item.full.wa_sent_at %}
+            <span class="badge bg-success mt-1" title="{{ item.full.wa_sent_at }}"><i class="bi bi-whatsapp me-1"></i>העתק מעודכן נשלח</span>
+          {% elif item.full.wa_send_requested_at %}
+            <span class="badge bg-info text-dark mt-1"><i class="bi bi-hourglass-split me-1"></i>מסומן לשליחה — יישלח בריצה הקרובה</span>
+          {% else %}
+            <button type="button" class="btn btn-primary btn-sm py-0 mt-1" onclick="waSend({{ item.id }})"
+                    title="סמן טופל ושלח ללקוח את העותק המעודכן של הפוליסה בוואטסאפ (לאחר ההפקה)">
+              <i class="bi bi-whatsapp me-1"></i>טופל ושליחה בוואטסאפ
+            </button>
+          {% endif %}
+          {% endif %}
         </td>
       </tr>
       <tr class="collapse" id="detail-{{ loop.index }}">
@@ -150,6 +166,12 @@
     fd.append('status', status);
     fd.append('show', '{{ show }}');
     fetch('/admin/other-forms/' + id + '/status', {method: 'POST', body: fd})
+      .then(() => window.location.reload());
+  }
+
+  function waSend(id) {
+    if (!confirm('לסמן טופל ולשלוח ללקוח בוואטסאפ את העותק המעודכן של הפוליסה?\nהשליחה תצא בריצה הקרובה (שעות שליחה, לא בשבת/חג), עם הפוליסה האחרונה שהופקה.')) return;
+    fetch('/admin/other-forms/' + id + '/wa-send', {method: 'POST', body: new FormData()})
       .then(() => window.location.reload());
   }
 </script>
