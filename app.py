@@ -4200,6 +4200,10 @@ def lead_doc_view(cid):
 WA_DOC_TYPES = {
     'cert_add':      {'subject': 'וואטסאפ | הוספת תעודה',      'category': 'הוספת תעודה'},
     'insurance_cert': {'subject': 'וואטסאפ | בקשת אישור ביטוח', 'category': 'בקשת אישור ביטוח'},
+    # Third queue (Sharon 2026-09-14): the bot tags every attachment as cert_add, but many are plain
+    # service questions ("עוד לא חזרתם אלי", "אני בחו״ל", a rental contract). They belong here so the
+    # two operational queues stay clean.
+    'service':       {'subject': 'וואטסאפ | פנייה כללית',      'category': 'פנייה כללית / שירות'},
 }
 
 def guess_category(subject, source):
@@ -4209,6 +4213,8 @@ def guess_category(subject, source):
         return 'הוספת תעודה'
     if 'אישור ביטוח' in text or 'אישור קיום' in text:
         return 'בקשת אישור ביטוח'
+    if 'פנייה כללית' in text:
+        return 'פנייה כללית / שירות'
     if any(k in text for k in ['כרטיס אשראי', 'אשראי', 'עדכון פרטי תשלום', 'שינוי אמצעי']):
         return 'עדכון אמצעי תשלום'
     if source == 'policy':
@@ -11092,11 +11098,17 @@ def api_wa_inbound_doc():
     # of those are certificate-of-insurance requests (Sharon 2026-09-14 — "אישור קיום ביטוח זה תור
     # בפני עצמו"). If what the customer wrote/attached says so explicitly, route it to that queue.
     _hay = f"{comments} {(request.files.get('file').filename if request.files.get('file') else '')}"
-    if typ == 'cert_add' and any(k in _hay for k in
-                                 ('אישור ביטוח', 'אישור קיום', 'א.ק.ב', 'אק"ב', 'חתום לטובת',
-                                  'תחתמו', 'לחתום על האישור', 'אישור על קיום',
-                                  'נספח ג', 'נספח ג׳', "נספח ג'")):   # נספח ג = cert of insurance (Sharon)
-        typ = 'insurance_cert'
+    if typ == 'cert_add':
+        _ins = ('אישור ביטוח', 'אישור קיום', 'א.ק.ב', 'אק"ב', 'חתום לטובת', 'תחתמו',
+                'לחתום על האישור', 'אישור על קיום', 'נספח ג', 'נספח ג׳', "נספח ג'")
+        _crt = ('תעוד', 'הסמכ', 'דיפלומ', 'diplom', 'certificat', 'certificato', 'certificate',
+                'רישיון', 'רשיון', 'קורס', 'השתלמות', 'הכשרה', 'בוגר')
+        if any(k in _hay for k in _ins):
+            typ = 'insurance_cert'          # נספח ג = cert of insurance (Sharon)
+        elif comments and not any(k.lower() in _hay.lower() for k in _crt):
+            # The customer wrote something and none of it points at a certificate → a service
+            # question that merely carried a file. A bare photo with NO text stays cert_add.
+            typ = 'service'
     meta = WA_DOC_TYPES[typ]
     # Optional attachment → R2 (durable, server-side stream; never on the small Railway volume).
     doc_key = doc_name = None
