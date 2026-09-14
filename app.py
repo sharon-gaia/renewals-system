@@ -4492,6 +4492,18 @@ def other_forms_open_file(sid):
     return redirect(url_for('insured_detail', iid=iid))
 
 
+@app.route('/admin/other-forms/<int:sid>/note', methods=['POST'])
+@login_required
+@admin_required
+def other_forms_note(sid):
+    """Save Sharon's free-text note on a form (inline column, saved on blur — Sharon 2026-09-14)."""
+    note = ((request.get_json(silent=True) or {}).get('note')
+            if request.is_json else request.form.get('note', ''))
+    conn = get_db()
+    conn.execute("UPDATE unmatched_submissions SET admin_note=? WHERE id=?", ((note or '').strip()[:600], sid))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
 @app.route('/admin/other-forms/<int:sid>/status', methods=['POST'])
 @login_required
 @admin_required

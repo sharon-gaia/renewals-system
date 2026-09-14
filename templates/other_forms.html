@@ -67,6 +67,7 @@
         <th>נושא</th>
         <th>שם</th>
         <th>ת.ז / טלפון</th>
+        <th style="min-width:180px">הערות שרון</th>
         <th>פעולות</th>
       </tr>
     </thead>
@@ -95,6 +96,10 @@
             class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="copyVal(event,this)"
             data-copy="{{ item.full.phone }}" title="העתק טלפון"><i class="bi bi-clipboard"></i></button></div>{% endif %}
           {% if not item.full.id_number and not item.full.phone %}<span class="text-muted">—</span>{% endif %}
+        </td>
+        <td onclick="event.stopPropagation();">
+          <input type="text" class="form-control form-control-sm form-note" data-id="{{ item.id }}"
+                 value="{{ item.full.admin_note or '' }}" placeholder="הערות שרון...">
         </td>
         <td class="text-nowrap" onclick="event.stopPropagation();">
           {% if item.status in ('ממתין', 'בטיפול') %}
@@ -143,7 +148,7 @@
         </td>
       </tr>
       <tr class="collapse" id="detail-{{ loop.index }}">
-        <td colspan="9" class="bg-light">
+        <td colspan="10" class="bg-light">
           <div class="p-3">
             {% if item.kind == 'policy' %}
               <div class="mb-2"><strong>מספר פוליסה:</strong> {{ item.full.policy_number }}</div>
@@ -200,6 +205,17 @@
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(fallback);
     else fallback();
   }
+
+  // Sharon's note per form — saved on blur, like the renewals screen.
+  document.querySelectorAll('.form-note').forEach(inp => {
+    inp.addEventListener('click', e => e.stopPropagation());
+    inp.addEventListener('blur', () => {
+      fetch('/admin/other-forms/' + inp.dataset.id + '/note', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({note: inp.value})
+      }).then(() => { inp.classList.add('border-success'); setTimeout(() => inp.classList.remove('border-success'), 1200); });
+    });
+  });
 
   function openFile(id) {
     fetch('/admin/other-forms/' + id + '/file', {method: 'POST'})
