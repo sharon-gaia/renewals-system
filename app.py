@@ -8757,7 +8757,9 @@ def _imap_utf7(s):
             out.append('&' + enc + '-'); i = j
     return ''.join(out)
 
-def _label_email(message_id, label=POLICY_SENT_LABEL, archive=True):
+CERT_UPDATE_LABEL = 'הוספת תעודה/שירות'   # Gmail folder for service updates re-issued after a cert addition
+
+def _label_email(message_id, label=POLICY_SENT_LABEL, archive=True, remove=None):
     """Gmail-label the Harel policy email (by Message-ID) after delivery + archive it out of the
     inbox. Best-effort; never raises. Returns True if a message was found and labelled."""
     cfg = EMAIL_CONFIG
@@ -8767,15 +8769,27 @@ def _label_email(message_id, label=POLICY_SENT_LABEL, archive=True):
     try:
         mail = imaplib.IMAP4_SSL(cfg['imap_server'], cfg['imap_port'], timeout=30)
         mail.login(cfg['username'], cfg['password'])
-        mail.select('INBOX')
-        typ, data = mail.search(None, 'HEADER', 'Message-ID', f'"{message_id.strip()}"')
-        if typ == 'OK' and data and data[0].split():
+        # Search All Mail too, so a message already archived can still be re-filed.
+        boxes = ['INBOX', '"[Gmail]/All Mail"', '"[Gmail]/כל הדואר"']
+        for box in boxes:
+            try:
+                if mail.select(box)[0] != 'OK':
+                    continue
+            except Exception:
+                continue
+            typ, data = mail.search(None, 'HEADER', 'Message-ID', f'"{message_id.strip()}"')
+            if typ != 'OK' or not data or not data[0].split():
+                continue
             lbl = '"' + _imap_utf7(label) + '"'
             for num in data[0].split():
                 mail.store(num, '+X-GM-LABELS', lbl)
+                if remove:
+                    mail.store(num, '-X-GM-LABELS', '"' + _imap_utf7(remove) + '"')
                 if archive:
                     mail.store(num, '-X-GM-LABELS', '\\Inbox')
                 ok = True
+            if ok:
+                break
         mail.logout()
     except Exception as e:
         print(f'[label] שגיאה: {e}')
@@ -8786,13 +8800,15 @@ def api_label_email():
     """Test/backfill: label + archive the Harel email of a given policy doc_id. Token-authed."""
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
-    doc_id = (request.get_json(silent=True) or {}).get('doc_id')
+    d = request.get_json(silent=True) or {}
+    doc_id = d.get('doc_id')
     conn = get_db()
     r = conn.execute("SELECT message_id FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
     conn.close()
     if not r or not r['message_id']:
         return jsonify({'error': 'no message_id'})
-    return jsonify({'labelled': _label_email(r['message_id'])})
+    return jsonify({'labelled': _label_email(r['message_id'], label=d.get('label') or POLICY_SENT_LABEL,
+                                             remove=d.get('remove'))})
 
 GMAIL_SENT_LABEL = POLICY_SENT_LABEL  # single source of truth — keep both labelers on the same name
 _gmail_label_lock = threading.Lock()
@@ -10970,8 +10986,10 @@ def api_cert_update_sent():
         mid = row['message_id'] if row else None
     conn.commit(); conn.close()
     if mid:
-        threading.Thread(target=_label_email, args=(mid,), daemon=True).start()
-    return jsonify({'ok': True, 'labeled_email': bool(mid)})
+        # Files the Harel update email into its own Gmail folder (Sharon's spec), not the generic
+        # auto-send label, and out of the inbox.
+        threading.Thread(target=_label_email, args=(mid, CERT_UPDATE_LABEL), daemon=True).start()
+    return jsonify({'ok': True, 'labeled_email': bool(mid), 'label': CERT_UPDATE_LABEL})
 
 @app.route('/api/wa/inbound-digest', methods=['POST'])
 def api_wa_inbound_digest():
