@@ -659,6 +659,19 @@ def init_db():
             message_id TEXT PRIMARY KEY,
             processed_at TEXT NOT NULL
         );
+        -- owner_renewal_confirm sends: maps the template's wamid → the therapist it asked about, so
+        -- the bot can report a quick-reply tap by wamid alone (Sharon 2026-09-14, bot button wiring).
+        CREATE TABLE IF NOT EXISTS group_owner_policies (
+            doc_id INTEGER PRIMARY KEY, id_number TEXT, name TEXT, owner TEXT, owner_phone TEXT,
+            brand TEXT, policy_number TEXT, received_at TEXT, redacted_key TEXT, redacted_at TEXT,
+            redact_areas INTEGER, approved_at TEXT, approved_by TEXT, sent_at TEXT, skipped_at TEXT
+        );
+        -- (each policy of a therapist insured by a centre is price-redacted, held for approval,
+        --  then forwarded to the owner — Sharon 2026-09-14)
+        CREATE TABLE IF NOT EXISTS owner_confirm_sends (
+            wamid TEXT PRIMARY KEY, id_number TEXT, name TEXT, owner TEXT, month_id INTEGER,
+            sent_at TEXT, decision TEXT, responded_at TEXT
+        );
         CREATE TABLE IF NOT EXISTS owner_alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             text TEXT NOT NULL,
@@ -2992,6 +3005,225 @@ def api_mark_midwives():
     conn.commit(); conn.close()
     return jsonify({'ok': True, 'marked': res})
 
+@app.route('/api/group-owner/policy-queue')
+def api_group_owner_policy_queue():
+    """Token: policies of group-owner therapists that still need price redaction. The wa-sender (which
+    has PyMuPDF) downloads each, redacts the premium, and posts the result back."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    days = int(request.args.get('days', 45))
+    since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT DISTINCT pd.id AS doc_id, pd.policy_number, pd.received_at, pr.insured_id, pr.insured_name, "
+        "       i.name AS master_name, i.group_owner, i.phone AS owner_phone, i.brand "
+        "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+        "JOIN insureds i ON ltrim(COALESCE(i.id_number,''),'0')=ltrim(COALESCE(pr.insured_id,''),'0') "
+        "WHERE COALESCE(i.group_owner,'')!='' AND COALESCE(pd.whatsapp_sent_at,'')!='ארכיון' "
+        "AND pd.received_at >= ? AND pd.id NOT IN (SELECT doc_id FROM group_owner_policies) "
+        "ORDER BY pd.received_at DESC", (since,)).fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [
+        {'doc_id': r['doc_id'], 'id_number': r['insured_id'], 'name': r['master_name'] or r['insured_name'],
+         'owner': r['group_owner'], 'owner_phone': _policy_to972(r['owner_phone']), 'brand': r['brand'] or '',
+         'brand_key': _wa_brand_key(r['brand'] or ''), 'policy_number': r['policy_number'],
+         'received_at': r['received_at'], 'pdf_url': f"/api/policy/pdf/{r['doc_id']}"} for r in rows]})
+
+@app.route('/api/group-owner/policy-redacted', methods=['POST'])
+def api_group_owner_policy_redacted():
+    """Token: receive the price-redacted PDF (multipart `file` + doc_id …) → store in R2 and hold it
+    for Sharon's approval. Nothing goes to the owner until he approves."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.form or {}
+    doc_id = d.get('doc_id')
+    f = request.files.get('file')
+    if not doc_id or not f:
+        return jsonify({'error': 'need doc_id + file'}), 400
+    raw = f.read()
+    key = f'group-owner/{re.sub(r"[^0-9]", "", str(d.get("id_number") or "x"))}/{doc_id}-redacted.pdf'
+    c, b = _r2()
+    if not c:
+        return jsonify({'error': 'R2 not configured'}), 503
+    try:
+        c.put_object(Bucket=b, Key=key, Body=raw, ContentType='application/pdf')
+    except Exception as e:
+        return jsonify({'error': f'R2 put failed: {type(e).__name__}'}), 502
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    conn.execute(
+        "INSERT OR REPLACE INTO group_owner_policies (doc_id, id_number, name, owner, owner_phone, brand, "
+        "policy_number, received_at, redacted_key, redacted_at, redact_areas) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (int(doc_id), d.get('id_number') or '', d.get('name') or '', d.get('owner') or '',
+         d.get('owner_phone') or '', d.get('brand') or '', d.get('policy_number') or '',
+         d.get('received_at') or '', key, now, int(d.get('areas') or 0)))
+    conn.execute("INSERT INTO owner_alerts (text, created_at) VALUES (?,?)",
+                 (f"📄 פוליסה של {d.get('name') or ''} ({d.get('owner') or 'מרכז'}) נמחק ממנה המחיר — ממתינה לאישורך לשליחה",
+                  datetime.datetime.now().isoformat()))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'key': key})
+
+def _group_owner_redacted_bytes(doc_id):
+    conn = get_db()
+    r = conn.execute("SELECT redacted_key, name, policy_number FROM group_owner_policies WHERE doc_id=?", (doc_id,)).fetchone()
+    conn.close()
+    if not r or not r['redacted_key']:
+        return None, None
+    return _r2_fetch(r['redacted_key']), f"{r['name']} {r['policy_number']}.pdf"
+
+@app.route('/api/group-owner/redacted/<int:doc_id>')
+def api_group_owner_redacted(doc_id):
+    """Token: the redacted PDF, for the wa-sender to forward once approved."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    data, name = _group_owner_redacted_bytes(doc_id)
+    if not data:
+        return jsonify({'error': 'not found'}), 404
+    return send_file(io.BytesIO(data), download_name=name, mimetype='application/pdf')
+
+@app.route('/api/group-owner/send-queue')
+def api_group_owner_send_queue():
+    """Token: redacted policies Sharon APPROVED and not yet forwarded to the owner."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    if _send_blocked_today():
+        return jsonify({'blocked': _send_blocked_today(), 'count': 0, 'items': []})
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM group_owner_policies WHERE COALESCE(approved_at,'')!='' "
+                        "AND COALESCE(sent_at,'')='' ORDER BY doc_id").fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [
+        {'doc_id': r['doc_id'], 'name': r['name'], 'owner': r['owner'],
+         'owner_phone': _policy_to972(r['owner_phone']), 'brand_key': _wa_brand_key(r['brand'] or ''),
+         'policy_number': r['policy_number'], 'pdf_url': f"/api/group-owner/redacted/{r['doc_id']}",
+         'filename': f"{r['name']} - פוליסה.pdf",
+         'caption': f"שלום, מצורפת הפוליסה של {r['name']} 📄\n{_seasonal_line()}"} for r in rows]})
+
+@app.route('/api/group-owner/policy-sent', methods=['POST'])
+def api_group_owner_policy_sent():
+    """Token: the redacted policy was forwarded to the owner."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    doc_id = (request.get_json(silent=True) or {}).get('doc_id')
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    r = conn.execute("SELECT id_number, name, owner FROM group_owner_policies WHERE doc_id=?", (doc_id,)).fetchone()
+    conn.execute("UPDATE group_owner_policies SET sent_at=? WHERE doc_id=?", (now, doc_id))
+    if r:
+        log_event(conn, event_key(r['id_number'], 'doc-%s' % doc_id),
+                  f"הפוליסה (ללא מחיר) נשלחה ל{r['owner'] or 'מרכז'}", 'system', kind='group_owner_send')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/admin/special-tracks')
+@login_required
+@admin_required
+def special_tracks():
+    """מסלולים מיוחדים — group-owner (centre-paid) therapists and midwives: who is in each track,
+    and the group-owner policies waiting for price-redaction approval (Sharon 2026-09-14)."""
+    conn = get_db()
+    month = active_month()
+    owners = [dict(r) for r in conn.execute(
+        "SELECT id_number, name, brand, group_owner, phone, status FROM insureds "
+        "WHERE COALESCE(group_owner,'')!='' ORDER BY group_owner, name").fetchall()]
+    mid = month['id'] if month else -1
+    cur = {re.sub(r'\D', '', r['id_number'] or '').lstrip('0'): r['status']
+           for r in conn.execute("SELECT id_number, status FROM customers WHERE month_id=?", (mid,)).fetchall()}
+    for o in owners:
+        o['month_status'] = cur.get(re.sub(r'\D', '', o['id_number'] or '').lstrip('0'), '')
+    midwives = [dict(r) for r in conn.execute(
+        "SELECT id_number, name, brand, phone, status FROM insureds WHERE COALESCE(is_midwife,0)=1 "
+        "ORDER BY name").fetchall()]
+    for m in midwives:
+        m['month_status'] = cur.get(re.sub(r'\D', '', m['id_number'] or '').lstrip('0'), '')
+    pend = [dict(r) for r in conn.execute(
+        "SELECT * FROM group_owner_policies WHERE COALESCE(sent_at,'')='' AND COALESCE(skipped_at,'')='' "
+        "ORDER BY doc_id DESC").fetchall()]
+    done = [dict(r) for r in conn.execute(
+        "SELECT * FROM group_owner_policies WHERE COALESCE(sent_at,'')!='' ORDER BY doc_id DESC LIMIT 30").fetchall()]
+    conn.close()
+    return render_template('special_tracks.html', owners=owners, midwives=midwives,
+                           pending=pend, done=done, month=month)
+
+@app.route('/admin/special-tracks/<int:doc_id>/redacted')
+@login_required
+@admin_required
+def special_tracks_redacted(doc_id):
+    data, name = _group_owner_redacted_bytes(doc_id)
+    if not data:
+        return 'הקובץ אינו זמין', 404
+    return send_file(io.BytesIO(data), download_name=name, mimetype='application/pdf')
+
+@app.route('/admin/special-tracks/<int:doc_id>/<action>', methods=['POST'])
+@login_required
+@admin_required
+def special_tracks_action(doc_id, action):
+    who = session.get('display_name') or session.get('username') or 'admin'
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    if action == 'approve':
+        conn.execute("UPDATE group_owner_policies SET approved_at=?, approved_by=? WHERE doc_id=? AND COALESCE(sent_at,'')=''",
+                     (now, who, doc_id))
+        flash('אושר — הפוליסה (ללא מחיר) תישלח למרכז בריצה הקרובה', 'success')
+    elif action == 'unapprove':
+        conn.execute("UPDATE group_owner_policies SET approved_at=NULL, approved_by=NULL WHERE doc_id=? AND COALESCE(sent_at,'')=''", (doc_id,))
+    elif action == 'skip':
+        conn.execute("UPDATE group_owner_policies SET skipped_at=? WHERE doc_id=?", (now, doc_id))
+        flash('הוסר מהרשימה (לא יישלח)', 'info')
+    conn.commit(); conn.close()
+    return redirect(url_for('special_tracks'))
+
+@app.route('/api/owner-confirm/queue')
+def api_owner_confirm_queue():
+    """Token: group-owner therapists whose renewal is still open this month and who haven't been
+    asked yet — the wa-sender sends `owner_renewal_confirm` to the OWNER (one message per therapist)
+    and reports the wamid back, so a later button tap can be mapped to the therapist."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    if _send_blocked_today():
+        return jsonify({'blocked': _send_blocked_today(), 'count': 0, 'items': []})
+    conn = get_db()
+    month = conn.execute("SELECT id, name FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    if not month:
+        conn.close(); return jsonify({'count': 0, 'items': []})
+    settled = ('חודש', 'חודש - בוצעה שיחת מכירה', 'הופק', 'לא רוצים לחדש', 'לא מחדש', 'בוטל', 'ממתין להפקה')
+    items = []
+    for r in conn.execute(
+            "SELECT id, name, id_number, phone, brand, group_owner, status FROM customers "
+            "WHERE month_id=? AND COALESCE(group_owner,'')!='' AND COALESCE(import_source,'')!='test_ofir'",
+            (month['id'],)).fetchall():
+        if (r['status'] or '') in settled:
+            continue
+        z = re.sub(r'\D', '', r['id_number'] or '').lstrip('0')
+        if conn.execute("SELECT 1 FROM owner_confirm_sends WHERE ltrim(COALESCE(id_number,''),'0')=? AND month_id=?",
+                        (z, month['id'])).fetchone():
+            continue                       # already asked this month
+        items.append({'customer_id': r['id'], 'id_number': r['id_number'], 'name': r['name'],
+                      'owner': r['group_owner'], 'owner_phone': _policy_to972(r['phone']),
+                      'brand_key': _wa_brand_key(r['brand']), 'month_id': month['id'],
+                      'template': 'owner_renewal_confirm', 'params': [r['name'] or '']})
+    conn.close()
+    return jsonify({'month': month['name'], 'count': len(items), 'items': items})
+
+@app.route('/api/owner-confirm/record', methods=['POST'])
+def api_owner_confirm_record():
+    """Token: record that the confirm template was sent — {wamid, id_number, name, owner, month_id}.
+    The wamid is what the bot will echo back when the owner taps a button."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    wamid = (d.get('wamid') or '').strip()
+    idn = re.sub(r'\D', '', str(d.get('id_number') or ''))
+    if not wamid or not idn:
+        return jsonify({'error': 'need wamid + id_number'}), 400
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO owner_confirm_sends (wamid, id_number, name, owner, month_id, sent_at) "
+                 "VALUES (?,?,?,?,?,?)",
+                 (wamid, idn, d.get('name') or '', d.get('owner') or '', d.get('month_id'),
+                  datetime.datetime.now().strftime('%Y-%m-%d %H:%M')))
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
 @app.route('/api/owner-response', methods=['POST'])
 def api_owner_response():
     """A group owner (e.g. Aviram) tapped a renewal-confirm button for one of their therapists.
@@ -3003,8 +3235,17 @@ def api_owner_response():
     d = request.get_json(force=True, silent=True) or {}
     idn = re.sub(r'\D', '', str(d.get('id_number') or '')).lstrip('0')
     decision = (d.get('decision') or '').strip().lower()
+    # The bot usually only knows the wamid of the template the owner replied to (context.id) —
+    # resolve the therapist from it (Sharon 2026-09-14, bot button wiring).
+    wamid = (d.get('wamid') or d.get('context_wamid') or '').strip()
+    if not idn and wamid:
+        _c = get_db()
+        _m = _c.execute("SELECT id_number FROM owner_confirm_sends WHERE wamid=?", (wamid,)).fetchone()
+        if _m:
+            idn = re.sub(r'\D', '', _m['id_number'] or '').lstrip('0')
+        _c.close()
     if not idn or decision not in ('approve', 'decline'):
-        return jsonify({'error': 'need id_number + decision approve/decline'}), 400
+        return jsonify({'error': 'need id_number (or a known wamid) + decision approve/decline'}), 400
     status = 'חודש' if decision == 'approve' else 'לא רוצים לחדש'
     conn = get_db()
     month = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
@@ -3023,8 +3264,11 @@ def api_owner_response():
     alert = f"{owner} {verb} עבור {name}" + ('' if row else ' (לא נמצא בחודש הפעיל — לבדיקה)')
     conn.execute("INSERT INTO owner_alerts (text, created_at) VALUES (?,?)",
                  (alert, datetime.datetime.now().isoformat()))
+    if wamid:
+        conn.execute("UPDATE owner_confirm_sends SET decision=?, responded_at=? WHERE wamid=?",
+                     (decision, datetime.datetime.now().strftime('%Y-%m-%d %H:%M'), wamid))
     conn.commit(); conn.close()
-    return jsonify({'ok': True, 'matched': bool(row), 'status': status, 'alert': alert})
+    return jsonify({'ok': True, 'matched': bool(row), 'status': status, 'alert': alert, 'id_number': idn})
 
 @app.route('/api/owner-alerts')
 def api_owner_alerts():

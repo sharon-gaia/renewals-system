@@ -1,0 +1,110 @@
+{% extends 'base.html' %}
+{% block title %} — מסלולים מיוחדים{% endblock %}
+{% block content %}
+
+<div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+  <h5 class="mb-0"><i class="bi bi-diagram-3 me-2 text-primary"></i>מסלולים מיוחדים
+    {% if month %}<span class="text-muted small">— {{ month['name'] }}</span>{% endif %}
+  </h5>
+  <a href="/" class="btn btn-outline-secondary btn-sm">חזרה לדשבורד</a>
+</div>
+
+<div class="alert alert-info small">
+  לקוחות שאינם במסלול החידוש הרגיל. <strong>קבוצת מרכז</strong> — המרכז משלם על כל המטפלים בכרטיס שלו,
+  כל התקשורת אליו, והפוליסה נשלחת אליו <strong>אחרי מחיקת המחיר</strong> ובאישורך.
+  <strong>מיילדות</strong> — מסלול ווינר ייעודי, מטופל ידנית.
+</div>
+
+{% if pending %}
+<h6 class="mt-4 mb-2"><i class="bi bi-hourglass-split me-1 text-warning"></i>פוליסות ממתינות לאישורך — מחיקת מחיר</h6>
+<div class="card border-0 shadow-sm mb-4">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0 small">
+      <thead class="table-light"><tr>
+        <th class="ps-3">מטפל/ת</th><th>מרכז</th><th>פוליסה</th><th>התקבלה</th><th>מחיקה</th><th>מצב</th><th>פעולות</th>
+      </tr></thead>
+      <tbody>
+      {% for p in pending %}
+        <tr>
+          <td class="ps-3 fw-semibold">{{ p.name }}</td>
+          <td>{{ p.owner }}</td>
+          <td class="text-nowrap">{{ p.policy_number }}</td>
+          <td class="text-nowrap text-muted">{{ p.received_at }}</td>
+          <td>{% if p.redacted_at %}<span class="badge bg-success">נמחקו {{ p.redact_areas }} שדות</span>
+              {% else %}<span class="badge bg-secondary">ממתין</span>{% endif %}</td>
+          <td>{% if p.approved_at %}<span class="badge bg-info text-dark">מאושר — יישלח בריצה הקרובה</span>
+              {% else %}<span class="badge bg-warning text-dark">ממתין לאישורך</span>{% endif %}</td>
+          <td class="text-nowrap">
+            {% if p.redacted_at %}
+            <a href="/admin/special-tracks/{{ p.doc_id }}/redacted" target="_blank" class="btn btn-outline-primary btn-sm py-0">
+              <i class="bi bi-eye me-1"></i>בדוק קובץ
+            </a>
+            {% endif %}
+            {% if not p.approved_at %}
+            <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/approve" class="d-inline"
+                  onsubmit="return confirm('לאשר שליחת הפוליסה (ללא מחיר) ל{{ p.owner }}?')">
+              <button class="btn btn-success btn-sm py-0">אשר ושלח</button>
+            </form>
+            {% else %}
+            <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/unapprove" class="d-inline">
+              <button class="btn btn-outline-secondary btn-sm py-0">בטל אישור</button>
+            </form>
+            {% endif %}
+            <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/skip" class="d-inline">
+              <button class="btn btn-outline-danger btn-sm py-0" title="לא לשלוח">הסר</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<h6 class="mt-4 mb-2"><i class="bi bi-people-fill me-1"></i>קבוצת מרכז <span class="text-muted">({{ owners|length }})</span></h6>
+<div class="card border-0 shadow-sm mb-4">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0 small">
+      <thead class="table-light"><tr><th class="ps-3">מטפל/ת</th><th>ת.ז</th><th>מרכז</th><th>מותג</th><th>טלפון (של המרכז)</th><th>סטטוס חודשי</th></tr></thead>
+      <tbody>
+      {% for o in owners %}
+        <tr><td class="ps-3 fw-semibold">{{ o.name }}</td><td class="text-nowrap">{{ o.id_number }}</td>
+            <td><span class="badge bg-dark">{{ o.group_owner }}</span></td><td>{{ o.brand or '—' }}</td>
+            <td class="text-nowrap">{{ o.phone or '—' }}</td>
+            <td>{% if o.month_status %}<span class="badge bg-light text-dark border">{{ o.month_status }}</span>
+                {% else %}<span class="text-muted">לא בחודש הפעיל</span>{% endif %}</td></tr>
+      {% else %}
+        <tr><td colspan="6" class="text-center text-muted py-3">אין מטפלים מסומנים</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<h6 class="mt-4 mb-2"><i class="bi bi-heart-pulse me-1 text-danger"></i>מיילדות <span class="text-muted">({{ midwives|length }})</span></h6>
+<div class="card border-0 shadow-sm">
+  <div class="table-responsive">
+    <table class="table table-sm align-middle mb-0 small">
+      <thead class="table-light"><tr><th class="ps-3">שם</th><th>ת.ז</th><th>מותג</th><th>טלפון</th><th>סטטוס חודשי</th></tr></thead>
+      <tbody>
+      {% for m in midwives %}
+        <tr><td class="ps-3 fw-semibold">{{ m.name }}</td><td class="text-nowrap">{{ m.id_number }}</td>
+            <td>{{ m.brand or '—' }}</td><td class="text-nowrap">{{ m.phone or '—' }}</td>
+            <td>{% if m.month_status %}<span class="badge bg-light text-dark border">{{ m.month_status }}</span>
+                {% else %}<span class="text-muted">לא בחודש הפעיל</span>{% endif %}</td></tr>
+      {% else %}
+        <tr><td colspan="5" class="text-center text-muted py-3">אין מיילדות מסומנות</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if done %}
+<h6 class="mt-4 mb-2 text-muted">נשלחו לאחרונה</h6>
+<div class="small text-muted">
+  {% for p in done %}<div>✓ {{ p.name }} · {{ p.owner }} · פוליסה {{ p.policy_number }} · נשלח {{ p.sent_at }}</div>{% endfor %}
+</div>
+{% endif %}
+{% endblock %}
