@@ -14,7 +14,7 @@
     {% if send_on %}<strong><i class="bi bi-send-check me-1"></i>שליחה למרכז פעילה</strong> — פוליסה שאישרת תישלח בריצה הקרובה.
     {% else %}<strong><i class="bi bi-shield-lock me-1"></i>שליחה למרכז כבויה (מתג בטיחות)</strong> — אפשר לצנזר, לבדוק ולאשר; שום דבר לא ייצא ללקוח עד שתדליק.{% endif %}
   </div>
-  {% if session.role == 'superadmin' %}
+  {% if is_sharon %}
   <form method="post" action="/admin/special-tracks/send-switch"
         onsubmit="return {{ 'true' if not send_on else "confirm('לכבות את השליחה למרכז?')" }};">
     <input type="hidden" name="on" value="{{ '0' if send_on else '1' }}">

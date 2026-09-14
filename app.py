@@ -1168,10 +1168,27 @@ INSURANCE_CERT_USERS = {'sharon'}
 def can_issue_cert():
     return session.get('username') in INSURANCE_CERT_USERS
 
+# "ייחודי לשרון" — screens that belong to Sharon personally, NOT to every super-admin (there are 3:
+# sharon / meir / ofir). Checked in the nav AND on the routes themselves (2026-09-14).
+SHARON_ONLY_USERS = {'sharon'}
+
+def is_sharon_only():
+    return session.get('username') in SHARON_ONLY_USERS
+
+def sharon_only_required(f):
+    from functools import wraps
+    @wraps(f)
+    def wrapper(*a, **kw):
+        if not is_sharon_only():
+            flash('המסך זמין לשרון בלבד', 'warning')
+            return redirect(url_for('index'))
+        return f(*a, **kw)
+    return wrapper
+
 @app.context_processor
 def _inject_cert_perm():
-    """Expose `can_issue_cert` to all templates (nav + dashboard link visibility)."""
-    return {'can_issue_cert': can_issue_cert()}
+    """Expose `can_issue_cert` / `is_sharon` to all templates (nav + dashboard link visibility)."""
+    return {'can_issue_cert': can_issue_cert(), 'is_sharon': is_sharon_only()}
 
 
 def extract_insured_occupation(pdf_path):
@@ -3132,6 +3149,7 @@ def api_group_owner_policy_sent():
 @app.route('/admin/special-tracks')
 @login_required
 @admin_required
+@sharon_only_required
 def special_tracks():
     """מסלולים מיוחדים — group-owner (centre-paid) therapists and midwives: who is in each track,
     and the group-owner policies waiting for price-redaction approval (Sharon 2026-09-14)."""
@@ -3163,6 +3181,7 @@ def special_tracks():
 @app.route('/admin/special-tracks/send-switch', methods=['POST'])
 @login_required
 @superadmin_required
+@sharon_only_required
 def special_tracks_send_switch():
     conn = get_db()
     on = request.form.get('on') == '1'
@@ -3175,6 +3194,7 @@ def special_tracks_send_switch():
 @app.route('/admin/special-tracks/<int:doc_id>/redacted')
 @login_required
 @admin_required
+@sharon_only_required
 def special_tracks_redacted(doc_id):
     data, name = _group_owner_redacted_bytes(doc_id)
     if not data:
@@ -3184,6 +3204,7 @@ def special_tracks_redacted(doc_id):
 @app.route('/admin/special-tracks/<int:doc_id>/<action>', methods=['POST'])
 @login_required
 @admin_required
+@sharon_only_required
 def special_tracks_action(doc_id, action):
     who = session.get('display_name') or session.get('username') or 'admin'
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')

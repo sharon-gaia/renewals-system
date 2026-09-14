@@ -59,7 +59,7 @@
             <li><a class="dropdown-item" href="/admin/policy-records"><i class="bi bi-people me-2"></i>לקוחות קבוצת אופיר</a></li>
           </ul>
         </li>
-        {% if can_issue_cert or session.role == 'superadmin' %}
+        {% if is_sharon %}
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
             <i class="bi bi-star me-1"></i>ייחודי לשרון
