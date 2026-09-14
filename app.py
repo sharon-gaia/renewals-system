@@ -10915,6 +10915,8 @@ def api_cert_update_queue():
                       'brand_key': _wa_brand_key(brand), 'doc_id': doc['id'],
                       'pdf_url': f"/api/policy/pdf/{doc['id']}", 'policy_number': doc['policy_number'],
                       'received_at': doc['received_at'], 'filename': 'הפוליסה המעודכנת שלך.pdf', 'caption': cap,
+                      # Saved locally under the usual "<שם>_<פוליסה>" name with an "עדכון" suffix (Sharon 2026-09-14)
+                      'save_suffix': ' עדכון',
                       'email': email if ('@' in email) else '',
                       'email_subject': 'הפוליסה המעודכנת שלך',
                       'email_body': cap + "\n" + POLICY_EMAIL_SIGN})
