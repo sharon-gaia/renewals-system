@@ -3093,6 +3093,11 @@ def api_group_owner_send_queue():
     if _send_blocked_today():
         return jsonify({'blocked': _send_blocked_today(), 'count': 0, 'items': []})
     conn = get_db()
+    # Master safety switch — OFF by default. While off, nothing reaches the owner even if approved,
+    # so the first cases can be inspected step by step (Sharon 2026-09-14).
+    if _kv_get(conn, 'group_owner_send_enabled', '0') != '1':
+        conn.close()
+        return jsonify({'blocked': 'שליחה למרכז כבויה (מתג בטיחות)', 'count': 0, 'items': []})
     rows = conn.execute("SELECT * FROM group_owner_policies WHERE COALESCE(approved_at,'')!='' "
                         "AND COALESCE(sent_at,'')='' ORDER BY doc_id").fetchall()
     conn.close()
@@ -3145,9 +3150,22 @@ def special_tracks():
         "ORDER BY doc_id DESC").fetchall()]
     done = [dict(r) for r in conn.execute(
         "SELECT * FROM group_owner_policies WHERE COALESCE(sent_at,'')!='' ORDER BY doc_id DESC LIMIT 30").fetchall()]
+    send_on = _kv_get(conn, 'group_owner_send_enabled', '0') == '1'
     conn.close()
     return render_template('special_tracks.html', owners=owners, midwives=midwives,
-                           pending=pend, done=done, month=month)
+                           pending=pend, done=done, month=month, send_on=send_on)
+
+@app.route('/admin/special-tracks/send-switch', methods=['POST'])
+@login_required
+@superadmin_required
+def special_tracks_send_switch():
+    conn = get_db()
+    on = request.form.get('on') == '1'
+    _kv_set(conn, 'group_owner_send_enabled', '1' if on else '0')
+    conn.commit(); conn.close()
+    flash('שליחה למרכז הופעלה — פוליסות מאושרות יישלחו בריצה הקרובה' if on
+          else 'שליחה למרכז כבויה — שום דבר לא ייצא', 'success' if on else 'warning')
+    return redirect(url_for('special_tracks'))
 
 @app.route('/admin/special-tracks/<int:doc_id>/redacted')
 @login_required

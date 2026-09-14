@@ -9,6 +9,22 @@
   <a href="/" class="btn btn-outline-secondary btn-sm">חזרה לדשבורד</a>
 </div>
 
+<div class="alert {{ 'alert-success' if send_on else 'alert-danger' }} d-flex justify-content-between align-items-center flex-wrap gap-2 py-2">
+  <div class="small">
+    {% if send_on %}<strong><i class="bi bi-send-check me-1"></i>שליחה למרכז פעילה</strong> — פוליסה שאישרת תישלח בריצה הקרובה.
+    {% else %}<strong><i class="bi bi-shield-lock me-1"></i>שליחה למרכז כבויה (מתג בטיחות)</strong> — אפשר לצנזר, לבדוק ולאשר; שום דבר לא ייצא ללקוח עד שתדליק.{% endif %}
+  </div>
+  {% if session.role == 'superadmin' %}
+  <form method="post" action="/admin/special-tracks/send-switch"
+        onsubmit="return {{ 'true' if not send_on else "confirm('לכבות את השליחה למרכז?')" }};">
+    <input type="hidden" name="on" value="{{ '0' if send_on else '1' }}">
+    <button class="btn btn-sm {{ 'btn-outline-danger' if send_on else 'btn-success' }}">
+      {{ 'כבה שליחה' if send_on else 'הפעל שליחה' }}
+    </button>
+  </form>
+  {% endif %}
+</div>
+
 <div class="alert alert-info small">
   לקוחות שאינם במסלול החידוש הרגיל. <strong>קבוצת מרכז</strong> — המרכז משלם על כל המטפלים בכרטיס שלו,
   כל התקשורת אליו, והפוליסה נשלחת אליו <strong>אחרי מחיקת המחיר</strong> ובאישורך.
@@ -42,8 +58,8 @@
             {% endif %}
             {% if not p.approved_at %}
             <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/approve" class="d-inline"
-                  onsubmit="return confirm('לאשר שליחת הפוליסה (ללא מחיר) ל{{ p.owner }}?')">
-              <button class="btn btn-success btn-sm py-0">אשר ושלח</button>
+                  onsubmit="return confirm('לאשר שליחת הפוליסה (ללא מחיר) ל{{ p.owner }}?{{ '' if send_on else ' — שים לב: מתג השליחה כבוי, זה רק יסמן כמאושר.' }}')">
+              <button class="btn btn-success btn-sm py-0">{{ 'אשר ושלח' if send_on else 'אשר (לא יישלח — מתג כבוי)' }}</button>
             </form>
             {% else %}
             <form method="post" action="/admin/special-tracks/{{ p.doc_id }}/unapprove" class="d-inline">
