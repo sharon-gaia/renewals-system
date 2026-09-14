@@ -11094,7 +11094,8 @@ def api_wa_inbound_doc():
     _hay = f"{comments} {(request.files.get('file').filename if request.files.get('file') else '')}"
     if typ == 'cert_add' and any(k in _hay for k in
                                  ('אישור ביטוח', 'אישור קיום', 'א.ק.ב', 'אק"ב', 'חתום לטובת',
-                                  'תחתמו', 'לחתום על האישור', 'אישור על קיום')):
+                                  'תחתמו', 'לחתום על האישור', 'אישור על קיום',
+                                  'נספח ג', 'נספח ג׳', "נספח ג'")):   # נספח ג = cert of insurance (Sharon)
         typ = 'insurance_cert'
     meta = WA_DOC_TYPES[typ]
     # Optional attachment → R2 (durable, server-side stream; never on the small Railway volume).
