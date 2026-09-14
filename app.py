@@ -4177,7 +4177,21 @@ def admin_queue():
                 pass
         out.append(d)
     conn.close()
-    return render_template('admin_queue.html', items=out)
+    # Same table UX as /admin/other-forms (Sharon 2026-09-14): a ?kind= filter over the two item
+    # kinds, and a date-sort toggle. 'clarify' = escalated from a customer card (message_id
+    # 'queue-cid-<id>'); 'unmatched' = a website form we couldn't tie to anyone.
+    counts = {'all': len(out),
+              'clarify': sum(1 for d in out if (d.get('message_id') or '').startswith('queue-cid-'))}
+    counts['unmatched'] = counts['all'] - counts['clarify']
+    kind = request.args.get('kind', '')
+    if kind in ('clarify', 'unmatched'):
+        want = (kind == 'clarify')
+        out = [d for d in out if (d.get('message_id') or '').startswith('queue-cid-') == want]
+    sort = 'old' if request.args.get('sort') == 'old' else 'new'
+    out.sort(key=lambda d: d.get('received_at') or '', reverse=(sort == 'new'))
+    _a = request.args.to_dict(); _a['sort'] = 'new' if sort == 'old' else 'old'
+    return render_template('admin_queue.html', items=out, counts=counts, kind=kind,
+                           sort=sort, sort_toggle_url=url_for('admin_queue', **_a))
 
 @app.route('/lead-doc/<int:cid>')
 @login_required

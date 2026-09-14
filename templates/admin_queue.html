@@ -9,9 +9,24 @@
     <span class="badge bg-warning text-dark ms-2">{{ items|length }}</span>
   </h4>
   <div class="d-flex flex-wrap gap-2">
+    <a href="/admin/other-forms" class="btn btn-outline-secondary btn-sm">טפסים שאינם חידושים</a>
     <a href="/queue" class="btn btn-outline-info btn-sm">תור עבודה</a>
     <a href="/" class="btn btn-outline-secondary btn-sm">דשבורד</a>
   </div>
+</div>
+
+<p class="text-muted small mb-3">
+  פריטים שנציג העלה לבירור, וטפסים שלא זוהה להם לקוח. לחיצה על שורה פותחת את כל הפרטים ואת פעולות הסגירה.
+</p>
+
+<div class="mb-3 d-flex gap-2 flex-wrap align-items-center">
+  <span class="text-muted small">סוג:</span>
+  <a href="?" class="btn btn-sm {{ 'btn-secondary' if not kind else 'btn-outline-secondary' }}">הכל
+    <span class="badge bg-light text-dark ms-1">{{ counts['all'] }}</span></a>
+  <a href="?kind=clarify" class="btn btn-sm {{ 'btn-secondary' if kind == 'clarify' else 'btn-outline-secondary' }}">
+    לקוח קיים — בירור <span class="badge bg-light text-dark ms-1">{{ counts['clarify'] }}</span></a>
+  <a href="?kind=unmatched" class="btn btn-sm {{ 'btn-secondary' if kind == 'unmatched' else 'btn-outline-secondary' }}">
+    טופס לא מזוהה <span class="badge bg-light text-dark ms-1">{{ counts['unmatched'] }}</span></a>
 </div>
 
 {% if not items %}
@@ -20,170 +35,201 @@
   <strong>אין פריטים ממתינים לבירור</strong>
 </div>
 {% else %}
-<div class="row g-3">
-{% for item in items %}
-<div class="col-12" id="item-{{ item.id }}">
-  <div class="card border-0 shadow-sm border-start border-warning border-4">
-    <div class="card-body">
-      <div class="row g-3">
-
-        <!-- פרטי הטופס -->
-        <div class="col-md-5">
-          <div class="d-flex align-items-center gap-2 mb-2">
-            <span class="badge bg-secondary small">{{ item.received_at }}</span>
-            <span class="small text-muted">{{ item.subject }}</span>
-            {% if item.handled_by %}
-            <span class="badge bg-info text-dark small">
-              <i class="bi bi-person-fill me-1"></i>{{ item.handled_by }}
-            </span>
-            {% endif %}
-            {% if item.assigned_name %}
-            <span class="badge bg-warning text-dark small">
-              <i class="bi bi-arrow-left-right me-1"></i>מיועד ל{{ item.assigned_name }}
-            </span>
-            {% endif %}
-            {% if item.insured_id %}
-            <a href="/insured/{{ item.insured_id }}" class="badge bg-primary text-decoration-none">
-              <i class="bi bi-folder2-open me-1"></i>תיק הלקוח
-            </a>
-            {% endif %}
-          </div>
-          {% if item.cust_id %}
-          <div class="fw-bold fs-6">
-            <a href="/customer/{{ item.cust_id }}" class="text-decoration-none text-dark">
-              {{ item.name or '(ללא שם)' }}<i class="bi bi-box-arrow-up-left ms-1 small text-primary"></i>
-            </a>
-          </div>
-          {% elif item.insured_id %}
-          <div class="fw-bold fs-6">
-            <a href="/insured/{{ item.insured_id }}" class="text-decoration-none text-dark">
-              {{ item.name or '(ללא שם)' }}<i class="bi bi-box-arrow-up-left ms-1 small text-primary"></i>
-            </a>
-          </div>
+<div class="table-responsive">
+  <table class="table table-sm table-hover align-middle bg-white shadow-sm">
+    <thead class="table-light">
+      <tr>
+        <th></th>
+        <th class="text-nowrap">
+          <a href="{{ sort_toggle_url }}" class="text-decoration-none text-dark" title="מיון לפי תאריך">תאריך
+            {% if sort == 'new' %}<i class="bi bi-sort-down"></i>{% else %}<i class="bi bi-sort-up"></i>{% endif %}</a>
+        </th>
+        <th>סוג</th>
+        <th>נושא</th>
+        <th>שם</th>
+        <th>ת.ז / טלפון</th>
+        <th>שיוך</th>
+        <th>פעולות</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in items %}
+      {% set clarify = item.message_id and item.message_id.startswith('queue-cid-') %}
+      <tr class="admin-queue-row" data-bs-toggle="collapse" data-bs-target="#detail-{{ item.id }}" style="cursor:pointer;">
+        <td class="text-muted"><i class="bi bi-chevron-down"></i></td>
+        <td class="small text-muted text-nowrap">{{ item.received_at }}</td>
+        <td>
+          {% if clarify %}
+          <span class="badge bg-warning text-dark"><i class="bi bi-person-exclamation me-1"></i>לקוח קיים</span>
           {% else %}
-          <div class="fw-bold fs-6">{{ item.name or '(ללא שם)' }}</div>
+          <span class="badge bg-secondary">לא מזוהה</span>
           {% endif %}
-          {% if item.id_number %}<div class="small text-muted">ת.ז: {{ item.id_number }}
-            <button type="button" class="btn btn-link btn-sm p-0 ms-1 text-secondary align-baseline"
-                    data-copy="{{ item.id_number }}" onclick="copyText(this)" title="העתק ת.ז"><i class="bi bi-clipboard"></i></button>
-          </div>{% endif %}
-          {% if item.phone %}
-          <div class="small d-flex align-items-center gap-1">
-            <a href="https://wa.me/972{{ item.phone|replace('-','')|replace(' ','')|replace('0','',1) }}" target="_blank" class="text-decoration-none">
-              <i class="bi bi-whatsapp {{ 'text-warning' if item.brand == 'ווינר' else 'text-success' }} me-1"></i>{{ item.phone }}
-            </a>
+        </td>
+        <td class="small">{{ item.subject }}</td>
+        <td class="small fw-semibold">
+          {% if item.cust_id %}
+          <a href="/customer/{{ item.cust_id }}" class="text-decoration-none text-dark" onclick="event.stopPropagation();">
+            {{ item.name or '(ללא שם)' }}<i class="bi bi-box-arrow-up-left ms-1 small text-primary"></i></a>
+          {% elif item.insured_id %}
+          <a href="/insured/{{ item.insured_id }}" class="text-decoration-none text-dark" onclick="event.stopPropagation();">
+            {{ item.name or '(ללא שם)' }}<i class="bi bi-box-arrow-up-left ms-1 small text-primary"></i></a>
+          {% else %}{{ item.name or '(ללא שם)' }}{% endif %}
+          {% if item.brand %}<span class="badge {{ 'bg-info' if item.brand == 'גאיה' else 'bg-purple' }} ms-1">{{ item.brand }}</span>{% endif %}
+        </td>
+        <td class="small text-nowrap">
+          {% if item.id_number %}<div>{{ item.id_number }}<button type="button"
+            class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="copyVal(event,this)"
+            data-copy="{{ item.id_number }}" title="העתק ת.ז"><i class="bi bi-clipboard"></i></button></div>{% endif %}
+          {% if item.phone %}<div class="text-muted">{{ item.phone }}<button type="button"
+            class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="copyVal(event,this)"
+            data-copy="{{ item.phone }}" title="העתק טלפון"><i class="bi bi-clipboard"></i></button>
             <a href="https://wa.me/972{{ item.phone|replace('-','')|replace(' ','')|replace('0','',1) }}" target="_blank"
-               class="btn btn-success btn-sm py-0 px-2" title="פתח וואטסאפ"><i class="bi bi-whatsapp"></i></a>
-            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-2"
-                    data-copy="{{ item.phone }}" onclick="copyText(this)" title="העתק טלפון"><i class="bi bi-clipboard"></i></button>
+               onclick="event.stopPropagation();" class="ms-1 text-decoration-none" title="פתח וואטסאפ"><i
+               class="bi bi-whatsapp {{ 'text-warning' if item.brand == 'ווינר' else 'text-success' }}"></i></a></div>{% endif %}
+          {% if not item.id_number and not item.phone %}<span class="text-muted">—</span>{% endif %}
+        </td>
+        <td class="small text-nowrap">
+          {% if item.assigned_name %}<span class="badge bg-warning text-dark"><i class="bi bi-arrow-left-right me-1"></i>{{ item.assigned_name }}</span>{% endif %}
+          {% if item.handled_by %}<div class="text-muted">{{ item.handled_by }}</div>{% endif %}
+          {% if not item.assigned_name and not item.handled_by %}<span class="text-muted">—</span>{% endif %}
+        </td>
+        <td class="text-nowrap" onclick="event.stopPropagation();">
+          <button type="button" class="btn btn-primary btn-sm py-0"
+                  data-bs-toggle="collapse" data-bs-target="#detail-{{ item.id }}">
+            {% if clarify %}עדכן וסגור{% else %}שייך{% endif %}
+          </button>
+          <div class="dropdown d-inline">
+            <button class="btn btn-outline-secondary btn-sm py-0" data-bs-toggle="dropdown" title="עוד פעולות"><i class="bi bi-three-dots-vertical"></i></button>
+            <ul class="dropdown-menu dropdown-menu-end">
+              {% if item.cust_id %}
+              <li><a class="dropdown-item small" href="/customer/{{ item.cust_id }}">
+                <i class="bi bi-folder2-open me-2"></i>תיק הלקוח</a></li>
+              {% elif item.insured_id %}
+              <li><a class="dropdown-item small" href="/insured/{{ item.insured_id }}">
+                <i class="bi bi-folder2-open me-2"></i>תיק הלקוח</a></li>
+              {% endif %}
+              {% if item.doc_cid %}
+              <li><a class="dropdown-item small" href="/lead-doc/{{ item.doc_cid }}" target="_blank">
+                <i class="bi bi-paperclip me-2"></i>צפה במסמך מצורף</a></li>
+              {% endif %}
+              <li><hr class="dropdown-divider"></li>
+              <li>
+                <form method="POST" action="/admin-queue/{{ item.id }}/action">
+                  <input type="hidden" name="action" value="dismiss">
+                  <button class="dropdown-item small text-danger" onclick="return confirm('לסגור פריט זה ללא הערה?')">
+                    <i class="bi bi-x-circle me-2"></i>סגור פריט</button>
+                </form>
+              </li>
+            </ul>
           </div>
-          {% endif %}
-          {% if item.email %}<div class="small"><i class="bi bi-envelope me-1"></i>{{ item.email }}</div>{% endif %}
-          {% if item.brand %}
-          <span class="badge {{ 'bg-info' if item.brand == 'גאיה' else 'bg-purple' }} mt-1">{{ item.brand }}</span>
-          {% endif %}
-          {% if item.installments or item.payment_method %}
-          <div class="small mt-1">תשלומים: {{ item.installments }} | גבייה: {{ item.payment_method }}</div>
-          {% endif %}
-          {% if item.card_number %}
-          <div class="small fw-bold mt-1 card-mask" data-type="submission" data-id="{{ item.id }}">
-            <i class="bi bi-credit-card me-1"></i><span class="card-val">{{ item.card_number | mask_card }}</span> | {{ item.card_expiry }}
-            <button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="revealCard(this)" title="הצג אשראי מלא"><i class="bi bi-eye"></i></button>
-          </div>
-          {% endif %}
-          {% if item.comments %}
-          <div class="alert alert-warning py-1 px-2 mt-2 small">{{ item.comments }}</div>
-          {% endif %}
-          {% if item.sharon_notes %}
-          <div class="alert alert-info py-1 px-2 mt-2 small mb-0">
-            <i class="bi bi-sticky-fill me-1"></i><strong>הערות שרון:</strong> {{ item.sharon_notes }}
-          </div>
-          {% endif %}
-          {% if item.requests_to_sharon %}
-          <div class="alert alert-secondary py-1 px-2 mt-2 small mb-0">
-            <i class="bi bi-chat-left-text me-1"></i><strong>בקשות לשרון:</strong> {{ item.requests_to_sharon }}
-          </div>
-          {% endif %}
-          {% if item.doc_cid %}
-          <div class="mt-2">
-            <a href="/lead-doc/{{ item.doc_cid }}" target="_blank" class="btn btn-outline-primary btn-sm py-0">
+        </td>
+      </tr>
+      <tr class="collapse" id="detail-{{ item.id }}">
+        <td colspan="8" class="bg-light">
+          <div class="p-3">
+            <div class="row g-2 small mb-3">
+              <div class="col-md-3"><strong>שם:</strong> {{ item.name or '—' }}</div>
+              <div class="col-md-3"><strong>ת.ז:</strong> {{ item.id_number or '—' }}</div>
+              <div class="col-md-3"><strong>טלפון:</strong> {{ item.phone or '—' }}</div>
+              <div class="col-md-3"><strong>אימייל:</strong> {{ item.email or '—' }}</div>
+              <div class="col-md-3"><strong>מותג:</strong> {{ item.brand or '—' }}</div>
+              <div class="col-md-3"><strong>תשלומים:</strong> {{ item.installments or '—' }}</div>
+              <div class="col-md-3"><strong>אמצעי גבייה:</strong> {{ item.payment_method or '—' }}</div>
+              <div class="col-md-3 card-mask" data-type="submission" data-id="{{ item.id }}"><strong>כרטיס:</strong>
+                <span class="card-val">{{ item.card_number | mask_card or '—' }}</span> {{ item.card_expiry or '' }}
+                {% if item.card_number %}<button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline"
+                  onclick="revealCard(this)" title="הצג אשראי מלא"><i class="bi bi-eye"></i></button>{% endif %}</div>
+            </div>
+
+            {% if item.comments %}
+            <div class="alert alert-warning py-1 px-2 small">{{ item.comments }}</div>
+            {% endif %}
+            {% if item.sharon_notes %}
+            <div class="alert alert-info py-1 px-2 small">
+              <i class="bi bi-sticky-fill me-1"></i><strong>הערות שרון:</strong> {{ item.sharon_notes }}
+            </div>
+            {% endif %}
+            {% if item.requests_to_sharon %}
+            <div class="alert alert-secondary py-1 px-2 small">
+              <i class="bi bi-chat-left-text me-1"></i><strong>בקשות לשרון:</strong> {{ item.requests_to_sharon }}
+            </div>
+            {% endif %}
+            {% if item.doc_cid %}
+            <a href="/lead-doc/{{ item.doc_cid }}" target="_blank" class="btn btn-outline-primary btn-sm py-0 mb-3">
               <i class="bi bi-paperclip me-1"></i>צפה במסמך מצורף
             </a>
             <span class="text-muted small ms-1">({{ item.doc_name }} ב-OneDrive)</span>
-          </div>
-          {% endif %}
-        </div>
+            {% endif %}
 
-        <!-- פעולות -->
-        <div class="col-md-7">
+            {% if clarify %}
+            <div class="fw-semibold small mb-2 text-warning-emphasis">
+              <i class="bi bi-person-exclamation me-1"></i>לקוח קיים — עדכן סטטוס סופי:
+            </div>
+            <form method="POST" action="/admin-queue/{{ item.id }}/action" class="mb-2">
+              <input type="hidden" name="action" value="resolve">
+              <div class="row g-2 align-items-end">
+                <div class="col-md-4">
+                  <select name="new_status" class="form-select form-select-sm">
+                    <option value="">בחר סטטוס...</option>
+                    {% for val, label in (ofir_status_options if item.brand == 'אופיר' else gw_status_options) %}{% if val %}
+                    <option value="{{ val }}">{{ label }}</option>
+                    {% endif %}{% endfor %}
+                  </select>
+                </div>
+                <div class="col-md-5">
+                  <input type="text" name="admin_note" class="form-control form-control-sm" placeholder="הערה (אופציונלי)">
+                </div>
+                <div class="col-md-3">
+                  <button type="submit" class="btn btn-success btn-sm w-100">
+                    <i class="bi bi-check-lg me-1"></i>עדכן וסגור
+                  </button>
+                </div>
+              </div>
+            </form>
+            {% else %}
+            <div class="fw-semibold small mb-2">שיוך ללקוח קיים</div>
+            <form method="POST" action="/admin-queue/{{ item.id }}/action" class="mb-2">
+              <input type="hidden" name="action" value="link">
+              <div class="input-group input-group-sm" style="max-width:340px">
+                <input type="text" name="customer_id" class="form-control" placeholder="ID לקוח (מספר פנימי)">
+                <button type="submit" class="btn btn-primary btn-sm">שייך</button>
+              </div>
+            </form>
+            {% endif %}
 
-          {% if item.message_id and item.message_id.startswith('queue-cid-') %}
-          {# פריט שהגיע מ"דורש בירור" — יש לקוח מקושר #}
-          <div class="fw-semibold small mb-2 text-warning">
-            <i class="bi bi-person-exclamation me-1"></i>לקוח קיים — עדכן סטטוס סופי:
-          </div>
-          <form method="POST" action="/admin-queue/{{ item.id }}/action" class="mb-2">
-            <input type="hidden" name="action" value="resolve">
-            <div class="row g-2 align-items-end">
-              <div class="col-md-5">
-                <select name="new_status" class="form-select form-select-sm">
-                  <option value="">בחר סטטוס...</option>
-                  {% for val, label in (ofir_status_options if item.brand == 'אופיר' else gw_status_options) %}{% if val %}
-                  <option value="{{ val }}">{{ label }}</option>
-                  {% endif %}{% endfor %}
-                </select>
-              </div>
-              <div class="col-md-4">
-                <input type="text" name="admin_note" class="form-control form-control-sm"
-                       placeholder="הערה (אופציונלי)">
-              </div>
-              <div class="col-md-3">
-                <button type="submit" class="btn btn-success btn-sm w-100">
-                  <i class="bi bi-check-lg me-1"></i>עדכן וסגור
+            <form method="POST" action="/admin-queue/{{ item.id }}/action">
+              <input type="hidden" name="action" value="dismiss">
+              <div class="d-flex gap-2" style="max-width:520px">
+                <input type="text" name="admin_note" class="form-control form-control-sm" placeholder="הערה לסגירה (אופציונלי)">
+                <button type="submit" class="btn btn-outline-secondary btn-sm text-nowrap"
+                        onclick="return confirm('לסגור פריט זה?')">
+                  <i class="bi bi-x-circle me-1"></i>סגור
                 </button>
               </div>
-            </div>
-          </form>
-          {% else %}
-          {# פריט לא מזוהה — שיוך ידני #}
-          <div class="fw-semibold small mb-2">שיוך ללקוח קיים</div>
-          <form method="POST" action="/admin-queue/{{ item.id }}/action" class="mb-2">
-            <input type="hidden" name="action" value="link">
-            <div class="input-group input-group-sm">
-              <input type="text" name="customer_id" class="form-control"
-                     placeholder="ID לקוח (מספר פנימי)">
-              <button type="submit" class="btn btn-primary btn-sm">שייך</button>
-            </div>
-          </form>
-          {% endif %}
-
-          <form method="POST" action="/admin-queue/{{ item.id }}/action">
-            <input type="hidden" name="action" value="dismiss">
-            <div class="d-flex gap-2">
-              <input type="text" name="admin_note" class="form-control form-control-sm"
-                     placeholder="הערה לסגירה (אופציונלי)">
-              <button type="submit" class="btn btn-outline-secondary btn-sm text-nowrap"
-                      onclick="return confirm('לסגור פריט זה?')">
-                <i class="bi bi-x-circle me-1"></i>סגור
-              </button>
-            </div>
-          </form>
-        </div>
-
-      </div>
-    </div>
-  </div>
-</div>
-{% endfor %}
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </div>
 {% endif %}
+
 <script>
-function copyText(btn){
-  var t = btn.getAttribute('data-copy') || '';
-  function fb(v,cb){ var ta=document.createElement('textarea'); ta.value=v; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.focus(); ta.select(); try{document.execCommand('copy');}catch(e){} document.body.removeChild(ta); if(cb) cb(); }
-  function ok(){ var i=btn.querySelector('i'); if(!i) return; var c=i.className; i.className='bi bi-check-lg text-success'; setTimeout(function(){ i.className=c; },1200); }
-  if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(t).then(ok).catch(function(){ fb(t,ok); }); }
-  else { fb(t,ok); }
-}
+  // Copy ת.ז / phone. Bound on the button itself — a delegated document-level listener never
+  // fires, because the row cell stops propagation for the Bootstrap collapse.
+  function copyVal(e, b) {
+    e.preventDefault(); e.stopPropagation();
+    const txt = b.dataset.copy || '';
+    const done = () => { const i = b.querySelector('i'); i.className = 'bi bi-clipboard-check text-success';
+                         setTimeout(() => { i.className = 'bi bi-clipboard'; }, 1500); };
+    const fallback = () => {
+      const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (_) {} document.body.removeChild(ta);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(fallback);
+    else fallback();
+  }
 </script>
 {% endblock %}
