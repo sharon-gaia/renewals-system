@@ -87,7 +87,15 @@
         <td><span class="badge bg-info-subtle text-info-emphasis">{{ item.category }}</span></td>
         <td class="small">{{ item.subject }}</td>
         <td class="small fw-semibold">{{ item.title }}</td>
-        <td class="small">{{ item.detail }}</td>
+        <td class="small text-nowrap" onclick="event.stopPropagation();">
+          {% if item.full.id_number %}<div>{{ item.full.id_number }}
+            <button type="button" class="btn btn-link btn-sm p-0 copy-btn align-baseline" data-copy="{{ item.full.id_number }}" title="העתק ת.ז"><i class="bi bi-clipboard"></i></button>
+          </div>{% endif %}
+          {% if item.full.phone %}<div class="text-muted">{{ item.full.phone }}
+            <button type="button" class="btn btn-link btn-sm p-0 copy-btn align-baseline" data-copy="{{ item.full.phone }}" title="העתק טלפון"><i class="bi bi-clipboard"></i></button>
+          </div>{% endif %}
+          {% if not item.full.id_number and not item.full.phone %}<span class="text-muted">—</span>{% endif %}
+        </td>
         <td class="text-nowrap" onclick="event.stopPropagation();">
           <button type="button" class="btn btn-outline-primary btn-sm py-0 mb-1" onclick="openFile({{ item.id }})"
                   title="{{ 'מעבר לתיק הלקוח' if item.insured_id else 'פתיחת תיק לקוח (משויך ללקוח קיים אם נמצא)' }}">
@@ -169,6 +177,22 @@
 <script>
   document.getElementById('select-all').addEventListener('change', function () {
     document.querySelectorAll('.row-check').forEach(cb => cb.checked = this.checked);
+  });
+
+  // Copy ת.ז / phone straight from the list (same behaviour as the collection screen).
+  document.addEventListener('click', function (e) {
+    const b = e.target.closest('.copy-btn');
+    if (!b) return;
+    e.preventDefault(); e.stopPropagation();
+    const txt = b.dataset.copy || '';
+    const done = () => { const i = b.querySelector('i'); i.className = 'bi bi-clipboard-check text-success';
+                         setTimeout(() => { i.className = 'bi bi-clipboard'; }, 1500); };
+    const fallback = () => {
+      const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); done(); } catch (_) {} document.body.removeChild(ta);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(done).catch(fallback);
+    else fallback();
   });
 
   // Advance an item through the work queue. Posted via fetch so we don't nest a
