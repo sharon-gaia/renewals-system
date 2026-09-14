@@ -4277,9 +4277,13 @@ def other_forms():
     cat = request.args.get('cat', '')
     if cat:
         rows = [x for x in rows if x['category'] == cat]
-    rows.sort(key=lambda x: x['received_at'] or '', reverse=True)
+    # ?sort=old → oldest first (a FIFO work queue); default newest first.
+    sort = 'old' if request.args.get('sort') == 'old' else 'new'
+    rows.sort(key=lambda x: x['received_at'] or '', reverse=(sort == 'new'))
     conn.close()
+    _a = request.args.to_dict(); _a['sort'] = 'new' if sort == 'old' else 'old'
     return render_template('other_forms.html', items=rows, counts=counts, show=show, cat=cat,
+                           sort=sort, sort_toggle_url=url_for('other_forms', **_a),
                            queue_labels=FORM_QUEUE_LABELS)
 
 

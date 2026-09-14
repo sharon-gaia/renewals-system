@@ -62,7 +62,10 @@
         <th><input type="checkbox" id="select-all"></th>
         <th></th>
         <th>סטטוס</th>
-        <th>תאריך</th>
+        <th class="text-nowrap">
+          <a href="{{ sort_toggle_url }}" class="text-decoration-none text-dark" title="מיון לפי תאריך">תאריך
+            {% if sort == 'new' %}<i class="bi bi-sort-down"></i>{% else %}<i class="bi bi-sort-up"></i>{% endif %}</a>
+        </th>
         <th>קטגוריה</th>
         <th>נושא</th>
         <th>שם</th>
