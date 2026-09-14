@@ -3015,13 +3015,17 @@ def api_group_owner_policy_queue():
     since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d %H:%M')
     conn = get_db()
     rows = conn.execute(
-        "SELECT DISTINCT pd.id AS doc_id, pd.policy_number, pd.received_at, pr.insured_id, pr.insured_name, "
+        "SELECT DISTINCT pd.id AS doc_id, pd.policy_number, pd.received_at, pd.filepath, pd.r2_key, "
+        "       pr.insured_id, pr.insured_name, "
         "       i.name AS master_name, i.group_owner, i.phone AS owner_phone, i.brand "
         "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
         "JOIN insureds i ON ltrim(COALESCE(i.id_number,''),'0')=ltrim(COALESCE(pr.insured_id,''),'0') "
         "WHERE COALESCE(i.group_owner,'')!='' AND COALESCE(pd.whatsapp_sent_at,'')!='ארכיון' "
         "AND pd.received_at >= ? AND pd.id NOT IN (SELECT doc_id FROM group_owner_policies) "
         "ORDER BY pd.received_at DESC", (since,)).fetchall()
+    # Only documents whose PDF still exists — older ones were removed by the disk cleanup and can
+    # never be redacted; offering them would make the sender retry forever.
+    rows = [r for r in rows if r['r2_key'] or (r['filepath'] and os.path.exists(r['filepath']))]
     conn.close()
     return jsonify({'count': len(rows), 'items': [
         {'doc_id': r['doc_id'], 'id_number': r['insured_id'], 'name': r['master_name'] or r['insured_name'],
