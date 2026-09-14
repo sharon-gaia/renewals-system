@@ -3975,9 +3975,17 @@ def other_forms():
         "SELECT COUNT(*) FROM unmatched_submissions WHERE status='טופל' AND subject LIKE ? " + not_monitor + bc,
         ['וואטסאפ | %'] + bp).fetchone()[0]
 
+    counts['cat'] = {}
+    for it in rows:
+        counts['cat'][it['category']] = counts['cat'].get(it['category'], 0) + 1
+    # Certificate-of-insurance requests are their own queue, not mixed with certificate additions
+    # (Sharon 2026-09-14) — ?cat= narrows the current view to one category.
+    cat = request.args.get('cat', '')
+    if cat:
+        rows = [x for x in rows if x['category'] == cat]
     rows.sort(key=lambda x: x['received_at'] or '', reverse=True)
     conn.close()
-    return render_template('other_forms.html', items=rows, counts=counts, show=show,
+    return render_template('other_forms.html', items=rows, counts=counts, show=show, cat=cat,
                            queue_labels=FORM_QUEUE_LABELS)
 
 
@@ -10938,6 +10946,44 @@ def api_cert_update_queue():
                       'email_body': cap + "\n" + POLICY_EMAIL_SIGN})
     conn.close()
     return jsonify({'count': len(items), 'items': items})
+
+def _recategorize_wa_submission(sid, typ):
+    """Move a WhatsApp-inbound row between the two queues (הוספת תעודה ↔ בקשת אישור ביטוח). The bot
+    labels any attached document as cert_add, so a certificate-of-insurance request that arrives with
+    a file lands in the wrong queue (Sharon 2026-09-14). Clears a cert-send arm that no longer applies."""
+    if typ not in WA_DOC_TYPES:
+        return None
+    conn = get_db()
+    r = conn.execute("SELECT id, subject, id_number FROM unmatched_submissions WHERE id=?", (sid,)).fetchone()
+    if not r or not (r['subject'] or '').startswith('וואטסאפ | '):
+        conn.close(); return None
+    meta = WA_DOC_TYPES[typ]
+    conn.execute("UPDATE unmatched_submissions SET subject=?, wa_send_requested_at=NULL, wa_send_by=NULL "
+                 "WHERE id=? AND COALESCE(wa_sent_at,'')=''", (meta['subject'], sid))
+    log_event(conn, event_key(r['id_number'], 'sub-%s' % sid),
+              f"סיווג הפנייה שונה ל: {meta['category']}", 'system', kind='wa_recategorize')
+    conn.commit(); conn.close()
+    return meta['category']
+
+@app.route('/admin/other-forms/<int:sid>/recategorize', methods=['POST'])
+@login_required
+@admin_required
+def other_forms_recategorize(sid):
+    cat = _recategorize_wa_submission(sid, (request.form.get('type') or '').strip())
+    if cat:
+        flash(f'הפנייה הועברה לתור "{cat}"', 'success')
+    else:
+        flash('לא ניתן לשנות סיווג לפנייה זו', 'warning')
+    return redirect(request.referrer or url_for('other_forms'))
+
+@app.route('/api/wa/inbound-recategorize', methods=['POST'])
+def api_wa_inbound_recategorize():
+    """Token: same reclassification, for corrections from the bot side."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    cat = _recategorize_wa_submission(d.get('id'), (d.get('type') or '').strip())
+    return jsonify({'ok': bool(cat), 'category': cat})
 
 @app.route('/api/wa/cert-update-preview')
 def api_cert_update_preview():

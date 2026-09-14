@@ -31,6 +31,15 @@
   </a>
   <a href="?show=all" class="btn btn-sm {{ 'btn-primary' if show == 'all' else 'btn-outline-primary' }}">הכל</a>
 </div>
+<div class="mb-3 d-flex gap-2 flex-wrap align-items-center">
+  <span class="text-muted small">תור:</span>
+  <a href="?show={{ show }}" class="btn btn-sm {{ 'btn-secondary' if not cat else 'btn-outline-secondary' }}">כל הקטגוריות</a>
+  {% for c, n in counts['cat'].items() %}
+  <a href="?show={{ show }}&cat={{ c }}" class="btn btn-sm {{ 'btn-secondary' if cat == c else 'btn-outline-secondary' }}">
+    {{ c }} <span class="badge bg-light text-dark ms-1">{{ n }}</span>
+  </a>
+  {% endfor %}
+</div>
 
 {% if not items %}
 <div class="alert alert-success text-center py-5">
@@ -93,6 +102,15 @@
           <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'ממתין')" title="החזר לממתין"><i class="bi bi-arrow-counterclockwise"></i></button>
           {% else %}
           <button type="button" class="btn btn-outline-secondary btn-sm py-0" onclick="setFormStatus({{ item.id }}, 'ממתין')">החזר לתור</button>
+          {% endif %}
+          {% if item.subject.startswith('וואטסאפ | ') and not item.full.wa_sent_at %}
+          <br>
+          <form method="post" action="/admin/other-forms/{{ item.id }}/recategorize" class="d-inline">
+            <input type="hidden" name="type" value="{{ 'insurance_cert' if item.category == 'הוספת תעודה' else 'cert_add' }}">
+            <button class="btn btn-outline-secondary btn-sm py-0 mt-1" title="סיווג שגוי? העבר לתור השני">
+              <i class="bi bi-arrow-left-right me-1"></i>{{ 'העבר לאישור ביטוח' if item.category == 'הוספת תעודה' else 'העבר להוספת תעודה' }}
+            </button>
+          </form>
           {% endif %}
           {% if item.category == 'הוספת תעודה' %}
           <br>
