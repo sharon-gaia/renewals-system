@@ -6615,6 +6615,20 @@ def _policy_to972(phone):
 _POLICY_FORCE_IDS = set()  # TEST-only: ת"ז forced into the queue regardless of the 48h window
 _POLICY_LIVE_IDS = set()   # per-ת"ז LIVE override: real recipient even while the system is in test mode
 
+def _is_group_owner_insured(conn, idn_key):
+    """True when this ת"ז belongs to a group-owner (centre-paid) therapist — on the customer row OR on
+    the insured master. Such policies are NEVER auto-delivered: the centre gets a price-redacted copy
+    after Sharon approves it. (2026-09-14 incident: a NEW-business policy of one of אבירם's therapists
+    was auto-sent straight to her — the old exclusion only covered the renewal branch via customers,
+    and she had no customer row at all.)"""
+    if not idn_key:
+        return False
+    for tbl in ('customers', 'insureds'):
+        if conn.execute(f"SELECT 1 FROM {tbl} WHERE ltrim(COALESCE(id_number,''),'0')=? "
+                        "AND COALESCE(group_owner,'')!='' LIMIT 1", (idn_key,)).fetchone():
+            return True
+    return False
+
 def _policy_queue_items(conn, brand_key):
     """Documents ready for auto-delivery on `brand_key` ('gaia'|'winner'): a recent
     (≤48h) Harel RENEWAL PDF whose ת"ز matches a customer in ANY month (incl. archived) marked 'חודש',
@@ -6636,7 +6650,7 @@ def _policy_queue_items(conn, brand_key):
          % ','.join('?' * len(brands)))
     for c in conn.execute(q, brands).fetchall():
         idn = normalize_id_number(c['id_number'])
-        if idn:
+        if idn and not _is_group_owner_insured(conn, idn.lstrip('0')):
             custs[idn] = c
     if not custs:
         return []
@@ -6727,6 +6741,8 @@ def _policy_queue_items(conn, brand_key):
             key = (normalize_id_number(r['insured_id']) or '').lstrip('0')
             if not key or key in seen_new:
                 continue
+            if _is_group_owner_insured(conn, key):
+                continue      # centre-paid therapist → price-redacted copy to the owner, never direct
             # Backlog guard: a website-form lead received on/before 1/8 may already have been
             # issued + sent manually — skip auto-send so the customer isn't messaged twice.
             lead = conn.execute(
