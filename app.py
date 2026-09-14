@@ -10864,11 +10864,12 @@ def _cert_update_candidate(conn, idn, requested_at):
     # Floor: the request day-start, so a policy re-issued the same day (after the request) qualifies
     # while an old pre-request policy does not.
     floor = (requested_at or '')[:10] + ' 00:00'
+    # Any policy document issued after the request — a cert addition re-issues the policy as an
+    # endorsement ("אינ'"/תוספת), NOT a חדש/חידוש, so don't filter by doc type. Newest = the last copy.
     return conn.execute(
-        "SELECT pd.id, pd.filename, pd.policy_number, pd.received_at, pd.r2_key, pd.filepath "
+        "SELECT pd.id, pd.filename, pd.policy_number, pd.received_at, pd.r2_key, pd.filepath, pr.doc_type_label "
         "FROM policy_records pr JOIN policy_documents pd ON pd.id=pr.policy_document_id "
         "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? AND COALESCE(pd.whatsapp_sent_at,'')!='ארכיון' "
-        "AND (pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%' OR pr.doc_type_label LIKE '%תוספת%') "
         "AND pd.received_at >= ? ORDER BY pd.received_at DESC, pd.id DESC LIMIT 1", (z, floor)).fetchone()
 
 @app.route('/api/wa/cert-update-queue')
