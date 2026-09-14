@@ -10960,8 +10960,18 @@ def api_cert_update_sent():
     conn.execute("UPDATE unmatched_submissions SET wa_sent_at=?, wa_send_doc_id=? WHERE id=?", (now, doc_id, sid))
     log_event(conn, event_key(r['id_number'], 'sub-%s' % sid),
               "העתק הפוליסה המעודכן נשלח ללקוח בוואטסאפ (לאחר הוספת תעודה)", 'system', kind='cert_update_send')
+    # Record the delivery on the document itself and file the source Harel email away, exactly like
+    # a normal policy delivery — otherwise the update email stays sitting in the inbox (Sharon 2026-09-14).
+    mid = None
+    if doc_id:
+        conn.execute("UPDATE policy_documents SET whatsapp_sent_at=COALESCE(NULLIF(whatsapp_sent_at,''),?), "
+                     "email_sent_at=COALESCE(NULLIF(email_sent_at,''),?) WHERE id=?", (now, now, doc_id))
+        row = conn.execute("SELECT message_id FROM policy_documents WHERE id=?", (doc_id,)).fetchone()
+        mid = row['message_id'] if row else None
     conn.commit(); conn.close()
-    return jsonify({'ok': True})
+    if mid:
+        threading.Thread(target=_label_email, args=(mid,), daemon=True).start()
+    return jsonify({'ok': True, 'labeled_email': bool(mid)})
 
 @app.route('/api/wa/inbound-digest', methods=['POST'])
 def api_wa_inbound_digest():
