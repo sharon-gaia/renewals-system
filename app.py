@@ -11479,9 +11479,13 @@ def email_poll_thread():
     _cyc = [0]
     _coll_slot = [None]   # last "date-hour" slot the collection scanners ran in
     NIGHT_INTERVAL = 1800   # 21:00–07:00 Israel: every 30 min (Sharon, 2026-09-08 — nothing is sent at night anyway)
+    _first = [True]
     while True:
         _h = _israel_now().hour
-        time.sleep(NIGHT_INTERVAL if (_h >= 21 or _h < 7) else EMAIL_CONFIG['check_interval'])
+        # After a deploy/restart the first cycle waits only 60s — otherwise the full interval passes
+        # with no scan and the wa-sender watchdog raises a false "scanner not running" alert.
+        time.sleep(60 if _first[0] else (NIGHT_INTERVAL if (_h >= 21 or _h < 7) else EMAIL_CONFIG['check_interval']))
+        _first[0] = False
         # Once an hour, widen the window as a safety net so nothing is missed after an outage.
         _cyc[0] += 1
         # Shabbat / holiday rest: no email scanning Fri/Sat + no_send_dates holidays; resume only at
