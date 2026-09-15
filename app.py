@@ -8143,7 +8143,9 @@ def api_wa_manual_queue():
         "WHERE COALESCE(sent_at,'')='' AND COALESCE(failed_at,'')='' ORDER BY id LIMIT 20").fetchall()
     conn.close()
     return jsonify({'count': len(rows), 'items': [
-        {'id': r['id'], 'name': r['name'], 'phone': re.sub(r'\D', '', r['phone'] or ''),
+        # International format — Meta accepts a local number and returns a wamid, then silently
+        # never delivers it (caught on the first live test, 2026-09-15).
+        {'id': r['id'], 'name': r['name'], 'phone': _policy_to972(r['phone']),
          'brand_key': _wa_brand_key(r['brand']), 'brand': r['brand'], 'body': r['body'],
          'id_number': r['id_number']} for r in rows]})
 
