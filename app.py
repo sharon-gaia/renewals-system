@@ -3452,8 +3452,8 @@ def special_tracks():
     for o in owners:
         o['month_status'] = cur.get(re.sub(r'\D', '', o['id_number'] or '').lstrip('0'), '')
     midwives = [dict(r) for r in conn.execute(
-        "SELECT id_number, name, brand, phone, status FROM insureds WHERE COALESCE(is_midwife,0)=1 "
-        "ORDER BY name").fetchall()]
+        "SELECT id_number, name, brand, phone, status, policy_card_last4, policy_card_checked_at "
+        "FROM insureds WHERE COALESCE(is_midwife,0)=1 ORDER BY name").fetchall()]
     for m in midwives:
         m['month_status'] = cur.get(re.sub(r'\D', '', m['id_number'] or '').lstrip('0'), '')
     pend = [dict(r) for r in conn.execute(

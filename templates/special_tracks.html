@@ -28,7 +28,9 @@
 <div class="alert alert-info small">
   לקוחות שאינם במסלול החידוש הרגיל. <strong>קבוצת מרכז</strong> — המרכז משלם על כל המטפלים בכרטיס שלו,
   כל התקשורת אליו, והפוליסה נשלחת אליו <strong>אחרי מחיקת המחיר</strong> ובאישורך.
-  <strong>מיילדות</strong> — מסלול ווינר ייעודי, מטופל ידנית.
+  <strong>מיילדות</strong> — מסלול ווינר ייעודי, מטופל ידנית. החיווי
+  <span class="badge bg-dark"><i class="bi bi-building me-1"></i>תשלום ארגון</span>
+  נקרא אוטומטית מעמוד התשלום של הפוליסה — פרמיה שנגבית מכרטיס הארגון (****{{ org_card_last4 }}).
 </div>
 
 {% if pending %}
@@ -101,19 +103,30 @@
   </div>
 </div>
 
-<h6 class="mt-4 mb-2"><i class="bi bi-heart-pulse me-1 text-danger"></i>מיילדות <span class="text-muted">({{ midwives|length }})</span></h6>
+<h6 class="mt-4 mb-2"><i class="bi bi-heart-pulse me-1 text-danger"></i>מיילדות <span class="text-muted">({{ midwives|length }})</span>
+  <span class="badge bg-dark ms-2"><i class="bi bi-building me-1"></i>תשלום ארגון: {{ midwives|selectattr('policy_card_last4','equalto',org_card_last4)|list|length }}</span>
+</h6>
 <div class="card border-0 shadow-sm">
   <div class="table-responsive">
     <table class="table table-sm align-middle mb-0 small">
-      <thead class="table-light"><tr><th class="ps-3">שם</th><th>ת.ז</th><th>מותג</th><th>טלפון</th><th>סטטוס חודשי</th></tr></thead>
+      <thead class="table-light"><tr><th class="ps-3">שם</th><th>ת.ז</th><th>מותג</th><th>טלפון</th><th>אמצעי תשלום</th><th>סטטוס חודשי</th></tr></thead>
       <tbody>
       {% for m in midwives %}
         <tr><td class="ps-3 fw-semibold">{{ m.name }}</td><td class="text-nowrap">{{ m.id_number }}</td>
             <td>{{ m.brand or '—' }}</td><td class="text-nowrap">{{ m.phone or '—' }}</td>
+            <td class="text-nowrap">
+              {% if m.policy_card_last4 == org_card_last4 %}
+                <span class="badge bg-dark" title="נקרא מהפוליסה{% if m.policy_card_checked_at %} · {{ m.policy_card_checked_at }}{% endif %}"><i class="bi bi-building me-1"></i>תשלום ארגון</span>
+              {% elif m.policy_card_last4 %}
+                <span class="text-muted">כרטיס ****{{ m.policy_card_last4 }}</span>
+              {% else %}
+                <span class="text-muted" title="לא נמצא כרטיס בפוליסה שבמערכת">—</span>
+              {% endif %}
+            </td>
             <td>{% if m.month_status %}<span class="badge bg-light text-dark border">{{ m.month_status }}</span>
                 {% else %}<span class="text-muted">לא בחודש הפעיל</span>{% endif %}</td></tr>
       {% else %}
-        <tr><td colspan="5" class="text-center text-muted py-3">אין מיילדות מסומנות</td></tr>
+        <tr><td colspan="6" class="text-center text-muted py-3">אין מיילדות מסומנות</td></tr>
       {% endfor %}
       </tbody>
     </table>
