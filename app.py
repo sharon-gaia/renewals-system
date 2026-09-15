@@ -3341,7 +3341,11 @@ def api_mark_midwives_by_id():
     ids = [re.sub(r'\D', '', str(x)).lstrip('0') for x in (d.get('ids') or [])]
     ids = [x for x in ids if x][:2000]
     want = 0 if d.get('unmark') else 1
-    brand = (d.get('brand') or '').strip()
+    # Sharon 2026-09-15: "גם אם יש שם אופיר זה ווינר מבחינתך" — Ofir-branded rows are the same
+    # Winner operation, so asking for ווינר accepts אופיר too.
+    brands = [b.strip() for b in (d.get('brands') or ([d.get('brand')] if d.get('brand') else [])) if b and b.strip()]
+    if 'ווינר' in brands and 'אופיר' not in brands:
+        brands.append('אופיר')
     conn = get_db()
     changed, skipped_brand, missing = [], [], []
     for z in ids:
@@ -3350,7 +3354,7 @@ def api_mark_midwives_by_id():
         if not r:
             missing.append(z)
             continue
-        if brand and (r['brand'] or '') != brand:
+        if brands and (r['brand'] or '') not in brands:
             skipped_brand.append('%s (%s)' % (r['name'], r['brand'] or '—'))
             continue
         if bool(r['is_midwife']) == bool(want):
