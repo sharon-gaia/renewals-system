@@ -11274,6 +11274,36 @@ def api_wa_inbound_list():
     conn.close()
     return jsonify({'count': len(rows), 'items': rows})
 
+def _fill_submission_identity(conn, r):
+    """A WhatsApp row the bot couldn't match at ingest (the sender wasn't in the system yet) keeps an
+    empty ת"ז forever, which silently breaks every action keyed on it. Re-resolve by phone (last 9,
+    customers newest-month-first then insureds) and persist what we learn. Returns the ת"ז or ''."""
+    ph = re.sub(r'\D', '', r['phone'] or '')[-9:]
+    if len(ph) < 9:
+        return ''
+    PH = "REPLACE(REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ',''),'+972','0')"
+    m = conn.execute(
+        f"SELECT id_number, name, brand, email FROM customers WHERE {PH} LIKE ? "
+        "AND COALESCE(import_source,'')!='test_ofir' AND COALESCE(id_number,'')!='' "
+        "ORDER BY month_id DESC, id DESC LIMIT 1", ('%' + ph,)).fetchone()
+    if not m:
+        m = conn.execute(
+            f"SELECT id_number, name, brand, email FROM insureds WHERE {PH} LIKE ? "
+            "AND COALESCE(id_number,'')!='' ORDER BY id DESC LIMIT 1", ('%' + ph,)).fetchone()
+    if not m:
+        return ''
+    idn = re.sub(r'\D', '', m['id_number'] or '')
+    if not idn:
+        return ''
+    conn.execute("UPDATE unmatched_submissions SET id_number=?, "
+                 "name=CASE WHEN COALESCE(name,'')='' THEN ? ELSE name END, "
+                 "brand=CASE WHEN COALESCE(brand,'')='' THEN ? ELSE brand END, "
+                 "email=CASE WHEN COALESCE(email,'')='' THEN ? ELSE email END WHERE id=?",
+                 (m['id_number'], m['name'] or '', m['brand'] or '', m['email'] or '', r['id']))
+    print(f"[other-forms] סופח ת\"ז לפנייה #{r['id']} לפי טלפון: {m['id_number']}", flush=True)
+    return idn
+
+
 @app.route('/admin/other-forms/<int:sid>/wa-send', methods=['POST'])
 @login_required
 @admin_required
@@ -11285,14 +11315,24 @@ def other_forms_wa_send(sid):
     who = session.get('display_name') or session.get('username') or 'admin'
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
     conn = get_db()
-    r = conn.execute("SELECT id, subject, id_number, name FROM unmatched_submissions WHERE id=?", (sid,)).fetchone()
+    r = conn.execute("SELECT id, subject, id_number, name, phone FROM unmatched_submissions WHERE id=?",
+                     (sid,)).fetchone()
     if not r:
         conn.close(); return jsonify({'error': 'not found'}), 404
-    if not re.sub(r'\D', '', r['id_number'] or ''):
-        conn.close(); return jsonify({'error': 'no id_number — link a customer first'}), 400
+    idn = re.sub(r'\D', '', r['id_number'] or '')
+    if not idn:
+        # The bot matches the sender by phone AT INGEST; someone who joined afterwards (a new policy
+        # issued the next day) left the row with no ת"ז, and this button then failed silently
+        # (Sharon 2026-09-15, גמרמן לריסה). Re-resolve by phone now — the customer exists by the time
+        # the updated policy is ready.
+        idn = _fill_submission_identity(conn, r)
+        if not idn:
+            conn.commit(); conn.close()
+            return jsonify({'error': 'no_id', 'message':
+                            'אין ת"ז על הפנייה ולא נמצא לקוח לפי הטלפון — פתח את התיק ושייך קודם.'}), 400
     conn.execute("UPDATE unmatched_submissions SET status='טופל', wa_send_requested_at=?, wa_send_by=?, wa_sent_at=NULL "
                  "WHERE id=?", (now, who, sid))
-    log_event(conn, event_key(r['id_number'], 'sub-%d' % sid),
+    log_event(conn, event_key(idn, 'sub-%d' % sid),
               "סומן 'טופל ושליחה בוואטסאפ' — העתק הפוליסה המעודכן יישלח ללקוח", 'system', kind='cert_update_arm')
     conn.commit(); conn.close()
     if request.form:

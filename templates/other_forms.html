@@ -264,8 +264,16 @@
 
   function waSend(id) {
     if (!confirm('לסמן טופל ולשלוח ללקוח בוואטסאפ את העותק המעודכן של הפוליסה?\nהשליחה תצא בריצה הקרובה (שעות שליחה, לא בשבת/חג), עם הפוליסה האחרונה שהופקה.')) return;
-    fetch('/admin/other-forms/' + id + '/wa-send', {method: 'POST', body: new FormData()})
-      .then(() => window.location.reload());
+    // Report a refusal instead of reloading over it — a row with no ת"ז used to fail silently and
+    // just stay in the queue (Sharon 2026-09-15).
+    fetch('/admin/other-forms/' + id + '/wa-send', {method: 'POST',
+          headers: {'Accept': 'application/json'}})
+      .then(r => r.json().catch(() => ({})).then(j => ({ok: r.ok, j})))
+      .then(({ok, j}) => {
+        if (ok) { window.location.reload(); return; }
+        alert('השליחה לא סומנה: ' + (j.message || j.error || 'שגיאה לא ידועה'));
+      })
+      .catch(() => alert('השליחה לא סומנה — תקלת תקשורת. נסה שוב.'));
   }
 </script>
 {% endif %}
