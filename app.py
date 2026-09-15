@@ -2258,7 +2258,8 @@ def _midwife_rows(conn, idn=None, name=None):
     if not where:
         return []
     return conn.execute(
-        "SELECT i.id, i.id_number, i.name, i.status, i.period_end, i.policy_number FROM insureds i "
+        "SELECT i.id, i.id_number, i.name, i.status, i.period_end, i.policy_number, "
+        "i.policy_card_last4 FROM insureds i "
         "WHERE " + " AND ".join(where) + " AND (COALESCE(i.is_midwife,0)=1 OR EXISTS ("
         "  SELECT 1 FROM customers c WHERE ltrim(COALESCE(c.id_number,''),'0')=ltrim(COALESCE(i.id_number,''),'0')"
         "  AND COALESCE(c.is_midwife,0)=1)) ORDER BY i.name LIMIT 12", params).fetchall()
@@ -2268,22 +2269,23 @@ ORG_CARD_LAST4 = '5198'                 # כרטיס הארגון — פוליס
 # four digits — these policies also use short asterisk rows as separators/decoration.
 _CARD_MASK_RE = re.compile(r'\*{8,}(\d{4})(?!\d)')
 
-def _policy_card_last4(doc):
-    """The last 4 digits of the card the premium is collected from, read off the policy PDF's
-    "אופן תשלום הפרמיה" block (Sharon 2026-09-15: "תבדוק את העמוד האחרון"). Harel prints it as
-    ************1234. The last page first — but the block sits a page earlier on some layouts, so
-    fall back to the rest of the document rather than miss it. Returns (last4, page_no) or (None,None)."""
-    data = None
+def _policy_doc_bytes(doc):
+    """Raw bytes of a policy_documents row — local file first, else the R2 archive; None if neither."""
     fp = doc['filepath'] if 'filepath' in doc.keys() else None
     if fp and os.path.exists(fp):
         try:
             with open(fp, 'rb') as fh:
-                data = fh.read()
+                return fh.read()
         except OSError:
-            data = None
-    if data is None:
-        key = doc['r2_key'] if 'r2_key' in doc.keys() else None
-        data = _r2_fetch(key) if key else None
+            pass
+    key = doc['r2_key'] if 'r2_key' in doc.keys() else None
+    return _r2_fetch(key) if key else None
+
+def _policy_card_last4(data):
+    """The last 4 digits of the card the premium is collected from, read off the policy PDF's
+    "אופן תשלום הפרמיה" block (Sharon 2026-09-15: "תבדוק את העמוד האחרון"). Harel prints it as
+    ************1234. The last page first — but the block sits a page earlier on some layouts, so
+    fall back to the rest of the document rather than miss it. Returns (last4, page_no) or (None,None)."""
     if not data:
         return None, None
     try:
@@ -2306,30 +2308,41 @@ def _scan_midwife_cards(conn, force=False, limit=60):
         "  WHERE ltrim(COALESCE(c.id_number,''),'0')=ltrim(COALESCE(i.id_number,''),'0') "
         "  AND COALESCE(c.is_midwife,0)=1) ORDER BY i.name").fetchall()
     now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
-    out = {'checked': 0, 'org': [], 'other': [], 'no_file': [], 'skipped': 0}
+    out = {'checked': 0, 'org': [], 'other': [], 'no_card': [], 'no_file': [], 'skipped': 0}
     for r in rows:
         z = re.sub(r'\D', '', r['id_number'] or '').lstrip('0')
-        doc = conn.execute(
+        # The newest record's file isn't always the one still on disk / in R2 — walk back like
+        # /api/policy-pdf does, instead of giving up on the first row (that under-reported badly).
+        docs = conn.execute(
             "SELECT pd.id, pd.filepath, pd.r2_key FROM policy_records pr "
             "JOIN policy_documents pd ON pd.id=pr.policy_document_id "
             "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? "
             "AND (pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%') "
-            "ORDER BY pd.received_at DESC, pr.id DESC LIMIT 1", (z,)).fetchone()
-        if not doc:
-            out['no_file'].append(r['name'])
+            "ORDER BY pd.received_at DESC, pr.id DESC LIMIT 6", (z,)).fetchall()
+        if not docs:
+            out['no_file'].append(r['name'] + ' (אין פוליסה במערכת)')
             continue
-        if not force and r['policy_card_doc_id'] == doc['id'] and (r['policy_card_last4'] or ''):
+        if not force and r['policy_card_doc_id'] == docs[0]['id'] and (r['policy_card_last4'] or ''):
             out['skipped'] += 1                      # already read from this very document
             continue
         if out['checked'] >= limit:
             break
-        last4, page = _policy_card_last4(doc)
+        last4, doc_id = None, None
+        for d in docs:
+            data = _policy_doc_bytes(d)
+            if not data:
+                continue                             # file gone from this record — try the previous one
+            last4, _page = _policy_card_last4(data)
+            doc_id = d['id']
+            break                                    # first document we could actually open wins
         out['checked'] += 1
         conn.execute("UPDATE insureds SET policy_card_last4=?, policy_card_checked_at=?, "
-                     "policy_card_doc_id=? WHERE id=?", (last4 or '', now, doc['id'], r['id']))
+                     "policy_card_doc_id=? WHERE id=?", (last4 or '', now, doc_id, r['id']))
         conn.commit()                                # never hold a write across the next PDF fetch
-        if not last4:
-            out['no_file'].append(r['name'] + ' (לא נמצא כרטיס במסמך)')
+        if doc_id is None:
+            out['no_file'].append(r['name'] + ' (הקובץ לא זמין)')
+        elif not last4:
+            out['no_card'].append(r['name'])         # a real PDF with no payment block (not a card)
         elif last4 == ORG_CARD_LAST4:
             out['org'].append(r['name'])
         else:
@@ -2379,7 +2392,9 @@ def api_midwife_lookup():
                     'id_last4': (re.sub(r'\D', '', r['id_number'] or '') or '')[-4:],
                     'policy_last4': (r['policy_number'] or '')[-4:],
                     'period_end': _iso_date(r['period_end']) or (r['period_end'] or ''),
-                    'status': r['status'] or ''})
+                    'status': r['status'] or '',
+                    # Read off the policy PDF — the premium is collected from the organisation's card.
+                    'org_payment': (r['policy_card_last4'] or '') == ORG_CARD_LAST4})
         log_event(conn, event_key(r['id_number'], 'ins-%d' % r['id']),
                   'מנהלת המיילדות חיפשה את התיק (בוט)', 'system', kind='midwife_manager_access')
     conn.commit(); conn.close()
