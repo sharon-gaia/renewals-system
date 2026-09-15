@@ -18,6 +18,11 @@
       <i class="bi bi-heart-pulse{% if c.is_midwife %}-fill{% endif %}"></i>
       {% if c.is_midwife %} מיילדות{% endif %}
     </button>
+    {% if org_paid %}
+    <span class="badge bg-dark align-self-center" title="נקרא מהפוליסה: הפרמיה נגבית מכרטיס הארגון (****{{ org_card_last4 }})">
+      <i class="bi bi-building me-1"></i>תשלום ארגון
+    </span>
+    {% endif %}
     {% endif %}
     {% if c.brand in ('ווינר', 'אופיר') %}
     <div class="btn-group btn-group-sm" role="group" title="איזה וואטסאפ הלקוח רגיל לקבל ממנו הודעות">

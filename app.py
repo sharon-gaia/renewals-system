@@ -199,7 +199,8 @@ def inject_extra_fields():
     template (e.g. the customers list renders each row's dropdown by its brand)."""
     return {'extra_field_defs': EXTRA_FIELD_DEFS,
             'gw_status_options': GW_STATUS_OPTIONS,
-            'ofir_status_options': OFIR_STATUS_OPTIONS}
+            'ofir_status_options': OFIR_STATUS_OPTIONS,
+            'org_card_last4': ORG_CARD_LAST4}
 
 def normalize_id_number(s):
     """Israeli ID numbers are 9 digits — left-pad short numeric IDs with zeros
@@ -793,8 +794,16 @@ def init_db():
                      ('lr25_sent_at','TEXT'), ('lreom_sent_at','TEXT')]:
         if col not in existing:
             conn.execute(f"ALTER TABLE customers ADD COLUMN {col} {typ}")
-    if 'is_midwife' not in [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]:
+    _ins_cols = [r[1] for r in conn.execute("PRAGMA table_info(insureds)").fetchall()]
+    if 'is_midwife' not in _ins_cols:
         conn.execute("ALTER TABLE insureds ADD COLUMN is_midwife INTEGER")
+    # Who actually pays a midwife's premium — read off the policy PDF's payment block, not typed in
+    # (Sharon 2026-09-15). policy_card_last4 is what the document says; the "תשלום ארגון" badge is
+    # derived from it, so a change of organisation card needs no rescan.
+    for col, typ in [('policy_card_last4', 'TEXT'), ('policy_card_checked_at', 'TEXT'),
+                     ('policy_card_doc_id', 'INTEGER')]:
+        if col not in _ins_cols:
+            conn.execute(f"ALTER TABLE insureds ADD COLUMN {col} {typ}")
     # Bulk-send delivery log (bot reports back; upsert by wamid) + marketing opt-outs.
     conn.execute("""CREATE TABLE IF NOT EXISTS send_log (
         wamid TEXT PRIMARY KEY, cust_id INTEGER, send_type TEXT, status TEXT,
@@ -2253,6 +2262,98 @@ def _midwife_rows(conn, idn=None, name=None):
         "WHERE " + " AND ".join(where) + " AND (COALESCE(i.is_midwife,0)=1 OR EXISTS ("
         "  SELECT 1 FROM customers c WHERE ltrim(COALESCE(c.id_number,''),'0')=ltrim(COALESCE(i.id_number,''),'0')"
         "  AND COALESCE(c.is_midwife,0)=1)) ORDER BY i.name LIMIT 12", params).fetchall()
+
+ORG_CARD_LAST4 = '5198'                 # כרטיס הארגון — פוליסה שנגבית ממנו = "תשלום ארגון"
+# Harel prints the masked card as ************1234. Require a LONG asterisk run glued to exactly
+# four digits — these policies also use short asterisk rows as separators/decoration.
+_CARD_MASK_RE = re.compile(r'\*{8,}(\d{4})(?!\d)')
+
+def _policy_card_last4(doc):
+    """The last 4 digits of the card the premium is collected from, read off the policy PDF's
+    "אופן תשלום הפרמיה" block (Sharon 2026-09-15: "תבדוק את העמוד האחרון"). Harel prints it as
+    ************1234. The last page first — but the block sits a page earlier on some layouts, so
+    fall back to the rest of the document rather than miss it. Returns (last4, page_no) or (None,None)."""
+    data = None
+    fp = doc['filepath'] if 'filepath' in doc.keys() else None
+    if fp and os.path.exists(fp):
+        try:
+            with open(fp, 'rb') as fh:
+                data = fh.read()
+        except OSError:
+            data = None
+    if data is None:
+        key = doc['r2_key'] if 'r2_key' in doc.keys() else None
+        data = _r2_fetch(key) if key else None
+    if not data:
+        return None, None
+    try:
+        with pdfplumber.open(io.BytesIO(data)) as pdf:
+            n = len(pdf.pages)
+            order = [n - 1] + [i for i in range(n - 2, -1, -1)]
+            for i in order:
+                m = _CARD_MASK_RE.search(pdf.pages[i].extract_text() or '')
+                if m:
+                    return m.group(1), i + 1
+    except Exception as e:
+        print(f'[midwife-card] קריאת PDF נכשלה: {type(e).__name__}', flush=True)
+    return None, None
+
+def _scan_midwife_cards(conn, force=False, limit=60):
+    """Read the paying card off each midwife's newest policy and store its last 4 digits."""
+    rows = conn.execute(
+        "SELECT i.id, i.name, i.id_number, i.policy_card_last4, i.policy_card_doc_id FROM insureds i "
+        "WHERE COALESCE(i.is_midwife,0)=1 OR EXISTS (SELECT 1 FROM customers c "
+        "  WHERE ltrim(COALESCE(c.id_number,''),'0')=ltrim(COALESCE(i.id_number,''),'0') "
+        "  AND COALESCE(c.is_midwife,0)=1) ORDER BY i.name").fetchall()
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    out = {'checked': 0, 'org': [], 'other': [], 'no_file': [], 'skipped': 0}
+    for r in rows:
+        z = re.sub(r'\D', '', r['id_number'] or '').lstrip('0')
+        doc = conn.execute(
+            "SELECT pd.id, pd.filepath, pd.r2_key FROM policy_records pr "
+            "JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? "
+            "AND (pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%') "
+            "ORDER BY pd.received_at DESC, pr.id DESC LIMIT 1", (z,)).fetchone()
+        if not doc:
+            out['no_file'].append(r['name'])
+            continue
+        if not force and r['policy_card_doc_id'] == doc['id'] and (r['policy_card_last4'] or ''):
+            out['skipped'] += 1                      # already read from this very document
+            continue
+        if out['checked'] >= limit:
+            break
+        last4, page = _policy_card_last4(doc)
+        out['checked'] += 1
+        conn.execute("UPDATE insureds SET policy_card_last4=?, policy_card_checked_at=?, "
+                     "policy_card_doc_id=? WHERE id=?", (last4 or '', now, doc['id'], r['id']))
+        conn.commit()                                # never hold a write across the next PDF fetch
+        if not last4:
+            out['no_file'].append(r['name'] + ' (לא נמצא כרטיס במסמך)')
+        elif last4 == ORG_CARD_LAST4:
+            out['org'].append(r['name'])
+        else:
+            out['other'].append('%s (%s)' % (r['name'], last4))
+    return out
+
+@app.route('/api/midwives/card-scan', methods=['POST', 'GET'])
+def api_midwife_card_scan():
+    """Token: read the paying card off every midwife's newest policy PDF and flag the ones collected
+    from the organisation card. ?force=1 re-reads documents already checked."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    force = request.args.get('force') in ('1', 'true', 'yes')
+    try:
+        limit = max(1, min(200, int(request.args.get('limit', 60))))
+    except (TypeError, ValueError):
+        limit = 60
+    conn = get_db()
+    out = _scan_midwife_cards(conn, force=force, limit=limit)
+    conn.close()
+    out['org_card_last4'] = ORG_CARD_LAST4
+    out['org_count'] = len(out['org'])
+    print('[midwife-card] נסרקו %d · תשלום ארגון: %d' % (out['checked'], out['org_count']), flush=True)
+    return jsonify(out)
 
 @app.route('/api/midwife-lookup')
 def api_midwife_lookup():
@@ -3983,6 +4084,13 @@ def customer_detail(cid):
         "SELECT * FROM field_changes WHERE customer_id=? ORDER BY id DESC LIMIT 50", (cid,)
     ).fetchall()
     events = get_events(conn, event_key(customer['id_number'] if customer else '', 'cust-%d' % cid)) if customer else []
+    # "תשלום ארגון" — the card on this midwife's policy is the organisation's (read off the PDF).
+    org_paid = False
+    if customer and customer['is_midwife']:
+        _z = re.sub(r'\D', '', customer['id_number'] or '').lstrip('0')
+        _cc = conn.execute("SELECT policy_card_last4 FROM insureds WHERE "
+                           "ltrim(COALESCE(id_number,''),'0')=?", (_z,)).fetchone()
+        org_paid = bool(_cc and (_cc['policy_card_last4'] or '') == ORG_CARD_LAST4)
     conn.close()
     if not customer:
         flash('לקוח לא נמצא', 'danger')
@@ -4001,7 +4109,7 @@ def customer_detail(cid):
     return render_template('customer_detail.html', c=customer, month=month,
                            statuses=STATUSES, status_options=status_options_for(customer['brand']),
                            managers=managers, changes=changes, audit_labels=AUDIT_LABELS,
-                           events=events, wa_link=wa_link, lead_data=lead_data)
+                           events=events, wa_link=wa_link, lead_data=lead_data, org_paid=org_paid)
 
 
 def build_followup_wa_link(customer):
