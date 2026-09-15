@@ -2368,6 +2368,55 @@ def api_midwife_card_scan():
     print('[midwife-card] נסרקו %d · תשלום ארגון: %d' % (out['checked'], out['org_count']), flush=True)
     return jsonify(out)
 
+@app.route('/api/midwives/card-import', methods=['POST'])
+def api_midwife_card_import():
+    """Token: import cards read from the policy PDFs on Sharon's laptop (the מיילדות OneDrive folder).
+    Most midwives' documents were never archived to R2 and their server copy is long gone, so the
+    server-side scan can't see them — the delivered copies on the laptop can. Body:
+    {items:[{policy_number, last4}], force?} — only midwives are touched, and an existing value read
+    from a known document is kept unless force."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    items = d.get('items') or []
+    force = bool(d.get('force'))
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    out = {'updated': [], 'org': [], 'kept': 0, 'not_midwife': 0, 'unmatched': 0}
+    for it in items[:2000]:
+        pol = re.sub(r'\D', '', str(it.get('policy_number') or ''))
+        last4 = re.sub(r'\D', '', str(it.get('last4') or ''))[-4:]
+        if not pol or len(last4) != 4:
+            continue
+        r = conn.execute("SELECT id, name, id_number, is_midwife, policy_card_last4 FROM insureds "
+                         "WHERE REPLACE(COALESCE(policy_number,''),'/','')=? LIMIT 1", (pol,)).fetchone()
+        if not r:
+            r = conn.execute(
+                "SELECT i.id, i.name, i.id_number, i.is_midwife, i.policy_card_last4 FROM customers c "
+                "JOIN insureds i ON ltrim(COALESCE(i.id_number,''),'0')=ltrim(COALESCE(c.id_number,''),'0') "
+                "WHERE REPLACE(COALESCE(c.policy_number,''),'/','')=? LIMIT 1", (pol,)).fetchone()
+        if not r:
+            out['unmatched'] += 1
+            continue
+        is_mid = r['is_midwife'] or conn.execute(
+            "SELECT 1 FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=ltrim(?,'0') "
+            "AND COALESCE(is_midwife,0)=1 LIMIT 1", (r['id_number'],)).fetchone()
+        if not is_mid:
+            out['not_midwife'] += 1
+            continue
+        if (r['policy_card_last4'] or '') and not force:
+            out['kept'] += 1
+            continue
+        conn.execute("UPDATE insureds SET policy_card_last4=?, policy_card_checked_at=? WHERE id=?",
+                     (last4, now, r['id']))
+        out['updated'].append('%s (%s)' % (r['name'], last4))
+        if last4 == ORG_CARD_LAST4:
+            out['org'].append(r['name'])
+    conn.commit(); conn.close()
+    out['org_count'] = len(out['org'])
+    print('[midwife-card] יובאו %d · תשלום ארגון: %d' % (len(out['updated']), out['org_count']), flush=True)
+    return jsonify(out)
+
 @app.route('/api/midwife-lookup')
 def api_midwife_lookup():
     """Token: the midwives manager (allow-listed phone) looks a midwife up BY NAME. Returns a `ref`
