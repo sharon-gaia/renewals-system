@@ -1,11 +1,11 @@
 {% extends 'base.html' %}
-{% block title %} — טפסים שאינם חידושים{% endblock %}
+{% block title %} — שירות ללקוחות{% endblock %}
 {% block content %}
 
 <div class="d-flex flex-column flex-md-row justify-content-md-between align-items-start align-items-md-center mb-4 gap-2">
   <h4 class="mb-0">
     <i class="bi bi-inbox-fill text-secondary me-2"></i>
-    טפסים שאינם חידושים
+    שירות ללקוחות
     <span class="badge bg-secondary ms-2">{{ items|length }}</span>
   </h4>
   <div class="d-flex flex-wrap gap-2">
@@ -15,7 +15,9 @@
 </div>
 
 <p class="text-muted small mb-3">
-  תור עבודה לטפסים שהגיעו מהאתרים ולא הפכו לחידוש משויך.
+  כל פנייה של לקוח שאינה חלק מהחידוש של החודש הפעיל — מהאתרים ומוואטסאפ.
+  העמודה <strong>"למה כאן"</strong> מסבירה לכל שורה מדוע היא אינה בטיפול החודשי (חידוש של חודש קודם,
+  לקוח ותיק ללא חידוש פעיל, או לקוח שלא נמצא), ומקשרת ישירות לחידוש/לתיק.
   כל פריט מתקדם: <strong>ממתין לטיפול</strong> ← <strong>בטיפול</strong> ← <strong>טופל</strong>.
 </p>
 
@@ -70,6 +72,7 @@
         <th>נושא</th>
         <th>שם</th>
         <th>ת.ז / טלפון</th>
+        <th style="min-width:170px">למה כאן</th>
         <th style="min-width:180px">הערות שרון</th>
         <th>פעולות</th>
       </tr>
@@ -99,6 +102,17 @@
             class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="copyVal(event,this)"
             data-copy="{{ item.full.phone }}" title="העתק טלפון"><i class="bi bi-clipboard"></i></button></div>{% endif %}
           {% if not item.full.id_number and not item.full.phone %}<span class="text-muted">—</span>{% endif %}
+        </td>
+        <td class="small">
+          <span class="badge bg-{{ item.standing.tone }}-subtle text-{{ item.standing.tone }}-emphasis"
+                style="white-space:normal;text-align:right">{{ item.standing.text }}</span>
+          {% if item.standing.link %}
+          <a href="{{ item.standing.link }}" class="d-block text-decoration-none mt-1" onclick="event.stopPropagation();">
+            <i class="bi bi-box-arrow-up-left me-1"></i>{{ item.standing.link_label }}</a>
+          {% endif %}
+          {% if item.standing.warn %}
+          <div class="text-danger mt-1" title="{{ item.standing.warn }}"><i class="bi bi-exclamation-triangle-fill me-1"></i>שם לא תואם לת"ז</div>
+          {% endif %}
         </td>
         <td onclick="event.stopPropagation();">
           <input type="text" class="form-control form-control-sm form-note" data-id="{{ item.id }}"
@@ -155,7 +169,7 @@
         </td>
       </tr>
       <tr class="collapse" id="detail-{{ loop.index }}">
-        <td colspan="10" class="bg-light">
+        <td colspan="11" class="bg-light">
           <div class="p-3">
             {% if item.kind == 'policy' %}
               <div class="mb-2"><strong>מספר פוליסה:</strong> {{ item.full.policy_number }}</div>
@@ -175,6 +189,13 @@
                 <div class="col-md-3 card-mask" data-type="submission" data-id="{{ item.full.id }}"><strong>כרטיס:</strong>
                   <span class="card-val">{{ item.full.card_number | mask_card or '—' }}</span> {{ item.full.card_expiry or '' }}
                   {% if item.full.card_number %}<button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="revealCard(this)" title="הצג אשראי מלא"><i class="bi bi-eye"></i></button>{% endif %}</div>
+              </div>
+              <div class="alert alert-{{ item.standing.tone }} py-2 px-3 mt-2 mb-0 small">
+                <i class="bi bi-info-circle me-1"></i><strong>למה הטופס כאן ולא בחידוש של החודש:</strong>
+                {{ item.standing.text }}
+                {% if item.standing.link %}<a href="{{ item.standing.link }}" class="ms-2">{{ item.standing.link_label }} ←</a>{% endif %}
+                {% if item.standing.warn %}<div class="mt-1 text-danger">
+                  <i class="bi bi-exclamation-triangle-fill me-1"></i>{{ item.standing.warn }}</div>{% endif %}
               </div>
               {% if item.full.comments %}
               <div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">{{ item.full.comments }}</div>

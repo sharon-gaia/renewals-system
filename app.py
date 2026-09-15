@@ -4220,6 +4220,58 @@ WA_DOC_TYPES = {
     'service':       {'subject': 'וואטסאפ | פנייה כללית',      'category': 'פנייה כללית / שירות'},
 }
 
+def _form_standing(conn, d, act_id, mnames):
+    """Why is this form sitting in the catch-all instead of being part of this month's renewal work?
+
+    process_renewal_data() matches a website form ONLY against the ACTIVE month's customers, so
+    anyone renewing in an earlier month (or not in the system at all) lands here with no explanation
+    (Sharon 2026-09-15: "תרשום הסבר למה זה לא בטיפול של החודש הנוכחי... גם לקשר לחודש הקודם").
+    Returns {text, tone, link, link_label, warn} — tone maps to a Bootstrap subtle badge.
+    """
+    idn = re.sub(r'\D', '', d.get('id_number') or '').lstrip('0')
+    ph = re.sub(r'\D', '', d.get('phone') or '')[-9:]
+    PH = "REPLACE(REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ',''),'+972','0')"
+    NOT_TEST = "AND COALESCE(import_source,'')!='test_ofir' "
+    cust = None
+    if idn:
+        cust = conn.execute(
+            "SELECT id, name, month_id, status FROM customers WHERE ltrim(COALESCE(id_number,''),'0')=? "
+            + NOT_TEST + "ORDER BY month_id DESC, id DESC LIMIT 1", (idn,)).fetchone()
+    if not cust and len(ph) == 9:
+        cust = conn.execute(
+            f"SELECT id, name, month_id, status FROM customers WHERE {PH} LIKE ? "
+            + NOT_TEST + "ORDER BY month_id DESC, id DESC LIMIT 1", ('%' + ph,)).fetchone()
+    ins = None
+    if idn:
+        ins = conn.execute("SELECT id, name FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=? LIMIT 1",
+                           (idn,)).fetchone()
+    if not ins and len(ph) == 9:
+        ins = conn.execute(f"SELECT id, name FROM insureds WHERE {PH} LIKE ? ORDER BY id DESC LIMIT 1",
+                           ('%' + ph,)).fetchone()
+
+    if cust and act_id and cust['month_id'] == act_id:
+        out = {'text': 'בחידוש הנוכחי — %s' % (cust['status'] or 'ללא סטטוס'), 'tone': 'success',
+               'link': '/customer/%d' % cust['id'], 'link_label': 'פתח חידוש'}
+    elif cust:
+        out = {'text': 'חידוש %s · %s' % (mnames.get(cust['month_id'], 'חודש קודם'),
+                                          cust['status'] or 'ללא סטטוס'),
+               'tone': 'warning', 'link': '/customer/%d' % cust['id'], 'link_label': 'לחידוש הקודם'}
+    elif ins:
+        out = {'text': 'לקוח ותיק — אין לו חידוש בחודש הפעיל', 'tone': 'info',
+               'link': '/insured/%d' % ins['id'], 'link_label': 'תיק הלקוח'}
+    else:
+        out = {'text': 'לא נמצא לקוח במערכת (לפי ת"ז/טלפון)', 'tone': 'danger',
+               'link': None, 'link_label': None}
+    # A ת"ז that belongs to someone else is the classic "filled the form with a relative's ID".
+    master = (cust or ins or {})
+    mname = (master['name'] if master else '') or ''
+    fname = (d.get('name') or '').strip()
+    if mname and fname and not (set(re.findall(r'[֐-׿]+', mname)) &
+                                set(re.findall(r'[֐-׿]+', fname))):
+        out['warn'] = 'השם בטופס (%s) שונה מהשם הרשום על הת"ז (%s)' % (fname, mname)
+    return out
+
+
 def guess_category(subject, source):
     """Rough auto-tag for the 'other forms' catch-all — a hint, not a strict classifier."""
     text = subject or ''
@@ -4266,12 +4318,16 @@ def other_forms():
         where, params = "status IN (%s) " % ','.join('?' * len(FORM_QUEUE_STATUSES)), list(FORM_QUEUE_STATUSES)
     else:
         where, params = "status IN ('ממתין','בטיפול') ", []
+    _act = conn.execute("SELECT id FROM months WHERE is_active=1 ORDER BY id DESC LIMIT 1").fetchone()
+    _act_id = _act['id'] if _act else None
+    _mnames = {m['id']: m['name'] for m in conn.execute("SELECT id, name FROM months").fetchall()}
     for r in conn.execute(
         f"SELECT * FROM unmatched_submissions WHERE {where}" + not_monitor + bc +
         " ORDER BY received_at DESC", params + bp
     ).fetchall():
         d = dict(r)
         rows.append({
+            'standing': _form_standing(conn, d, _act_id, _mnames),
             'id': d['id'], 'received_at': d['received_at'], 'subject': d['subject'],
             'title': d['name'] or '(ללא שם)', 'detail': d['id_number'] or d['phone'] or '',
             'source': 'טופס', 'category': guess_category(d['subject'], 'form'),
