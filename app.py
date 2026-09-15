@@ -2136,6 +2136,35 @@ def api_policy_pdf_lookup():
         return jsonify({'error': 'unauthorized'}), 403
     idn = re.sub(r'\D', '', request.args.get('id_number', '')).lstrip('0')
     phone_in = re.sub(r'\D', '', request.args.get('phone', ''))
+    # Manager path (midwives only) — an allow-listed manager pulls a midwife's policy with the signed
+    # `ref` from /api/midwife-lookup instead of the owner-lock ת"ז↔phone match. See the block below
+    # api_policy_pdf_lookup for the rules; every pull is logged on the midwife's file.
+    mgr = request.args.get('manager_phone') or ''
+    ref = request.args.get('ref') or ''
+    if mgr or ref:
+        conn = get_db()
+        z = _mw_unref(ref)
+        if not _midwife_manager_ok(conn, mgr) or not z or not _midwife_rows(conn, idn=z):
+            conn.close()
+            print('[midwife] נדחתה משיכת פוליסה (מספר לא מורשה / ref לא תקף)', flush=True)
+            return jsonify({'found': False, 'authorized': False}), 403
+        row = _midwife_rows(conn, idn=z)[0]
+        log_event(conn, event_key(row['id_number'], 'ins-%d' % row['id']),
+                  'מנהלת המיילדות משכה את הפוליסה (בוט)', 'system', kind='midwife_manager_access')
+        conn.commit()
+        docs = conn.execute(
+            "SELECT pd.filename, pd.filepath, pd.r2_key FROM policy_records pr "
+            "JOIN policy_documents pd ON pd.id=pr.policy_document_id "
+            "WHERE ltrim(COALESCE(pr.insured_id,''),'0')=? "
+            "AND (pr.doc_type_label LIKE '%חדש%' OR pr.doc_type_label LIKE '%חידוש%') "
+            "ORDER BY pd.received_at DESC, pr.id DESC", (z,)).fetchall()
+        conn.close()
+        for r in docs:
+            nm = re.sub(r'[\r\n]+', ' ', (r['filename'] or 'policy.pdf')).strip() or 'policy.pdf'
+            resp = _serve_policy_doc(r, nm)
+            if resp is not None:
+                return resp
+        return jsonify({'found': False, 'reason': 'no server-side file'}), 404
     if not idn or not phone_in:
         return jsonify({'found': False}), 404
     def last9(p):
@@ -2162,6 +2191,100 @@ def api_policy_pdf_lookup():
         if resp is not None:
             return resp
     return jsonify({'found': False, 'reason': 'no server-side file'}), 404
+
+
+# ── מנהלת תחום המיילדות: חיפוש מיילדת לפי שם ──────────────────────────────────────────────────
+# Sharon approved this explicitly on 2026-09-15 ("כן — כולל קובץ הפוליסה", scope: only is_midwife,
+# log every retrieval). It is the ONLY path where one person reaches another person's policy, so it
+# is narrow by construction: the requester's phone must be on the allow-list, only insureds flagged
+# is_midwife are visible, the ת"ז never leaves the server (an opaque signed ref is handed out
+# instead, so it can't leak through the bot's message log), and every hit is written to that
+# midwife's event log.
+MIDWIFE_MANAGER_PHONES = ('972508455242',)      # יובל, מנהלת תחום המיילדות
+MIDWIFE_REF_TTL = 24 * 3600                     # a ref outlives a slow WhatsApp conversation
+
+def _midwife_manager_ok(conn, phone):
+    p = re.sub(r'\D', '', phone or '')[-9:]
+    if len(p) < 9:
+        return False
+    allowed = {re.sub(r'\D', '', x)[-9:] for x in MIDWIFE_MANAGER_PHONES}
+    # app_kv 'midwife_manager_phones' (comma-separated) adds managers without a deploy.
+    for x in (_kv_get(conn, 'midwife_manager_phones', '') or '').split(','):
+        d = re.sub(r'\D', '', x)[-9:]
+        if len(d) == 9:
+            allowed.add(d)
+    return p in allowed
+
+def _mw_ref(idn):
+    """Opaque, signed, expiring handle for one midwife's ת"ז — what the bot gets instead of the ת"ז."""
+    import base64, hashlib, hmac
+    raw = '%s|%d' % (idn, int(time.time()) + MIDWIFE_REF_TTL)
+    sig = hmac.new(app.secret_key.encode(), raw.encode(), hashlib.sha256).hexdigest()[:20]
+    return base64.urlsafe_b64encode(('%s|%s' % (raw, sig)).encode()).decode().rstrip('=')
+
+def _mw_unref(ref):
+    import base64, hashlib, hmac
+    try:
+        s = (ref or '') + '=' * (-len(ref or '') % 4)
+        idn, exp, sig = base64.urlsafe_b64decode(s.encode()).decode().split('|')
+        raw = '%s|%s' % (idn, exp)
+        good = hmac.new(app.secret_key.encode(), raw.encode(), hashlib.sha256).hexdigest()[:20]
+        if not hmac.compare_digest(sig, good) or int(exp) < int(time.time()):
+            return ''
+        return re.sub(r'\D', '', idn).lstrip('0')
+    except Exception:
+        return ''
+
+def _midwife_rows(conn, idn=None, name=None):
+    """Midwives (is_midwife on the insured master OR on any customer row) matching a ת"ז or a name.
+    Name matching is per-word and order-free — the master stores "משפחה פרטי", people type either."""
+    where, params = [], []
+    if idn:
+        where.append("ltrim(COALESCE(i.id_number,''),'0')=?")
+        params.append(idn)
+    for w in re.split(r'\s+', (name or '').strip()):
+        if len(w) >= 2:
+            where.append("COALESCE(i.name,'') LIKE ?")
+            params.append('%' + w + '%')
+    if not where:
+        return []
+    return conn.execute(
+        "SELECT i.id, i.id_number, i.name, i.status, i.period_end, i.policy_number FROM insureds i "
+        "WHERE " + " AND ".join(where) + " AND (COALESCE(i.is_midwife,0)=1 OR EXISTS ("
+        "  SELECT 1 FROM customers c WHERE ltrim(COALESCE(c.id_number,''),'0')=ltrim(COALESCE(i.id_number,''),'0')"
+        "  AND COALESCE(c.is_midwife,0)=1)) ORDER BY i.name LIMIT 12", params).fetchall()
+
+@app.route('/api/midwife-lookup')
+def api_midwife_lookup():
+    """Token: the midwives manager (allow-listed phone) looks a midwife up BY NAME. Returns a `ref`
+    per match — feed it back to /api/policy-pdf?ref=…&manager_phone=… to get the PDF. Never returns
+    a full ת"ז."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    name = (request.args.get('name') or '').strip()
+    who = request.args.get('requester_phone') or request.args.get('manager_phone') or ''
+    conn = get_db()
+    if not _midwife_manager_ok(conn, who):
+        conn.close()
+        print('[midwife] נדחתה בקשת חיפוש ממספר לא מורשה', flush=True)
+        return jsonify({'authorized': False, 'matches': []}), 403
+    if len(name) < 2:
+        conn.close(); return jsonify({'authorized': True, 'matches': []})
+    rows = _midwife_rows(conn, name=name)
+    out = []
+    for r in rows:
+        idn = re.sub(r'\D', '', r['id_number'] or '').lstrip('0')
+        out.append({'ref': _mw_ref(idn), 'name': r['name'],
+                    'id_last4': (re.sub(r'\D', '', r['id_number'] or '') or '')[-4:],
+                    'policy_last4': (r['policy_number'] or '')[-4:],
+                    'period_end': _iso_date(r['period_end']) or (r['period_end'] or ''),
+                    'status': r['status'] or ''})
+        log_event(conn, event_key(r['id_number'], 'ins-%d' % r['id']),
+                  'מנהלת המיילדות חיפשה את התיק (בוט)', 'system', kind='midwife_manager_access')
+    conn.commit(); conn.close()
+    print('[midwife] חיפוש "%s" → %d התאמות' % (name, len(out)), flush=True)
+    return jsonify({'authorized': True, 'matches': out})
+
 
 def _make_dummy_pdf(title):
     """Build a minimal valid single-page PDF (pure Python, no library — fitz isn't on the server)."""
