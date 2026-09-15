@@ -8181,6 +8181,61 @@ def api_wa_manual_sent():
     conn.commit(); conn.close()
     return jsonify({'ok': True})
 
+def _bot_api(path, method='GET', payload=None, timeout=12):
+    """Call the bot's own API (mute state). Key lives in the environment, never in the browser.
+    Returns (ok, data). ok=False with data={'configured': False} when the env isn't set."""
+    base = (os.environ.get('BOT_BASE') or '').strip().rstrip('/')
+    key = (os.environ.get('NOTIFY_KEY') or '').strip()
+    if not base or not key:
+        return False, {'configured': False}
+    import urllib.request, urllib.error
+    req = urllib.request.Request(
+        base + path, method=method,
+        data=(json.dumps(payload).encode() if payload is not None else None),
+        headers={'x-api-key': key, 'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return True, json.loads(r.read().decode('utf-8') or '{}')
+    except Exception as e:
+        print('[bot-api] %s %s: %s' % (method, path, type(e).__name__), flush=True)
+        return False, {'configured': True, 'error': type(e).__name__}
+
+@app.route('/api/wa/mute-status')
+def api_wa_mute_status():
+    """Session: is the bot muted for this customer (so Sharon knows whether it will answer over him)?
+    The bot mutes on ANY human reply — ours, his own from the phone app, or a proactive send."""
+    if not session.get('user_id'):
+        return jsonify({'error': 'unauthorized'}), 403
+    ph = _policy_to972(request.args.get('phone', ''))
+    if len(ph) < 11:
+        return jsonify({'configured': True, 'muted': None})
+    ok, d = _bot_api('/api/mute-status?phone=' + ph)
+    if not ok:
+        return jsonify(d)
+    return jsonify({'configured': True, 'muted': d.get('muted'), 'muted_until': d.get('muted_until'),
+                    'minutes_left': d.get('minutes_left'), 'state': d.get('state')})
+
+@app.route('/admin/wa-unmute', methods=['POST'])
+@login_required
+@admin_required
+def admin_wa_unmute():
+    """Lift the bot's 24h mute for one customer, so it answers them again."""
+    d = request.get_json(silent=True) or {}
+    ph = _policy_to972(d.get('phone', ''))
+    if len(ph) < 11:
+        return jsonify({'ok': False, 'error': 'מספר לא תקין'}), 400
+    ok, res = _bot_api('/notify-clear', method='POST', payload={'phone': ph})
+    if not ok:
+        return jsonify({'ok': False, 'error': ('הבוט לא מוגדר בשרת (BOT_BASE/NOTIFY_KEY)'
+                                               if res.get('configured') is False else 'הבוט לא הגיב')}), 502
+    who = session.get('display_name') or session.get('username') or 'admin'
+    if d.get('id_number'):
+        conn = get_db()
+        log_event(conn, event_key(d.get('id_number'), 'unmute'),
+                  'בוטלה השתקת הבוט — הבוט יענה שוב ללקוח', who, kind='manual_wa')
+        conn.commit(); conn.close()
+    return jsonify({'ok': True, 'was_muted': res.get('was_muted'), 'muted': res.get('muted')})
+
 @app.route('/api/wa/manual-history')
 def api_wa_manual_history():
     """Session: manual messages sent to one phone, newest first (shown on the customer card)."""

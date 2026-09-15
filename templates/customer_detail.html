@@ -198,7 +198,12 @@
     <div class="card border-0 shadow-sm mb-3" id="wa-reply">
       <div class="card-header bg-light fw-bold d-flex justify-content-between align-items-center">
         <span><i class="bi bi-whatsapp text-success me-1"></i>מענה ללקוח בוואטסאפ</span>
-        <span id="wa-window-badge" class="badge bg-secondary">בודק חלון...</span>
+        <span class="d-flex gap-1 align-items-center">
+          <span id="wa-mute-badge" class="badge bg-light text-muted border d-none"></span>
+          <button id="wa-unmute-btn" class="btn btn-outline-secondary btn-sm py-0 d-none"
+                  onclick="unmuteBot()" title="הבוט מושתק על הלקוח הזה — לחץ כדי שיחזור לענות">בטל השתקה</button>
+          <span id="wa-window-badge" class="badge bg-secondary">בודק חלון...</span>
+        </span>
       </div>
       <div class="card-body">
         <textarea id="wa-body" class="form-control form-control-sm" rows="3"
@@ -423,7 +428,44 @@
       }).catch(function () {});
   };
   loadWaHistory();
+  // Is the bot muted on this customer? It mutes on ANY human reply — ours, Sharon's from the phone
+  // app, or a proactive send — so this is the real answer to "will the bot talk over me?".
+  window.loadMuteState = function () {
+    fetch('/api/wa/mute-status?phone=' + encodeURIComponent(phone))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var b = document.getElementById('wa-mute-badge');
+        var btn = document.getElementById('wa-unmute-btn');
+        if (d.configured === false || d.muted === null || d.muted === undefined) {
+          b.classList.add('d-none'); btn.classList.add('d-none'); return;
+        }
+        b.classList.remove('d-none');
+        if (d.muted) {
+          var mins = d.minutes_left || 0;
+          var left = mins > 60 ? (Math.round(mins / 60) + ' שעות') : (mins + ' דק\u0027');
+          b.className = 'badge bg-dark'; b.textContent = 'הבוט מושתק · ' + left;
+          btn.classList.remove('d-none');
+        } else {
+          b.className = 'badge bg-light text-muted border'; b.textContent = 'הבוט פעיל';
+          btn.classList.add('d-none');
+        }
+      }).catch(function () {});
+  };
+  loadMuteState();
 })();
+
+function unmuteBot() {
+  if (!confirm('לבטל את השתקת הבוט? הוא יחזור לענות ללקוח הזה.')) return;
+  fetch('/admin/wa-unmute', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone: {{ (c.phone or '') | tojson }},
+                           id_number: {{ (c.id_number or '') | tojson }} })
+  }).then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d.ok) { alert('לא בוטל: ' + (d.error || 'שגיאה')); return; }
+      loadMuteState();
+    }).catch(function () { alert('שגיאת תקשורת'); });
+}
 
 function sendWaMessage() {
   var ta = document.getElementById('wa-body');
@@ -450,6 +492,7 @@ function sendWaMessage() {
       }
       setTimeout(loadWaHistory, 1500);
       setTimeout(loadWaHistory, 15000);
+      setTimeout(loadMuteState, 15000);
     }).catch(function () { btn.disabled = false; alert('שגיאת תקשורת'); });
 }
 </script>
