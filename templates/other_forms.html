@@ -16,8 +16,8 @@
 
 <p class="text-muted small mb-3">
   כל פנייה של לקוח שאינה חלק מהחידוש של החודש הפעיל — מהאתרים ומוואטסאפ.
-  העמודה <strong>"למה כאן"</strong> מסבירה לכל שורה מדוע היא אינה בטיפול החודשי (חידוש של חודש קודם,
-  לקוח ותיק ללא חידוש פעיל, או לקוח שלא נמצא), ומקשרת ישירות לחידוש/לתיק.
+  ב<strong>בקשות חידוש</strong> בלבד מוצג בעמודה "למה כאן" מדוע הבקשה לא נכנסה לחידוש של החודש
+  (חידוש של חודש קודם, לקוח ותיק ללא חידוש פעיל, או לקוח שלא נמצא), עם קישור ישיר לחידוש/לתיק.
   כל פריט מתקדם: <strong>ממתין לטיפול</strong> ← <strong>בטיפול</strong> ← <strong>טופל</strong>.
 </p>
 
@@ -104,6 +104,7 @@
           {% if not item.full.id_number and not item.full.phone %}<span class="text-muted">—</span>{% endif %}
         </td>
         <td class="small">
+          {% if not item.standing %}<span class="text-muted">—</span>{% else %}
           <span class="badge bg-{{ item.standing.tone }}-subtle text-{{ item.standing.tone }}-emphasis"
                 style="white-space:normal;text-align:right">{{ item.standing.text }}</span>
           {% if item.standing.link %}
@@ -112,6 +113,7 @@
           {% endif %}
           {% if item.standing.warn %}
           <div class="text-danger mt-1" title="{{ item.standing.warn }}"><i class="bi bi-exclamation-triangle-fill me-1"></i>שם לא תואם לת"ז</div>
+          {% endif %}
           {% endif %}
         </td>
         <td onclick="event.stopPropagation();">
@@ -190,6 +192,7 @@
                   <span class="card-val">{{ item.full.card_number | mask_card or '—' }}</span> {{ item.full.card_expiry or '' }}
                   {% if item.full.card_number %}<button type="button" class="btn btn-link btn-sm p-0 ms-1 align-baseline" onclick="revealCard(this)" title="הצג אשראי מלא"><i class="bi bi-eye"></i></button>{% endif %}</div>
               </div>
+              {% if item.standing %}
               <div class="alert alert-{{ item.standing.tone }} py-2 px-3 mt-2 mb-0 small">
                 <i class="bi bi-info-circle me-1"></i><strong>למה הטופס כאן ולא בחידוש של החודש:</strong>
                 {{ item.standing.text }}
@@ -197,6 +200,7 @@
                 {% if item.standing.warn %}<div class="mt-1 text-danger">
                   <i class="bi bi-exclamation-triangle-fill me-1"></i>{{ item.standing.warn }}</div>{% endif %}
               </div>
+              {% endif %}
               {% if item.full.comments %}
               <div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">{{ item.full.comments }}</div>
               {% endif %}

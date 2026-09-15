@@ -4226,8 +4226,13 @@ def _form_standing(conn, d, act_id, mnames):
     process_renewal_data() matches a website form ONLY against the ACTIVE month's customers, so
     anyone renewing in an earlier month (or not in the system at all) lands here with no explanation
     (Sharon 2026-09-15: "תרשום הסבר למה זה לא בטיפול של החודש הנוכחי... גם לקשר לחודש הקודם").
-    Returns {text, tone, link, link_label, warn} — tone maps to a Bootstrap subtle badge.
+    Returns {text, tone, link, link_label, warn} — tone maps to a Bootstrap subtle badge — or None.
+
+    Only RENEWAL-REQUEST forms get this line (Sharon 2026-09-15): for someone who just wants a
+    certificate of insurance, "she isn't in this month's renewal" is noise, not information.
     """
+    if 'חידוש' not in (d.get('subject') or ''):
+        return None
     idn = re.sub(r'\D', '', d.get('id_number') or '').lstrip('0')
     ph = re.sub(r'\D', '', d.get('phone') or '')[-9:]
     PH = "REPLACE(REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ',''),'+972','0')"
