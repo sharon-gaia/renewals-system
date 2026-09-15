@@ -3329,6 +3329,41 @@ def api_mark_midwives():
     conn.commit(); conn.close()
     return jsonify({'ok': True, 'marked': res})
 
+@app.route('/api/mark-midwives/by-id', methods=['POST'])
+def api_mark_midwives_by_id():
+    """Token: flag an explicit list of ת"ז as midwives (Sharon 2026-09-15 — everyone with a policy in
+    the מיילדות folder). Body {ids:[...], brand?: 'ווינר', unmark?: false}. `brand` restricts the
+    sweep to that brand (all midwives are Winner), and the ids actually changed come back so the
+    operation can be undone by replaying them with unmark:true."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    ids = [re.sub(r'\D', '', str(x)).lstrip('0') for x in (d.get('ids') or [])]
+    ids = [x for x in ids if x][:2000]
+    want = 0 if d.get('unmark') else 1
+    brand = (d.get('brand') or '').strip()
+    conn = get_db()
+    changed, skipped_brand, missing = [], [], []
+    for z in ids:
+        r = conn.execute("SELECT id, name, brand, is_midwife FROM insureds "
+                         "WHERE ltrim(COALESCE(id_number,''),'0')=? LIMIT 1", (z,)).fetchone()
+        if not r:
+            missing.append(z)
+            continue
+        if brand and (r['brand'] or '') != brand:
+            skipped_brand.append('%s (%s)' % (r['name'], r['brand'] or '—'))
+            continue
+        if bool(r['is_midwife']) == bool(want):
+            continue
+        conn.execute("UPDATE insureds SET is_midwife=? WHERE id=?", (want, r['id']))
+        conn.execute("UPDATE customers SET is_midwife=? WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                     (want, z))
+        changed.append({'id_number': z, 'name': r['name']})
+    conn.commit(); conn.close()
+    print('[midwives] סימון ידני: %d שונו (want=%d)' % (len(changed), want), flush=True)
+    return jsonify({'ok': True, 'changed': changed, 'changed_count': len(changed),
+                    'skipped_brand': skipped_brand, 'not_found': missing})
+
 @app.route('/api/group-owner/policy-queue')
 def api_group_owner_policy_queue():
     """Token: policies of group-owner therapists that still need price redaction. The wa-sender (which
