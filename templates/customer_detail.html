@@ -193,6 +193,27 @@
       </div>
     </div>
 
+    {# מענה ידני בוואטסאפ — מחליף את אפליקציית WhatsApp Business שתיסגר כשווינר עובר ל-Cloud API #}
+    {% if c.phone %}
+    <div class="card border-0 shadow-sm mb-3" id="wa-reply">
+      <div class="card-header bg-light fw-bold d-flex justify-content-between align-items-center">
+        <span><i class="bi bi-whatsapp text-success me-1"></i>מענה ללקוח בוואטסאפ</span>
+        <span id="wa-window-badge" class="badge bg-secondary">בודק חלון...</span>
+      </div>
+      <div class="card-body">
+        <textarea id="wa-body" class="form-control form-control-sm" rows="3"
+                  placeholder="כתוב הודעה ללקוח... (נשלחת מהמספר של {{ c.brand or 'הסוכנות' }})"></textarea>
+        <div class="d-flex justify-content-between align-items-center mt-2 gap-2 flex-wrap">
+          <small class="text-muted" id="wa-hint">ההודעה נשלחת תוך דקה ונרשמת ביומן האירועים.</small>
+          <button class="btn btn-success btn-sm" id="wa-send-btn" onclick="sendWaMessage()">
+            <i class="bi bi-send me-1"></i>שלח
+          </button>
+        </div>
+        <div id="wa-history" class="mt-3 small"></div>
+      </div>
+    </div>
+    {% endif %}
+
     {% if events %}
     <!-- יומן אירועים — אינטראקציה עם הלקוח, צמוד לפרטים המרכזיים -->
     <div class="card border-0 shadow-sm">
@@ -368,6 +389,71 @@
 
 {% endblock %}
 {% block scripts %}
+<script>
+// Manual WhatsApp reply. The 24h service window decides whether a free-text message is even
+// possible — show it up front instead of letting the send fail later.
+(function () {
+  var phone = {{ (c.phone or '') | tojson }};
+  if (!phone) return;
+  window.loadWaHistory = function () {
+    fetch('/api/wa/manual-history?phone=' + encodeURIComponent(phone))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var b = document.getElementById('wa-window-badge');
+        if (d.window_open === true) {
+          b.className = 'badge bg-success'; b.textContent = 'חלון 24 שעות פתוח';
+        } else if (d.window_open === false) {
+          b.className = 'badge bg-warning text-dark'; b.textContent = 'מחוץ לחלון 24 שעות';
+          document.getElementById('wa-hint').textContent =
+            'הלקוח לא כתב ב-24 השעות האחרונות — וואטסאפ עשוי לדחות הודעה חופשית.';
+        } else {
+          b.className = 'badge bg-secondary'; b.textContent = 'חלון לא ידוע';
+        }
+        var h = document.getElementById('wa-history');
+        if (!d.items || !d.items.length) { h.innerHTML = ''; return; }
+        h.innerHTML = '<div class="fw-semibold mb-1">הודעות אחרונות</div>' + d.items.map(function (m) {
+          var st = m.sent_at ? '<span class="badge bg-success">נשלח ' + m.sent_at + '</span>'
+                 : m.failed_at ? '<span class="badge bg-danger" title="' + (m.error || '') + '">נכשל</span>'
+                 : '<span class="badge bg-secondary">ממתין</span>';
+          return '<div class="border-top py-1">' + st +
+                 ' <span class="text-muted">' + (m.created_by || '') + '</span><div>' +
+                 (m.body || '').replace(/[<>&]/g, '') + '</div>' +
+                 (m.failed_at && m.error ? '<div class="text-danger">' + m.error + '</div>' : '') + '</div>';
+        }).join('');
+      }).catch(function () {});
+  };
+  loadWaHistory();
+})();
+
+function sendWaMessage() {
+  var ta = document.getElementById('wa-body');
+  var btn = document.getElementById('wa-send-btn');
+  var body = (ta.value || '').trim();
+  if (!body) { alert('ההודעה ריקה'); return; }
+  if (!confirm('לשלוח את ההודעה ללקוח בוואטסאפ?')) return;
+  btn.disabled = true;
+  fetch('/admin/wa-message', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      phone: {{ (c.phone or '') | tojson }}, brand: {{ (c.brand or '') | tojson }},
+      id_number: {{ (c.id_number or '') | tojson }}, name: {{ (c.name or '') | tojson }},
+      body: body, source: 'customer'
+    })
+  }).then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      btn.disabled = false;
+      if (!res.ok || !res.j.ok) { alert('לא נשלח: ' + (res.j.error || 'שגיאה')); return; }
+      ta.value = '';
+      if (res.j.window_open === false) {
+        alert('ההודעה נכנסה לתור, אבל הלקוח לא כתב ב-24 השעות האחרונות — ייתכן שוואטסאפ ידחה אותה. ' +
+              'הסטטוס יופיע כאן תוך דקה.');
+      }
+      setTimeout(loadWaHistory, 1500);
+      setTimeout(loadWaHistory, 15000);
+    }).catch(function () { btn.disabled = false; alert('שגיאת תקשורת'); });
+}
+</script>
+
 <script>
 function copyField(btn) {
   const v = btn.getAttribute('data-copy') || '';

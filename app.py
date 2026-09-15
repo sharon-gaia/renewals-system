@@ -805,6 +805,17 @@ def init_db():
         if col not in _ins_cols:
             conn.execute(f"ALTER TABLE insureds ADD COLUMN {col} {typ}")
     # Bulk-send delivery log (bot reports back; upsert by wamid) + marketing opt-outs.
+    # Manual free-text WhatsApp messages Sharon sends from the dashboard. Needed because the Winner
+    # number moves to direct Cloud API and the WhatsApp Business phone app stops working — without
+    # this he loses the ability to answer a customer himself (bot request 2026-09-15).
+    conn.execute("""CREATE TABLE IF NOT EXISTS manual_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, id_number TEXT, name TEXT, phone TEXT, brand TEXT,
+        body TEXT, created_by TEXT, created_at TEXT, sent_at TEXT, failed_at TEXT,
+        error TEXT, error_code TEXT, wamid TEXT, source TEXT)""")
+    # Last inbound WhatsApp message per phone (last 9 digits) — the 24-hour service window. The bot
+    # pings /api/wa/inbound-ping; without it we can only find out by trying to send.
+    conn.execute("""CREATE TABLE IF NOT EXISTS wa_last_inbound (
+        phone9 TEXT PRIMARY KEY, at TEXT)""")
     conn.execute("""CREATE TABLE IF NOT EXISTS send_log (
         wamid TEXT PRIMARY KEY, cust_id INTEGER, send_type TEXT, status TEXT,
         error_code TEXT, sent_at TEXT, updated_at TEXT)""")
@@ -8031,6 +8042,161 @@ def api_policy_mail_fetch():
     return send_file(buf, mimetype='application/zip', as_attachment=True,
                      download_name='policy_mail.zip')
 
+# -- Manual WhatsApp message from the dashboard ------------------------------------------------
+# Sharon answers Winner customers by hand from the WhatsApp Business phone app. That app stops
+# working when the number moves to direct Cloud API, so the dashboard has to offer the same thing
+# (bot request 2026-09-15 - they called it blocking, and they are right).
+WA_WINDOW_HOURS = 24
+
+def _phone9(p):
+    return re.sub(r'\D', '', str(p or ''))[-9:]
+
+def _wa_window_state(conn, phone):
+    """(open?, last_inbound_at) for the 24-hour free-form window. Unknown -> open=None."""
+    p9 = _phone9(phone)
+    if len(p9) < 9:
+        return None, None
+    r = conn.execute("SELECT at FROM wa_last_inbound WHERE phone9=?", (p9,)).fetchone()
+    if not r or not r['at']:
+        return None, None
+    try:
+        t = datetime.datetime.strptime(r['at'][:16], '%Y-%m-%d %H:%M')
+    except ValueError:
+        return None, r['at']
+    return (datetime.datetime.now() - t) < datetime.timedelta(hours=WA_WINDOW_HOURS), r['at']
+
+def _touch_wa_inbound(conn, phone, when=None):
+    p9 = _phone9(phone)
+    if len(p9) < 9:
+        return
+    conn.execute("INSERT INTO wa_last_inbound(phone9, at) VALUES(?,?) "
+                 "ON CONFLICT(phone9) DO UPDATE SET at=excluded.at",
+                 (p9, when or datetime.datetime.now().strftime('%Y-%m-%d %H:%M')))
+
+@app.route('/api/wa/inbound-ping', methods=['POST'])
+def api_wa_inbound_ping():
+    """Token: the bot reports that a customer wrote to us, so the dashboard knows whether the
+    24-hour free-form window is open before Sharon types a reply. Body {phone, at?}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    ph = d.get('phone') or ''
+    if len(_phone9(ph)) < 9:
+        return jsonify({'ok': False, 'error': 'bad phone'}), 400
+    conn = get_db()
+    _touch_wa_inbound(conn, ph, (d.get('at') or '').strip() or None)
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/wa/window')
+def api_wa_window():
+    """Token/session: is the 24h window open for this phone? Used by the dashboard reply box."""
+    if not (_wa_api_authed() or session.get('user_id')):
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    open_, last = _wa_window_state(conn, request.args.get('phone', ''))
+    conn.close()
+    return jsonify({'open': open_, 'last_inbound_at': last, 'hours': WA_WINDOW_HOURS})
+
+@app.route('/admin/wa-message', methods=['POST'])
+@login_required
+@admin_required
+def admin_wa_message():
+    """Queue a free-text WhatsApp message to a customer. The local sender delivers it within the
+    24-hour window; outside it Meta refuses and we show why rather than failing silently."""
+    d = request.get_json(silent=True) or {}
+    body = (d.get('body') or '').strip()
+    phone = (d.get('phone') or '').strip()
+    if not body:
+        return jsonify({'ok': False, 'error': 'ההודעה ריקה'}), 400
+    if len(body) > 3500:
+        return jsonify({'ok': False, 'error': 'ההודעה ארוכה מדי (עד 3500 תווים)'}), 400
+    if len(_phone9(phone)) < 9:
+        return jsonify({'ok': False, 'error': 'אין מספר טלפון תקין ללקוח'}), 400
+    brand = (d.get('brand') or '').strip()
+    if not can_access_brand(brand):
+        return jsonify({'ok': False, 'error': 'אין הרשאה לסוכנות זו'}), 403
+    who = session.get('display_name') or session.get('username') or 'admin'
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    open_, last = _wa_window_state(conn, phone)
+    conn.execute("INSERT INTO manual_messages (id_number, name, phone, brand, body, created_by, "
+                 "created_at, source) VALUES (?,?,?,?,?,?,?,?)",
+                 (normalize_id_number(d.get('id_number')) or '', (d.get('name') or '').strip(),
+                  phone, brand, body, who, now, (d.get('source') or '').strip()))
+    mid = conn.execute("SELECT last_insert_rowid() AS i").fetchone()['i']
+    if d.get('id_number'):
+        log_event(conn, event_key(d.get('id_number'), 'manual-%d' % mid),
+                  'הודעה ידנית ללקוח: ' + body[:180], who, kind='manual_wa')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True, 'id': mid, 'window_open': open_, 'last_inbound_at': last})
+
+@app.route('/api/wa/manual-queue')
+def api_wa_manual_queue():
+    """Token: free-text messages waiting to go out. The quiet-hours/weekend rules do NOT apply --
+    this is Sharon answering a customer in person, the one case that overrides them."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, id_number, name, phone, brand, body FROM manual_messages "
+        "WHERE COALESCE(sent_at,'')='' AND COALESCE(failed_at,'')='' ORDER BY id LIMIT 20").fetchall()
+    conn.close()
+    return jsonify({'count': len(rows), 'items': [
+        {'id': r['id'], 'name': r['name'], 'phone': re.sub(r'\D', '', r['phone'] or ''),
+         'brand_key': _wa_brand_key(r['brand']), 'brand': r['brand'], 'body': r['body'],
+         'id_number': r['id_number']} for r in rows]})
+
+@app.route('/api/wa/manual-sent', methods=['POST'])
+def api_wa_manual_sent():
+    """Token: the sender reports the outcome. {id, ok, wamid?, error?, error_code?}."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    try:
+        mid = int(d.get('id'))
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'bad id'}), 400
+    now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+    conn = get_db()
+    r = conn.execute("SELECT id_number, phone, body FROM manual_messages WHERE id=?", (mid,)).fetchone()
+    if not r:
+        conn.close(); return jsonify({'ok': False, 'error': 'not found'}), 404
+    if d.get('ok'):
+        conn.execute("UPDATE manual_messages SET sent_at=?, wamid=?, error=NULL, error_code=NULL "
+                     "WHERE id=?", (now, (d.get('wamid') or '')[:120], mid))
+        note = 'ההודעה הידנית נשלחה בוואטסאפ'
+    else:
+        code = str(d.get('error_code') or '')
+        # 131047 / 470 = the 24-hour service window closed; say so in words, not a code.
+        msg = ('מחוץ לחלון 24 שעות — אפשר לשלוח רק תבנית מאושרת'
+               if code in ('131047', '470') else (str(d.get('error') or 'שליחה נכשלה'))[:300])
+        conn.execute("UPDATE manual_messages SET failed_at=?, error=?, error_code=? WHERE id=?",
+                     (now, msg, code[:20], mid))
+        note = 'שליחת ההודעה הידנית נכשלה: ' + msg
+    if r['id_number']:
+        log_event(conn, event_key(r['id_number'], 'manual-%d' % mid), note, 'system', kind='manual_wa')
+    conn.commit(); conn.close()
+    return jsonify({'ok': True})
+
+@app.route('/api/wa/manual-history')
+def api_wa_manual_history():
+    """Session: manual messages sent to one phone, newest first (shown on the customer card)."""
+    if not session.get('user_id'):
+        return jsonify({'error': 'unauthorized'}), 403
+    p9 = _phone9(request.args.get('phone', ''))
+    if len(p9) < 9:
+        return jsonify({'items': []})
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT id, body, created_by, created_at, sent_at, failed_at, error FROM manual_messages "
+        "WHERE REPLACE(REPLACE(COALESCE(phone,''),'-',''),' ','') LIKE ? ORDER BY id DESC LIMIT 15",
+        ('%' + p9,)).fetchall()
+    open_, last = _wa_window_state(conn, request.args.get('phone', ''))
+    conn.close()
+    return jsonify({'window_open': open_, 'last_inbound_at': last,
+                    'items': [dict(r) for r in rows]})
+
 @app.route('/api/backup-db')
 def backup_db():
     """Download the live DB for an off-site backup (token-authed)."""
@@ -11626,6 +11792,7 @@ def api_wa_inbound_doc():
         "comments, message_id, doc_r2_key, doc_filename, status) VALUES (?,?,?,?,?,?,?,?,?,?,?, 'ממתין')",
         (now, meta['subject'], name, idn, phone, email, brand, comments, mid, doc_key, doc_name))
     sid = conn.execute("SELECT id FROM unmatched_submissions WHERE message_id=?", (mid,)).fetchone()['id']
+    _touch_wa_inbound(conn, phone)     # the customer just wrote to us: the 24h window is open
     if idn:
         log_event(conn, event_key(idn, 'sub-%d' % sid),
                   f"התקבל בוואטסאפ: {meta['category']}" + (f" — {doc_name}" if doc_name else ''), 'system', kind='wa_inbound')
