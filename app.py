@@ -1871,8 +1871,9 @@ def api_policy_lookup():
     def last9(p):
         return re.sub(r'\D', '', str(p or ''))[-9:]
     conn = get_db()
-    ins = conn.execute("SELECT name, brand, phone, status, period_start, period_end, is_midwife "
-                       "FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?", (idn,)).fetchone()
+    ins = conn.execute("SELECT name, brand, phone, status, period_start, period_end, is_midwife, "
+                       "policy_card_last4 FROM insureds WHERE ltrim(COALESCE(id_number,''),'0')=?",
+                       (idn,)).fetchone()
     cust = conn.execute(
         "SELECT c.name, c.brand, c.phone, c.status, c.occupation, c.premium_last_year, c.is_midwife "
         "FROM customers c JOIN months m ON m.id=c.month_id "
@@ -1909,11 +1910,16 @@ def api_policy_lookup():
     r_amt = renewal_amount(is_mid, (cust['premium_last_year'] if cust else None))
     renewal = {'link': renewal_link(brand, is_mid)[0],
                'price': (f"{r_amt:,} ₪" if r_amt else None)}
+    # Who actually pays — read off the policy PDF's payment block. The bot must not offer a
+    # card-update flow to someone whose premium comes off the organisation's card (bot request
+    # 2026-09-15). Conservative default: False when we haven't read the document yet.
+    org_payment = bool(ins and (ins['policy_card_last4'] or '') == ORG_CARD_LAST4)
     conn.close()
     return jsonify({'found': True, 'name': name, 'brand': brand, 'is_midwife': is_mid,
                     'policy': {'status': status,
                                'period_start': _iso_date(period_start), 'period_end': _iso_date(period_end),
-                               'professions': professions, 'premium': _plain_amount(prem)},
+                               'professions': professions, 'premium': _plain_amount(prem),
+                               'org_payment': org_payment},
                     'renewal': renewal})
 
 # ── Cloudflare R2 — encrypted archive for past-policy PDFs ───────────────────────────────────
