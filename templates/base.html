@@ -39,15 +39,10 @@
         <li class="nav-item"><a class="nav-link" href="/"><i class="bi bi-house me-1"></i>דשבורד</a></li>
         <li class="nav-item"><a class="nav-link" href="/customers"><i class="bi bi-arrow-repeat me-1"></i>חידושים</a></li>
         {% if session.role in ('admin', 'superadmin') %}
-        <li class="nav-item dropdown">
-          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-inbox me-1"></i>פניות
-          </a>
-          <ul class="dropdown-menu">
-            <li><a class="dropdown-item" href="/admin/other-forms"><i class="bi bi-inbox me-2"></i>שירות ללקוחות</a></li>
-            <li><a class="dropdown-item" href="/admin/collection"><i class="bi bi-credit-card-2-back me-2"></i>בעיות גבייה</a></li>
-          </ul>
-        </li>
+        {# Sharon 2026-09-15: "פניות" → "שירות ללקוחות" (one link, no submenu), and collection
+           problems stand on their own — they are a separate operation, not a kind of enquiry. #}
+        <li class="nav-item"><a class="nav-link" href="/admin/other-forms"><i class="bi bi-inbox me-1"></i>שירות ללקוחות</a></li>
+        <li class="nav-item"><a class="nav-link" href="/admin/collection"><i class="bi bi-credit-card-2-back me-1"></i>בעיות גבייה</a></li>
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
             <i class="bi bi-bar-chart-line me-1"></i>דוחות
@@ -67,20 +62,18 @@
           <ul class="dropdown-menu">
             {% if can_issue_cert %}<li><a class="dropdown-item" href="/admin/insurance-cert"><i class="bi bi-file-earmark-check me-2"></i>אישור קיום ביטוח</a></li>{% endif %}
             <li><a class="dropdown-item" href="/admin/special-tracks"><i class="bi bi-diagram-3 me-2"></i>מסלולים מיוחדים</a></li>
+            {# שליחות moved in here (Sharon 2026-09-15) — the outgoing campaigns are his call alone. #}
+            {% if session.role == 'superadmin' %}
+            <li><hr class="dropdown-divider"></li>
+            <li><h6 class="dropdown-header">שליחות</h6></li>
+            <li><a class="dropdown-item" href="/admin/campaign"><i class="bi bi-megaphone me-2"></i>קמפיין</a></li>
+            <li><a class="dropdown-item" href="/send-approvals"><i class="bi bi-send-check me-2"></i>אישור שליחות</a></li>
+            {% endif %}
           </ul>
         </li>
         {% endif %}
         {% endif %}
         {% if session.role == 'superadmin' %}
-        <li class="nav-item dropdown">
-          <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown">
-            <i class="bi bi-send me-1"></i>שליחות
-          </a>
-          <ul class="dropdown-menu">
-            <li><a class="dropdown-item" href="/admin/campaign"><i class="bi bi-megaphone me-2"></i>קמפיין</a></li>
-            <li><a class="dropdown-item" href="/send-approvals"><i class="bi bi-send-check me-2"></i>אישור שליחות</a></li>
-          </ul>
-        </li>
         <li class="nav-item"><a class="nav-link" href="/admin"><i class="bi bi-gear me-1"></i>ניהול</a></li>
         {% endif %}
       </ul>
