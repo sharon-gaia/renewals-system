@@ -7997,11 +7997,16 @@ def api_policy_mail_fetch():
                 mid = (msg.get('Message-ID') or '').strip()
                 pdfs = []
                 for pp in msg.walk():
-                    if (pp.get_content_type() == 'application/pdf'
-                            or (pp.get_filename() or '').lower().endswith('.pdf')):
-                        b = pp.get_payload(decode=True)
-                        if b:
-                            pdfs.append(b)
+                    # Harel sends the policy as octet-stream with an RFC2047-encoded Hebrew name, so
+                    # matching on content-type/extension alone finds nothing — mirror the scanner's
+                    # rule (attachment OR octet-stream) and confirm by the %PDF magic bytes.
+                    cd = str(pp.get('Content-Disposition', ''))
+                    if 'attachment' not in cd and pp.get_content_type() not in (
+                            'application/pdf', 'application/octet-stream'):
+                        continue
+                    b = pp.get_payload(decode=True)
+                    if b and b[:5] == b'%PDF-':
+                        pdfs.append(b)
                 if pdfs:
                     found[mid] = max(pdfs, key=len)
                 else:
