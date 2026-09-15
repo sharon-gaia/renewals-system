@@ -7967,6 +7967,65 @@ def api_mask_existing_cards():
     conn.close()
     return jsonify({'ok': True, 'masked': total, 'by_column': by_col})
 
+@app.route('/api/policy/mail-fetch', methods=['POST'])
+def api_policy_mail_fetch():
+    """Token: pull the PDF attachment of specific policy e-mails straight from the mailbox and return
+    them as one ZIP (keyed by Message-ID). Built so the laptop can rebuild the מיילדות folder without
+    holding mail credentials — only Railway has them (Sharon 2026-09-15). ONE IMAP session per call,
+    max 30 messages; the caller paces the batches. Gmail load rules: [[gmail-imap-quota]]."""
+    if not _wa_api_authed():
+        return jsonify({'error': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    mids = [str(x).strip() for x in (d.get('message_ids') or []) if str(x).strip()][:30]
+    if not mids:
+        return jsonify({'error': 'need message_ids'}), 400
+    import zipfile
+    found, missing, nopdf = {}, [], []
+    try:
+        mail = imaplib.IMAP4_SSL(EMAIL_CONFIG['imap_server'], 993, timeout=45)
+        mail.login(EMAIL_CONFIG['username'], EMAIL_CONFIG['password'])
+        mail.select('"[Gmail]/All Mail"', readonly=True)
+        q = ' OR '.join('rfc822msgid:%s' % m.strip('<>') for m in mids)
+        typ, data = mail.uid('SEARCH', 'X-GM-RAW', '"%s"' % q)
+        uids = (data[0] or b'').split()
+        if uids:
+            typ, resp = mail.uid('FETCH', b','.join(uids), '(BODY.PEEK[])')
+            for part in resp:
+                if not isinstance(part, tuple):
+                    continue
+                msg = email_lib.message_from_bytes(part[1])
+                mid = (msg.get('Message-ID') or '').strip()
+                pdfs = []
+                for pp in msg.walk():
+                    if (pp.get_content_type() == 'application/pdf'
+                            or (pp.get_filename() or '').lower().endswith('.pdf')):
+                        b = pp.get_payload(decode=True)
+                        if b:
+                            pdfs.append(b)
+                if pdfs:
+                    found[mid] = max(pdfs, key=len)
+                else:
+                    nopdf.append(mid)
+        try:
+            mail.close()
+        except Exception:
+            pass
+        mail.logout()
+    except Exception as e:
+        print('[mail-fetch] %s: %s' % (type(e).__name__, e), flush=True)
+        return jsonify({'error': 'imap', 'detail': type(e).__name__}), 502
+    missing = [m for m in mids if m not in found and m not in nopdf]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_STORED) as z:
+        for mid, b in found.items():
+            z.writestr(re.sub(r'[^A-Za-z0-9._@-]', '_', mid) + '.pdf', b)
+        z.writestr('_index.json', json.dumps(
+            {'found': list(found), 'missing': missing, 'no_pdf': nopdf}, ensure_ascii=False))
+    buf.seek(0)
+    print('[mail-fetch] %d/%d מיילים נמשכו' % (len(found), len(mids)), flush=True)
+    return send_file(buf, mimetype='application/zip', as_attachment=True,
+                     download_name='policy_mail.zip')
+
 @app.route('/api/backup-db')
 def backup_db():
     """Download the live DB for an off-site backup (token-authed)."""
