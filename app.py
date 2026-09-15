@@ -2336,6 +2336,11 @@ def _scan_midwife_cards(conn, force=False, limit=60):
             doc_id = d['id']
             break                                    # first document we could actually open wins
         out['checked'] += 1
+        if not last4 and (r['policy_card_last4'] or ''):
+            # Never wipe a card we already know (e.g. imported from the laptop's copy) just because
+            # the server's copy of the document is gone or unreadable.
+            out['kept_known'] = out.get('kept_known', 0) + 1
+            continue
         conn.execute("UPDATE insureds SET policy_card_last4=?, policy_card_checked_at=?, "
                      "policy_card_doc_id=? WHERE id=?", (last4 or '', now, doc_id, r['id']))
         conn.commit()                                # never hold a write across the next PDF fetch
@@ -2356,6 +2361,17 @@ def api_midwife_card_scan():
     if not _wa_api_authed():
         return jsonify({'error': 'unauthorized'}), 403
     force = request.args.get('force') in ('1', 'true', 'yes')
+    if request.args.get('summary') in ('1', 'true', 'yes'):
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT name, COALESCE(policy_card_last4,'') AS c FROM insureds WHERE COALESCE(is_midwife,0)=1 "
+            "OR EXISTS (SELECT 1 FROM customers c2 WHERE ltrim(COALESCE(c2.id_number,''),'0')="
+            "ltrim(COALESCE(insureds.id_number,''),'0') AND COALESCE(c2.is_midwife,0)=1) ORDER BY name").fetchall()
+        conn.close()
+        return jsonify({'total': len(rows), 'org_card_last4': ORG_CARD_LAST4,
+                        'org': [r['name'] for r in rows if r['c'] == ORG_CARD_LAST4],
+                        'other': ['%s (%s)' % (r['name'], r['c']) for r in rows if r['c'] and r['c'] != ORG_CARD_LAST4],
+                        'unknown': [r['name'] for r in rows if not r['c']]})
     try:
         limit = max(1, min(200, int(request.args.get('limit', 60))))
     except (TypeError, ValueError):
